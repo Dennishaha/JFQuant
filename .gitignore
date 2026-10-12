@@ -1,0 +1,13 @@
+/target/
+.DS_Store
+*.dylib
+*.so
+*.dll
+*.a
+*.model
+*.parquet
+*.jsonl
+model.txt
+.jfquant/
+data/
+

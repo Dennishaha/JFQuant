@@ -1,0 +1,34 @@
+[package]
+name = "analytics-ml"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[[example]]
+name = "native_smoke"
+required-features = ["lightgbm-native"]
+
+[[example]]
+name = "factor_pipeline"
+required-features = ["lightgbm-native", "duckdb-native"]
+
+[features]
+default = []
+lightgbm-native = []
+duckdb-native = ["analytics-engine/duckdb-native"]
+
+[dependencies]
+analytics-core = { path = "../core" }
+analytics-engine = { path = "../engine", default-features = false }
+analytics-factor = { path = "../factor" }
+arrow-array.workspace = true
+arrow-schema.workspace = true
+chrono.workspace = true
+parquet.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+

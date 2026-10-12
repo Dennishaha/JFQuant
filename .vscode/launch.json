@@ -1,0 +1,49 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Rust: native smoke",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/examples/native_smoke",
+      "args": ["${workspaceFolder}/.jfquant/runs/native-smoke"],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "Rust: native smoke build",
+      "env": {
+        "LIGHTGBM_LIB_DIR": "${config:jfquant.lightgbmLibDir}",
+        "DYLD_LIBRARY_PATH": "${config:jfquant.lightgbmLibDir}:${env:DYLD_LIBRARY_PATH}"
+      }
+    },
+    {
+      "name": "Rust: factor pipeline",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/examples/factor_pipeline",
+      "args": [
+        "--market", "${config:jfquant.marketPath}",
+        "--universe", "${config:jfquant.universePath}",
+        "--universe-id", "csi500",
+        "--start", "2020-01-01",
+        "--end", "2025-12-31",
+        "--output", "${config:jfquant.outputPath}",
+        "--factor", "alpha_001",
+        "--factor", "alpha_002"
+      ],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "Rust: factor pipeline build",
+      "env": {
+        "DUCKDB_DOWNLOAD_LIB": "${config:jfquant.duckdbDownloadLib}",
+        "LIGHTGBM_LIB_DIR": "${config:jfquant.lightgbmLibDir}",
+        "DYLD_LIBRARY_PATH": "${config:jfquant.lightgbmLibDir}:${env:DYLD_LIBRARY_PATH}"
+      }
+    },
+    {
+      "name": "Rust: desktop app",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/analytics-desktop",
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "Rust: build desktop app"
+    }
+  ]
+}

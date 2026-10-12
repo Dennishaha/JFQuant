@@ -1,0 +1,17 @@
+[package]
+name = "analytics-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+duckdb-native = ["dep:duckdb"]
+duckdb-bundled = ["duckdb-native", "duckdb/bundled-cmake", "duckdb/parquet", "duckdb/json", "duckdb/icu"]
+
+[dependencies]
+analytics-core = { path = "../core" }
+chrono.workspace = true
+duckdb = { version = "1.10506.0", default-features = false, optional = true }
+thiserror.workspace = true
+

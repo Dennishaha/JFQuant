@@ -1,0 +1,48 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Rust: workspace tests",
+      "type": "shell",
+      "command": "cargo test --workspace",
+      "problemMatcher": "$rustc",
+      "group": "test"
+    },
+    {
+      "label": "Rust: workspace clippy",
+      "type": "shell",
+      "command": "cargo clippy --workspace --all-targets -- -D warnings",
+      "problemMatcher": "$rustc"
+    },
+    {
+      "label": "Rust: format check",
+      "type": "shell",
+      "command": "cargo fmt --all -- --check",
+      "problemMatcher": []
+    },
+    {
+      "label": "Rust: native smoke build",
+      "type": "shell",
+      "command": "cargo build -p analytics-ml --features lightgbm-native --example native_smoke",
+      "problemMatcher": "$rustc"
+    },
+    {
+      "label": "Rust: factor pipeline build",
+      "type": "shell",
+      "command": "cargo build -p analytics-ml --features lightgbm-native,duckdb-native --example factor_pipeline",
+      "problemMatcher": "$rustc",
+      "options": {
+        "env": {
+          "DUCKDB_DOWNLOAD_LIB": "${config:jfquant.duckdbDownloadLib}",
+          "LIGHTGBM_LIB_DIR": "${config:jfquant.lightgbmLibDir}"
+        }
+      }
+    },
+    {
+      "label": "Rust: build desktop app",
+      "type": "shell",
+      "command": "cargo build -p analytics-desktop",
+      "problemMatcher": "$rustc"
+    }
+  ]
+}

@@ -10,8 +10,8 @@
       "cwd": "${workspaceFolder}",
       "preLaunchTask": "Rust: native smoke build",
       "env": {
-        "LIGHTGBM_LIB_DIR": "${config:jfquant.lightgbmLibDir}",
-        "DYLD_LIBRARY_PATH": "${config:jfquant.lightgbmLibDir}:${env:DYLD_LIBRARY_PATH}"
+        "LIGHTGBM_LIB_DIR": "${env:LIGHTGBM_LIB_DIR}",
+        "DYLD_LIBRARY_PATH": "${env:LIGHTGBM_LIB_DIR}:${env:DYLD_LIBRARY_PATH}"
       }
     },
     {
@@ -33,8 +33,8 @@
       "preLaunchTask": "Rust: factor pipeline build",
       "env": {
         "DUCKDB_DOWNLOAD_LIB": "${config:jfquant.duckdbDownloadLib}",
-        "LIGHTGBM_LIB_DIR": "${config:jfquant.lightgbmLibDir}",
-        "DYLD_LIBRARY_PATH": "${config:jfquant.lightgbmLibDir}:${env:DYLD_LIBRARY_PATH}"
+        "LIGHTGBM_LIB_DIR": "${env:LIGHTGBM_LIB_DIR}",
+        "DYLD_LIBRARY_PATH": "${env:LIGHTGBM_LIB_DIR}:${env:DYLD_LIBRARY_PATH}"
       }
     },
     {

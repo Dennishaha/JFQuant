@@ -1,5 +1,13 @@
 {
   "version": "2.0.0",
+  "options": {
+    "cwd": "${workspaceFolder}",
+    "env": {
+      "DUCKDB_DOWNLOAD_LIB": "${config:jfquant.duckdbDownloadLib}",
+      "LIGHTGBM_LIB_DIR": "${env:LIGHTGBM_LIB_DIR}",
+      "DYLD_LIBRARY_PATH": "${env:LIGHTGBM_LIB_DIR}:${env:DYLD_LIBRARY_PATH}"
+    }
+  },
   "tasks": [
     {
       "label": "Rust: workspace tests",
@@ -30,18 +38,42 @@
       "label": "Rust: factor pipeline build",
       "type": "shell",
       "command": "cargo build -p analytics-ml --features lightgbm-native,duckdb-native --example factor_pipeline",
-      "problemMatcher": "$rustc",
-      "options": {
-        "env": {
-          "DUCKDB_DOWNLOAD_LIB": "${config:jfquant.duckdbDownloadLib}",
-          "LIGHTGBM_LIB_DIR": "${config:jfquant.lightgbmLibDir}"
-        }
-      }
+      "problemMatcher": "$rustc"
     },
     {
       "label": "Rust: build desktop app",
       "type": "shell",
       "command": "cargo build -p analytics-desktop",
+      "problemMatcher": "$rustc"
+    },
+    {
+      "label": "Rust: run native smoke (terminal)",
+      "type": "process",
+      "command": "cargo",
+      "args": ["run", "-p", "analytics-ml", "--features", "lightgbm-native", "--example", "native_smoke", "--", "${workspaceFolder}/.jfquant/runs/native-smoke"],
+      "problemMatcher": "$rustc"
+    },
+    {
+      "label": "Rust: run factor pipeline (terminal)",
+      "type": "process",
+      "command": "cargo",
+      "args": [
+        "run", "-p", "analytics-ml", "--features", "lightgbm-native,duckdb-native",
+        "--example", "factor_pipeline", "--",
+        "--market", "${config:jfquant.marketPath}",
+        "--universe", "${config:jfquant.universePath}",
+        "--universe-id", "csi500",
+        "--start", "2020-01-01", "--end", "2025-12-31",
+        "--output", "${config:jfquant.outputPath}",
+        "--factor", "alpha_001", "--factor", "alpha_002"
+      ],
+      "problemMatcher": "$rustc"
+    },
+    {
+      "label": "Rust: run desktop app (terminal)",
+      "type": "process",
+      "command": "cargo",
+      "args": ["run", "-p", "analytics-desktop"],
       "problemMatcher": "$rustc"
     }
   ]

@@ -1,11 +1,11 @@
 {
   "rust-analyzer.check.command": "clippy",
   "rust-analyzer.check.extraArgs": ["--workspace", "--all-targets", "--", "-D", "warnings"],
-  "jfquant.lightgbmLibDir": "${env:LIGHTGBM_LIB_DIR}",
+  "extensions.ignoreRecommendations": false,
   "jfquant.duckdbDownloadLib": "1",
-  "jfquant.marketPath": "${workspaceFolder}/data/market",
-  "jfquant.universePath": "${workspaceFolder}/data/universe",
-  "jfquant.outputPath": "${workspaceFolder}/.jfquant/runs/latest",
+  "jfquant.marketPath": "data/market",
+  "jfquant.universePath": "data/universe",
+  "jfquant.outputPath": ".jfquant/runs/latest",
   "files.exclude": {
     "**/target": true,
     "**/.jfquant": true

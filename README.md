@@ -42,5 +42,5 @@ The command writes `factors.parquet`, `factor_run_manifest.json`, `model.txt`, `
 
 ## VS Code 调试
 
-安装 Rust Analyzer 和 CodeLLDB 后，打开“运行和调试”面板即可使用 `.vscode/launch.json` 中的 `native smoke`、`factor pipeline` 和 `desktop app` 配置。路径、输出目录和 LightGBM 环境变量集中在 `.vscode/settings.json`；对应的测试、构建和 Clippy 任务见 `.vscode/tasks.json`。详细说明见 [.vscode/README.md](.vscode/README.md)。
+打开 workspace 后可按扩展推荐提示安装 Rust Analyzer 和 CodeLLDB；`lldb` 调试类型由 CodeLLDB 提供。随后从“运行和调试”面板使用 `native smoke`、`factor pipeline` 和 `desktop app` 配置。不安装调试扩展也可从“终端 → 运行任务”选择对应的 `(terminal)` 入口。数据路径和输出目录集中在 `.vscode/settings.json`，LightGBM 环境从 VS Code 进程读取；环境配置与验收步骤见 [.vscode/README.md](.vscode/README.md)。
 

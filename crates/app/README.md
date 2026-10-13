@@ -2,7 +2,7 @@
 
 ## 职责
 
-macOS-first egui shell for local Parquet analysis, SQL, Alpha191 factors, and LightGBM training. UI state is kept in state.rs, visual rules in theme.rs, panel views in panels.rs, and all long-running work in worker.rs.
+macOS-first egui shell for local Parquet analysis, SQL, Alpha191 factors, and LightGBM training. UI state is kept in state.rs, visual rules in theme.rs, workbench views in panels.rs and platform views in platform.rs. worker.rs adapts the shared analytics-workflow service; native execution and task lifecycle are owned by the backend.
 
 ## 层级结构
 
@@ -12,25 +12,28 @@ macOS-first egui shell for local Parquet analysis, SQL, Alpha191 factors, and Li
 | theme.rs | system light/dark preference、语义色、间距、CJK font |
 | state.rs | 表单状态、校验、分页 cursor、WorkerEvent reducer |
 | panels.rs | 数据、查询、因子、建模四个面板 |
-| worker.rs | 单线程持有 DuckDB connection 和 LightGBM handles |
+| worker.rs | 公共后台服务适配器；不持有DuckDB/LightGBM句柄 |
+| platform.rs | 工作区、数据版本、研究流程和运行记录界面 |
 | analytics-ml::pipeline | 组合市场加载、因子、训练、预测 |
 
 ## Worker 协议
 
 | 方向 | 消息 | 作用 |
 |---|---|---|
+| UI -> worker | ExecuteWorkflow / CancelTask | 模板化数据/研究请求及远端任务取消 |
 | UI -> worker | ScanDataset | Parquet footer 扫描 |
 | UI -> worker | DescribeQuery | 查询 schema |
 | UI -> worker | RunQuery | 临时结果快照上的隐藏行号分页 |
 | UI -> worker | ExportQuery | Parquet/CSV 导出 |
 | UI -> worker | RunPipeline | 完整因子训练流水线 |
 | UI -> worker | TrainFromCache | 从已有因子缓存重训 |
+| worker -> UI | WorkflowFinished | 版本、运行记录及研究/数据结果 |
 | worker -> UI | Started/Progress/Finished/Failed | 任务生命周期 |
 | worker -> UI | Unavailable | 后台退出、panic 或启动失败；禁用新任务，提示重启 |
 | worker -> UI | DatasetScanned/QueryDescribed/QueryPaged/Exported | 数据 payload；扫描结果携带实际 root，避免被运行中编辑的路径误标注 |
 | worker -> UI | PipelineFinished/TrainingFinished | 产物、metrics、importance、预测预览 |
 
-worker 线程独占 DuckDB 和 LightGBM 句柄。UI 只发送可移动的 request、读取 plain-data event，并通过 Arc<AtomicBool> 请求取消。任务事件带 UUID，reducer 会忽略过期 payload。
+服务worker线程独占DuckDB和LightGBM句柄。UI只发送request和读取plain-data event；本机取消标记由适配器转换为RPC，CLI提交的任务也可远端取消。任务事件带 UUID，reducer 会忽略过期 payload。
 
 `WorkerHandle::send` 返回 `Result<(), String>`，命令通道断开时由面板统一显示后台不可用提示。UI 同时检测事件通道断开，结束当前任务等待、将错误路由到所属面板并清除取消句柄；重复断开不重复写日志。
 
@@ -45,7 +48,7 @@ worker 线程独占 DuckDB 和 LightGBM 句柄。UI 只发送可移动的 reques
 | 任务边界以外的后台 panic | 线程入口捕获，回传 `Unavailable`；存在活动任务时按其类型显示错误并结束等待 |
 | 线程启动失败、命令发送失败、事件通道断开 | 显示后台不可用，禁用扫描/执行/Describe/分页/导出/因子运行/训练操作 |
 
-后台不可用时，顶部提供“重启后台”。点击后创建新的 worker 和新的命令/事件通道，清除不可用状态、分页游标与取消句柄；旧事件接收端被丢弃，不能污染新的任务。原有 SQL、路径、参数和已显示的结果保留，需要重新执行操作。后台不可用期间仍可切换面板和编辑表单；迟到的任务事件不会使已停止的后台重新变成“运行中”。
+后台不可用时，顶部提供“重启后台”。点击后重新连接服务，故障时重建服务worker，并替换UI命令/事件通道，清除不可用状态、分页游标与取消句柄；旧事件接收端被丢弃，不能污染新的任务。原有 SQL、路径、参数和已显示的结果保留，需要重新执行操作。后台不可用期间仍可切换面板和编辑表单；迟到的任务事件不会使已停止的后台重新变成“运行中”。
 
 两层 panic 边界使用 `catch_unwind`/`AssertUnwindSafe`，捕获后不继续使用可能已不一致的 mutable/native 状态。普通错误仍使用 `Result` 传播。此兜底针对 Rust 的 unwinding panic，不覆盖 `panic=abort`、原生库段错误、OOM/系统强制终止或 UI 线程 panic；Rust panic hook 仍会输出诊断，调试器的 Rust panic 断点仍可暂停。[Rust catch_unwind 文档](https://doc.rust-lang.org/std/panic/fn.catch_unwind.html)说明了捕获边界。
 
@@ -111,6 +114,7 @@ flowchart LR
     unset DUCKDB_LIB_DIR
     brew install lightgbm
     cargo check -p analytics-desktop --all-targets
+    cargo build -p analytics-desktop -p analytics-cli
     cargo run -p analytics-desktop
 
 没有 lib_lightgbm.dylib 时可以编译源码依赖，但最终链接和运行会失败；完整无原生检查见根 README。
@@ -162,5 +166,58 @@ VS Code 任务 `Rust: desktop interaction tests (nextest)` 运行同一套桌面
 在设置好 LightGBM 动态库的机器上补跑：
 
     DUCKDB_DOWNLOAD_LIB=1 cargo nextest run -p analytics-desktop
+    cargo build -p analytics-desktop -p analytics-cli
     cargo run -p analytics-desktop
 
+
+## 本地研究平台与公共后台
+
+保留数据、查询、因子、建模四工作台，新增研究流程及运行记录。首次启动在顶部选择工作区（推荐~/JFQuantWorkspace），保存于~/Library/Application Support/JFQuant/preferences.json；之后所有相对数据/产物路径从工作区解析，不依赖仓库或cwd。运行中禁用重复提交及切换工作区，参数/模板可编辑和保存，输入JSON不执行脚本。
+
+数据管理保留Parquet扫描，并提供候选版本检查、独立下载、登记、行情/公司行动列表、失败重试、日期补充和完整性明细。研究流程选择版本、日期、178项可用v4因子、滚动/训练/组合/资金/费用配置；模板默认5年训练、1年验证、次年测试，前50、每5交易日调仓、100万元和最新默认费率。12项公式隔离及缺真实三因子输入的030不能进入模板。使用Qlib二进制读取器，不转换全量行情为Parquet。
+
+行情和公司行动复核内容/来源/证据哈希，公司行动缺实际支付/上市日、来源冲突、特殊分配解释失败时显示逐项问题，记录blocked并在训练前停止，不推猜日期或切换旧近似。原价、整数股、T+1、分红送转与跨年账本由同一ml/core模块处理。运行记录显示阶段、日志、错误、冻结参数、产物和年度收益/IC/净值/费用；只读登记当前schema4严格结果；旧格式读取显示unsupported_result_format，旧文件不删除。
+
+App和独立jfquant连接同一工作区Unix socket服务，服务持锁并恢复interrupted记录；同时一个计算任务且无队列。界面显示CLI任务进度、结果、取消，业务与记录生命周期全在workflow。SQL快照按query_id隔离，其他客户端的SQL payload不覆盖App分页。关闭App不取消任务；首次前台CLI等待中断也不会SIGINT到服务，自动启动服务使用独立进程组。普通错误可重试，panic退役worker并在线程内销毁句柄。
+
+```mermaid
+flowchart LR
+  UI[egui六面板] --> ADAPTER[worker服务适配器]
+  CLI[jfquant] --> SERVICE[工作区服务及记录]
+  ADAPTER --> SERVICE
+  SERVICE --> WORKER[公共worker / TaskContext]
+  WORKER --> INPUT[下载 补充 核验]
+  INPUT --> CHECK[版本 / 公司行动准入]
+  CHECK -->|完整| MODEL[因子 模型 原价年度账本]
+  CHECK -->|缺项| BLOCKED[blocked / 明细]
+  MODEL --> OUTPUT[UUID结果]
+  OUTPUT --> SERVICE
+  SERVICE --> UI
+```
+
+data/、.jfquant/、target/内生成行情、缓存、模型、日志、run、原生库及安装包不提交Git；内置模板、采集实现、CLI、测试和打包脚本提交。目录/版本/记录/模板JSON契约及TaskRequest见[workflow README](../workflow/README.md)，日常命令和退出码见[CLI README](../cli/README.md)。开发启动须先同时构建App与CLI，或通过JFQUANT_CLI_BIN指定已安装的jfquant；VS Code任务已同步。底层native_smoke仅供开发FFI验收。
+
+## 自包含macOS内部试用包
+
+目标Apple Silicon、macOS 14及以上。packaging脚本、Info.plist和INSTALL.txt位于组件旁；所有源码下载、依赖库、签名App和DMG只生成到target。程序运行无需Codex、Cargo、Python、Homebrew或DYLD环境变量；联网调用macOS自带/usr/bin/curl。
+
+```bash
+# 仅开发构建电脑需要Rust、Command Line Tools、CMake和git。
+brew install cmake ninja
+crates/app/packaging/build-native.sh
+crates/app/packaging/package-macos.sh
+crates/app/packaging/verify-bundle.sh target/distribution/JFQuant.app
+codesign --verify --deep --strict target/distribution/JFQuant.app
+```
+
+build-native.sh固定LightGBM v4.6.0/LLVM OpenMP 20.1.8，重建arm64/macOS 14依赖；JFQUANT_NATIVE_BUILD_ROOT覆盖构建目录。package-macos.sh以独立Cargo target构建release App和jfquant，携带DuckDB 1.5.6、LightGBM、OpenMP及许可证，清除开发绝对路径并重写包内install name/rpath，核对架构和最低系统版本后本地签名。生成target/distribution/JFQuant.app及JFQuant-macos14-arm64.dmg和SHA256。安装包拖到Applications，升级不覆盖工作区；本地签名未做Developer ID/Apple公证，可信内部包首次打开方式见INSTALL.txt，不自动降低系统安全设置。
+
+程序--self-check OUTPUT在独立worker执行真实DuckDB查询、LightGBM小训练/24行预测。packaging/verify-cli.sh清空开发环境验收帮助、严格合成年度研究、标准因子流水线及停服后离线读取。合成输入通过“创建合成演示数据”或research demo生成，显式synthetic_fixture，1年训练/1年验证、2009—2010两年样本外、alpha_002、完整支付/上市日期；不代表真实市场收益。标准模板仍保持178项真实研究参数，合成输入与公开公司行动不能混用。
+
+## 当前接口验收
+
+egui覆盖版本更新、重复点击防护、取消、错误、模板保存、缺项明细、完整合成研究、结果加载和重启后历史。真实服务测试覆盖CLI任务显示/取消、标准请求双方完整结果和年度账本一致；旧结果显示格式错误并禁止展示其净值，其他记录继续正常读取。App不提供旧口径执行或旧命令适配，下载恢复使用标准请求和验证检查点。
+
+服务协议2，研究结果schema4；程序更新不改用户工作区。若旧服务仍在运行，先完成活动任务并通过原版本CLI停止空闲服务，再打开新版，协议不自动降级。另一台Apple Silicon/macOS 14实机安装、数据更新及离线查看验收仍待完成。
+
+本次清理验收：163项workspace nextest通过、0跳过；严格Clippy/Rustdoc、doctest、格式和差异检查通过。App/DMG已重建，包内正式研究、因子流水线和离线结果读取验证通过。复现命令见[workflow README](../workflow/README.md#2026-10-13-清理验收记录)，另一台实机验收待完成。

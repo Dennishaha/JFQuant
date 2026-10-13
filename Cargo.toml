@@ -7,6 +7,8 @@ members = [
     "crates/factor",
     "crates/ml",
     "crates/app",
+    "crates/workflow",
+    "crates/cli",
 ]
 
 [workspace.package]
@@ -29,4 +31,11 @@ serde_json = "1.0"
 sha2 = "0.10"
 thiserror = "2.0"
 uuid = { version = "1.18", features = ["serde", "v4"] }
+
+# Keep native research loops usable from the development/VS Code build.
+[profile.dev.package.analytics-factor]
+opt-level = 3
+
+[profile.dev.package.analytics-ml]
+opt-level = 2
 

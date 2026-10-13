@@ -1,6 +1,6 @@
 # VS Code 调试入口
 
-本目录提供可直接从“运行和调试”面板使用的任务和启动配置。先安装 Rust Analyzer 与 CodeLLDB 扩展；`factor_pipeline` 还需要本机可用的 LightGBM 动态库。
+本目录提供可直接从“运行和调试”面板使用的任务和启动配置。先安装 Rust Analyzer 与 CodeLLDB 扩展；后台jfquant需要开发用LightGBM/DuckDB。
 
 ## 首次打开与扩展提示
 
@@ -24,10 +24,10 @@ macOS 未配置 `code` 命令时，可在命令面板执行 `Shell Command: Inst
 - `Rust: workspace tests`：运行整个 workspace 测试。
 - `Rust: workspace clippy`：运行 `clippy` 严格检查。
 - `Rust: native smoke`：使用官方 LightGBM C API 运行 FFI 训练/预测 smoke test。
-- `Rust: factor pipeline`：从本地行情和历史股票池 Parquet 运行真实闭环。
-- `Rust: desktop app`：启动 egui 应用。
+- `Rust: jfquant CLI`：构建并调试独立CLI，默认展示帮助；业务参数通过正式子命令或请求JSON配置。
+- `Rust: desktop app`：同时构建analytics-desktop与analytics-cli，再启动egui应用；App自动调用同目录jfquant服务。
 
-不需要断点时，从“终端 → 运行任务”选择 `Rust: run native smoke (terminal)`、`Rust: run factor pipeline (terminal)` 或 `Rust: run desktop app (terminal)`。这些入口不需要 CodeLLDB。
+不需要断点时，从“终端 → 运行任务”选择 `Rust: run native smoke (terminal)` 或 `Rust: run desktop app (terminal)`。这些入口不需要 CodeLLDB。
 
 ## 环境与路径
 
@@ -48,14 +48,14 @@ code .
 - `DUCKDB_DOWNLOAD_LIB`：DuckDB native 开发构建的下载开关；VS Code 设置 `jfquant.duckdbDownloadLib` 默认传值 `1`，不影响系统 DuckDB 已安装的路径。
 - `DUCKDB_LIB_DIR`：自定义 DuckDB 动态库目录，必须包含对应目标平台的库文件；使用下载模式时不要设置为空字符串，使用 `unset DUCKDB_LIB_DIR`。桌面 rpath 默认指向当前构建 profile 的 `deps`，不扫描其他架构或版本缓存。
 
-行情、股票池和输出路径通过 `.vscode/settings.json` 的 `jfquant.marketPath`、`jfquant.universePath`、`jfquant.outputPath` 配置。支持相对于 workspace 根目录的路径或绝对路径；不要在这些值里嵌套 `${workspaceFolder}`。日期和因子参数分别在 `launch.json`、`tasks.json` 中修改。
+行情、股票池、日期和因子配置保存在完整PipelineRequest JSON或App表单；CLI使用jfquant factors run --request FILE提交。路径从所选JFQuant工作区解析，运行产物由后台分配UUID。launch.json的jfquant配置可修改为正式子命令；不再使用旧example参数。
 
 ## 验收
 
 - 新窗口打开 workspace，在扩展面板 `@recommended` 中可见 Rust Analyzer 与 CodeLLDB。
 - 启用 CodeLLDB 后，选择 `Rust: desktop app` 并按 F5，可在 Rust 源码断点处暂停。
 - 无 CodeLLDB 时，`Rust: run desktop app (terminal)` 仍可构建并启动应用。
-- 配置真实行情路径与 native library 环境后，分别运行 native smoke、factor pipeline，检查终端结果与 `.jfquant/runs/` 下产物。生成产物不得提交。
+- 配置真实行情路径与 native library 环境后，分别运行 native smoke 和 jfquant 标准因子流水线，检查终端结果与 `.jfquant/runs/` 下产物。生成产物不得提交。
 
 相关机制见 [VS Code 扩展推荐文档](https://code.visualstudio.com/docs/configure/extensions/extension-marketplace) 与 [CodeLLDB 官方说明](https://github.com/vadimcn/codelldb)。
 

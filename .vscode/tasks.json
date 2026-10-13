@@ -19,7 +19,7 @@
     {
       "label": "Rust: workspace tests",
       "type": "shell",
-      "command": "cargo test --workspace",
+      "command": "cargo nextest run --workspace",
       "problemMatcher": "$rustc",
       "group": "test"
     },
@@ -42,37 +42,25 @@
       "problemMatcher": "$rustc"
     },
     {
-      "label": "Rust: factor pipeline build",
-      "type": "shell",
-      "command": "cargo build -p analytics-ml --features lightgbm-native,duckdb-native --example factor_pipeline",
-      "problemMatcher": "$rustc"
-    },
-    {
       "label": "Rust: build desktop app",
       "type": "shell",
-      "command": "cargo build -p analytics-desktop",
+      "command": "cargo build -p analytics-desktop -p analytics-cli",
       "problemMatcher": "$rustc"
     },
     {
       "label": "Rust: run native smoke (terminal)",
       "type": "process",
       "command": "cargo",
-      "args": ["run", "-p", "analytics-ml", "--features", "lightgbm-native", "--example", "native_smoke", "--", "${workspaceFolder}/.jfquant/runs/native-smoke"],
-      "problemMatcher": "$rustc"
-    },
-    {
-      "label": "Rust: run factor pipeline (terminal)",
-      "type": "process",
-      "command": "cargo",
       "args": [
-        "run", "-p", "analytics-ml", "--features", "lightgbm-native,duckdb-native",
-        "--example", "factor_pipeline", "--",
-        "--market", "${config:jfquant.marketPath}",
-        "--universe", "${config:jfquant.universePath}",
-        "--universe-id", "csi500",
-        "--start", "2020-01-01", "--end", "2025-12-31",
-        "--output", "${config:jfquant.outputPath}",
-        "--factor", "alpha_001", "--factor", "alpha_002"
+        "run",
+        "-p",
+        "analytics-ml",
+        "--features",
+        "lightgbm-native",
+        "--example",
+        "native_smoke",
+        "--",
+        "${workspaceFolder}/.jfquant/runs/native-smoke"
       ],
       "problemMatcher": "$rustc"
     },
@@ -80,7 +68,18 @@
       "label": "Rust: run desktop app (terminal)",
       "type": "process",
       "command": "cargo",
-      "args": ["run", "-p", "analytics-desktop"],
+      "args": [
+        "run",
+        "-p",
+        "analytics-desktop"
+      ],
+      "dependsOn": "Rust: build desktop app",
+      "problemMatcher": "$rustc"
+    },
+    {
+      "label": "Rust: build jfquant CLI",
+      "type": "shell",
+      "command": "cargo build -p analytics-cli",
       "problemMatcher": "$rustc"
     }
   ]

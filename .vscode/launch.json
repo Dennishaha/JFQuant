@@ -6,33 +6,12 @@
       "type": "lldb",
       "request": "launch",
       "program": "${workspaceFolder}/target/debug/examples/native_smoke",
-      "args": ["${workspaceFolder}/.jfquant/runs/native-smoke"],
+      "args": [
+        "${workspaceFolder}/.jfquant/runs/native-smoke"
+      ],
       "cwd": "${workspaceFolder}",
       "preLaunchTask": "Rust: native smoke build",
       "env": {
-        "LIGHTGBM_LIB_DIR": "${env:LIGHTGBM_LIB_DIR}",
-        "DYLD_LIBRARY_PATH": "${env:LIGHTGBM_LIB_DIR}:${env:DYLD_LIBRARY_PATH}"
-      }
-    },
-    {
-      "name": "Rust: factor pipeline",
-      "type": "lldb",
-      "request": "launch",
-      "program": "${workspaceFolder}/target/debug/examples/factor_pipeline",
-      "args": [
-        "--market", "${config:jfquant.marketPath}",
-        "--universe", "${config:jfquant.universePath}",
-        "--universe-id", "csi500",
-        "--start", "2020-01-01",
-        "--end", "2025-12-31",
-        "--output", "${config:jfquant.outputPath}",
-        "--factor", "alpha_001",
-        "--factor", "alpha_002"
-      ],
-      "cwd": "${workspaceFolder}",
-      "preLaunchTask": "Rust: factor pipeline build",
-      "env": {
-        "DUCKDB_DOWNLOAD_LIB": "${config:jfquant.duckdbDownloadLib}",
         "LIGHTGBM_LIB_DIR": "${env:LIGHTGBM_LIB_DIR}",
         "DYLD_LIBRARY_PATH": "${env:LIGHTGBM_LIB_DIR}:${env:DYLD_LIBRARY_PATH}"
       }
@@ -47,6 +26,17 @@
       "preRunCommands": [
         "script [bp.SetEnabled(False) for bp in lldb.debugger.GetSelectedTarget().breakpoint_iter() if bp.MatchesName('cpp_exception')]"
       ]
+    },
+    {
+      "name": "Rust: jfquant CLI",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/jfquant",
+      "args": [
+        "--help"
+      ],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "Rust: build jfquant CLI"
     }
   ]
 }

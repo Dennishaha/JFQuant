@@ -1,0 +1,62 @@
+#!/bin/bash
+# Developer build script. Runtime app needs neither this script nor a compiler.
+set -euo pipefail
+repo_root="$(cd "$(dirname "$0")/../../.." && pwd)"
+native_root="${JFQUANT_NATIVE_BUILD_ROOT:-$repo_root/target/native-macos14}"
+package_root="$repo_root/target/package-macos14"
+bundle_root="$repo_root/target/distribution"
+app="$bundle_root/JFQuant.app"
+[ "$(uname -m)" = arm64 ] || { echo 'Apple Silicon build host required'; exit 1; }
+[ -f "$native_root/install/lib/lib_lightgbm.dylib" ] || "$repo_root/crates/app/packaging/build-native.sh"
+export MACOSX_DEPLOYMENT_TARGET=14.0
+export LIGHTGBM_LIB_DIR="$native_root/install/lib"
+export CARGO_TARGET_DIR="$package_root"
+# libduckdb-sys downloads its matching, pinned native release into the profile deps.
+unset DUCKDB_LIB_DIR
+export DUCKDB_DOWNLOAD_LIB=1
+cargo build --locked --manifest-path "$repo_root/Cargo.toml" -p analytics-desktop -p analytics-cli --release
+# Replace only the generated bundle, never a user workspace.
+mkdir -p "$bundle_root"
+if [ -d "$app" ]; then rm -rf "$app"; fi
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Frameworks" "$app/Contents/Resources/Licenses"
+cp "$package_root/release/analytics-desktop" "$package_root/release/jfquant" "$app/Contents/MacOS/"
+cp "$repo_root/crates/app/packaging/Info.plist" "$app/Contents/Info.plist"
+cp "$package_root/release/deps/libduckdb.dylib" "$app/Contents/Frameworks/"
+cp "$native_root/install/lib/lib_lightgbm.dylib" "$native_root/install/lib/libomp.dylib" "$app/Contents/Frameworks/"
+cp "$native_root/LightGBM/LICENSE" "$app/Contents/Resources/Licenses/LightGBM.txt"
+cp "$native_root/openmp-20.1.8.src/LICENSE.TXT" "$app/Contents/Resources/Licenses/OpenMP.txt"
+curl --fail --location --retry 3 --output "$app/Contents/Resources/Licenses/DuckDB.txt" https://raw.githubusercontent.com/duckdb/duckdb/v1.5.6/LICENSE
+for binary in "$app/Contents/MacOS/"* "$app/Contents/Frameworks/"*.dylib; do
+  chmod u+w "$binary"
+  case "$binary" in *.dylib) install_name_tool -id "@rpath/$(basename "$binary")" "$binary";; esac
+  while IFS= read -r dependency; do
+    case "$dependency" in
+      *lib_lightgbm.dylib|*libduckdb.dylib|*libomp.dylib)
+        install_name_tool -change "$dependency" "@rpath/$(basename "$dependency")" "$binary";;
+    esac
+  done < <(otool -L "$binary" | awk '/compatibility version/{print $1}')
+  while IFS= read -r rpath; do
+    install_name_tool -delete_rpath "$rpath" "$binary"
+  done < <(otool -l "$binary" | awk '/cmd LC_RPATH/{r=1;next}r && /path /{print $2;r=0}')
+  install_name_tool -add_rpath '@executable_path/../Frameworks' "$binary"
+  install_name_tool -add_rpath '@loader_path' "$binary"
+done
+"$repo_root/crates/app/packaging/verify-bundle.sh" "$app"
+for binary in "$app/Contents/Frameworks/"*.dylib; do codesign --force --sign - "$binary"; done
+codesign --force --sign - "$app/Contents/MacOS/jfquant"
+codesign --force --sign - "$app"
+codesign --verify --deep --strict "$app"
+mkdir -p "$bundle_root/self-check"
+env -i HOME="$bundle_root/self-check-home" PATH=/usr/bin:/bin "$app/Contents/MacOS/analytics-desktop" --self-check "$bundle_root/self-check" > "$bundle_root/self-check.json"
+"$repo_root/crates/app/packaging/verify-cli.sh" "$app" "$bundle_root/cli-check"
+# DMG contains only the app, install shortcut and source-controlled installation notes.
+stage="$bundle_root/dmg-root"
+if [ -d "$stage" ]; then rm -rf "$stage"; fi
+mkdir -p "$stage"
+cp -R "$app" "$stage/"
+ln -s /Applications "$stage/Applications"
+cp "$repo_root/crates/app/packaging/INSTALL.txt" "$stage/"
+hdiutil create -ov -volname JFQuant -srcfolder "$stage" -format UDZO "$bundle_root/JFQuant-macos14-arm64.dmg"
+shasum -a 256 "$bundle_root/JFQuant-macos14-arm64.dmg" > "$bundle_root/JFQuant-macos14-arm64.dmg.sha256"
+echo "App: $app"
+echo "DMG: $bundle_root/JFQuant-macos14-arm64.dmg"

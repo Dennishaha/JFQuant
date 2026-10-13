@@ -124,7 +124,11 @@ impl Harness {
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "worker did not report its result"
+                "worker did not report its result: active={:?} worker_error={:?} platform_error={:?} details={}",
+                self.app.state.active_task,
+                self.app.state.worker_error,
+                self.app.state.platform.error,
+                self.app.state.platform.details
             );
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
@@ -198,6 +202,7 @@ fn event_channel_disconnect_clears_active_task_and_cancel_without_repeated_logs(
             TaskKind::Describe | TaskKind::Query | TaskKind::Export => &h.app.state.query.error,
             TaskKind::Pipeline => &h.app.state.factor.error,
             TaskKind::Training => &h.app.state.model.error,
+            TaskKind::Workflow => &h.app.state.platform.error,
         };
         assert!(error.as_ref().unwrap().contains("后台连接已断开"));
         let log_count = h.app.state.messages.len();
@@ -896,12 +901,459 @@ fn training_rejects_nonfinite_negative_fractional_and_empty_parameters() {
 #[test]
 fn all_panels_render_under_light_and_dark_themes() {
     for preference in [egui::ThemePreference::Light, egui::ThemePreference::Dark] {
-        for panel in [Panel::Dataset, Panel::Query, Panel::Factor, Panel::Model] {
-            let mut h = Harness::new(panel);
+        for panel in [
+            Panel::Dataset,
+            Panel::Query,
+            Panel::Factor,
+            Panel::Model,
+            Panel::Research,
+            Panel::Runs,
+        ] {
+            let (mut h, _tmp) = platform_harness(panel);
             h.ctx.set_theme(preference);
             let output = h.frame(vec![]);
             assert!(!output.shapes.is_empty());
             assert!(h.commands.try_recv().is_err());
         }
     }
+}
+
+#[test]
+fn quarantined_factor_is_visible_disabled_and_excluded_from_bulk_selection() {
+    let mut h = Harness::new(Panel::Factor);
+    h.click("清空");
+    h.app.state.factor.filter = "alpha_054".into();
+    h.click("全选筛选结果");
+    assert!(h.app.state.factor.selected.is_empty());
+    h.app.state.factor.filter.clear();
+    h.click("全选筛选结果");
+    assert_eq!(h.app.state.factor.selected.len(), 179);
+    for id in analytics_factor::audit::quarantined_ids() {
+        assert!(!h.app.state.factor.selected.contains(&id));
+    }
+}
+
+fn platform_harness(panel: Panel) -> (Harness, tempfile::TempDir) {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = analytics_workflow::Workspace::open(tmp.path()).unwrap();
+    let mut h = Harness::new(panel);
+    h.app.state.platform.root_input = workspace.root().display().to_string();
+    h.app.state.platform.lease = Some(workspace.lease().unwrap());
+    h.app.state.platform.workspace = Some(workspace);
+    (h, tmp)
+}
+#[test]
+fn platform_data_update_disables_double_submit_and_supports_cancel() {
+    let (mut h, _tmp) = platform_harness(Panel::Dataset);
+    h.click("检查行情更新");
+    let command = h.commands.try_recv().unwrap();
+    let (task, cancel) = match command {
+        WorkerCommand::ExecuteWorkflow {
+            task,
+            request,
+            cancel,
+        } => {
+            assert!(matches!(
+                *request,
+                analytics_workflow::WorkflowRequest::CheckUpdates {}
+            ));
+            (task, cancel)
+        }
+        _ => panic!("expected workflow"),
+    };
+    h.click("检查行情更新");
+    assert!(h.commands.try_recv().is_err());
+    h.click("取消");
+    assert!(cancel.load(Ordering::Relaxed));
+    h.events
+        .send(WorkerEvent::Failed {
+            task,
+            kind: TaskKind::Workflow,
+            message: "网络连接失败".into(),
+        })
+        .unwrap();
+    let out = h.frame(vec![]);
+    assert!(rendered_text(&out).contains("网络连接失败"));
+    assert!(!h.app.state.busy());
+}
+#[test]
+fn research_template_saves_and_real_worker_finishes_synthetic_annual_account() {
+    let (mut h, _tmp) = platform_harness(Panel::Research);
+    let w = h.app.state.platform.workspace.as_ref().unwrap().clone();
+    let (m, a, template) = analytics_workflow::testing::synthetic(&w);
+    h.app.state.platform.template = template;
+    h.app.state.platform.datasets = w.datasets().unwrap();
+    h.app.state.platform.market = m.id;
+    h.app.state.platform.actions = a.id;
+    h.click("保存模板");
+    assert_eq!(
+        std::fs::read_dir(w.resolve(".jfquant/templates"))
+            .unwrap()
+            .count(),
+        1
+    );
+    let (worker, events) = worker::spawn_in_workspace(h.ctx.clone(), Some(w.root().to_owned()));
+    h.app.worker = worker;
+    h.app.events = events;
+    h.click("执行年度研究");
+    h.wait_for(|app| !app.state.busy() && !app.state.platform.runs.is_empty());
+    let record = &h.app.state.platform.runs[0];
+    assert_eq!(record.status, analytics_workflow::RunStatus::Succeeded);
+    assert!(
+        h.app.state.platform.details["aggregate"]["total_return"]
+            .as_f64()
+            .unwrap()
+            .abs()
+            < 1e-6
+    );
+    assert!(
+        w.resolve(&record.output)
+            .join("fold-2009/ledger.json")
+            .exists()
+    );
+    h.app.state.panel = Panel::Runs;
+    let out = h.frame(vec![]);
+    assert!(rendered_text(&out).contains("年化"));
+}
+#[test]
+fn research_worker_preserves_shares_cash_and_paid_fees_across_annual_models() {
+    let (mut h, _tmp) = platform_harness(Panel::Research);
+    let w = h.app.state.platform.workspace.as_ref().unwrap().clone();
+    let (m, a, mut template) = analytics_workflow::testing::synthetic(&w);
+    template.initial_cash_cny = 1005.0;
+    template.market_rules.commission.minimum_cny = 5.0;
+    h.app.state.platform.template = template;
+    h.app.state.platform.datasets = w.datasets().unwrap();
+    h.app.state.platform.market = m.id;
+    h.app.state.platform.actions = a.id;
+    let (worker, events) = worker::spawn_in_workspace(h.ctx.clone(), Some(w.root().to_owned()));
+    h.app.worker = worker;
+    h.app.events = events;
+    h.click("执行年度研究");
+    h.wait_for(|app| !app.state.busy() && !app.state.platform.runs.is_empty());
+    let record = &h.app.state.platform.runs[0];
+    assert_eq!(record.status, analytics_workflow::RunStatus::Succeeded);
+    let result = &h.app.state.platform.details;
+    assert_eq!(result["annual_reports"].as_array().unwrap().len(), 2);
+    let total_return = result["aggregate"]["total_return"].as_f64().unwrap();
+    assert!((total_return + 5.0 / 1005.0).abs() < 1e-6);
+    let fees = &result["aggregate"]["fee_totals_cny"];
+    let total_fee: f64 = fees
+        .as_object()
+        .unwrap()
+        .values()
+        .filter_map(serde_json::Value::as_f64)
+        .sum();
+    assert!((total_fee - 5.0).abs() < 1e-8);
+    for year in [2009, 2010] {
+        let ledger: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                w.resolve(&record.output)
+                    .join(format!("fold-{year}/ledger.json")),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(ledger["positions"]["SH600000"]["shares"], 110);
+        assert_eq!(ledger["cash"], 10.0);
+    }
+}
+#[test]
+fn incomplete_research_is_persisted_as_blocked_and_shown_without_old_results() {
+    let (mut h, _tmp) = platform_harness(Panel::Research);
+    let w = h.app.state.platform.workspace.as_ref().unwrap().clone();
+    let (m, a, template) = analytics_workflow::testing::synthetic(&w);
+    let p = w.resolve(&a.path);
+    let mut book = analytics_storage::corporate_actions::ActionBundle::read(&p).unwrap();
+    book.actions[0].pay_date = None;
+    std::fs::write(&p, serde_json::to_vec(&book).unwrap()).unwrap();
+    let a = w.register(&p).unwrap();
+    h.app.state.platform.template = template;
+    h.app.state.platform.datasets = w.datasets().unwrap();
+    h.app.state.platform.market = m.id;
+    h.app.state.platform.actions = a.id;
+    let (worker, events) = worker::spawn_in_workspace(h.ctx.clone(), Some(w.root().to_owned()));
+    h.app.worker = worker;
+    h.app.events = events;
+    h.click("执行年度研究");
+    let out = h.wait_for(|app| !app.state.busy() && !app.state.platform.runs.is_empty());
+    assert!(rendered_text(&out).contains("数据未就绪"));
+    assert_eq!(
+        h.app.state.platform.runs[0].status,
+        analytics_workflow::RunStatus::Blocked
+    );
+    assert!(
+        !w.resolve(&h.app.state.platform.runs[0].output)
+            .join("factor-cache")
+            .exists()
+    );
+    assert_eq!(
+        w.runs().unwrap()[0].status,
+        analytics_workflow::RunStatus::Blocked
+    );
+}
+
+#[test]
+fn interrupted_acquisition_can_prepare_exact_owned_resume_without_starting_research() {
+    let (mut h, _tmp) = platform_harness(Panel::Runs);
+    let w = h.app.state.platform.workspace.as_ref().unwrap().clone();
+    let task = Uuid::new_v4();
+    let request = analytics_workflow::WorkflowRequest::DownloadActions {
+        market: "market-id".into(),
+        resume: None,
+    };
+    let mut run = w
+        .begin(task, "公司行动", serde_json::to_value(request).unwrap())
+        .unwrap();
+    w.finish(&mut run, analytics_workflow::RunStatus::Interrupted, None)
+        .unwrap();
+    h.app.state.platform.runs = w.runs().unwrap();
+    h.app.state.platform.selected_run = Some(task);
+    h.click("准备恢复公司行动");
+    assert_eq!(h.app.state.panel, Panel::Dataset);
+    assert_eq!(h.app.state.platform.market, "market-id");
+    assert_eq!(
+        h.app.state.platform.details["resume_actions"],
+        task.to_string()
+    );
+    assert!(h.commands.try_recv().is_err());
+}
+
+#[test]
+fn demo_button_configures_full_research_without_download_or_developer_tools() {
+    let (mut h, _tmp) = platform_harness(Panel::Dataset);
+    let w = h.app.state.platform.workspace.as_ref().unwrap().clone();
+    let (worker, events) = worker::spawn_in_workspace(h.ctx.clone(), Some(w.root().to_owned()));
+    h.app.worker = worker;
+    h.app.events = events;
+    h.click("创建合成演示数据");
+    h.wait_for(|app| !app.state.busy() && !app.state.platform.datasets.is_empty());
+    assert_eq!(
+        h.app.state.platform.template.config.factor_ids,
+        ["alpha_002"]
+    );
+    assert_eq!(h.app.state.platform.template.first_test_year, 2009);
+    assert!(!h.app.state.platform.actions.is_empty());
+    h.app.state.panel = Panel::Research;
+    h.click("执行年度研究");
+    let out = h
+        .wait_for(|app| !app.state.busy() && app.state.platform.details.get("aggregate").is_some());
+    assert!(rendered_text(&out).contains("合成演示数据"));
+    assert_eq!(
+        h.app.state.platform.details["input_kind"],
+        "synthetic_fixture"
+    );
+}
+
+#[test]
+fn service_client_tasks_appear_in_egui_can_be_cancelled_and_share_research_results() {
+    use analytics_workflow::service::{Client, Rpc, TaskRequest};
+    let (mut h, _tmp) = platform_harness(Panel::Runs);
+    h.app.state.platform.lease.take();
+    let w = h.app.state.platform.workspace.as_ref().unwrap().clone();
+    let root = w.root().to_owned();
+    let server = std::thread::spawn(move || analytics_workflow::service::serve(&root).unwrap());
+    let client = Client::connect(w.root()).unwrap();
+    for _ in 0..200 {
+        if client.call(Rpc::Status).is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let ctx = h.ctx.clone();
+    let (worker, events) = analytics_workflow::service::bridge(
+        analytics_workflow::backend::Wake::new(move || ctx.request_repaint()),
+        w.root().to_owned(),
+    );
+    h.app.worker = worker;
+    h.app.events = events;
+    let task = Uuid::new_v4();
+    client
+        .call(Rpc::Submit {
+            id: task,
+            request: Box::new(TaskRequest::TestingPause { milliseconds: 5000 }),
+        })
+        .unwrap();
+    h.wait_for(|app| app.state.active_task.as_ref().is_some_and(|t| t.id == task));
+    assert!(h.app.cancel.is_none());
+    h.click("取消");
+    h.wait_for(|app| !app.state.busy() && app.state.platform.runs.iter().any(|r| r.id == task));
+    assert_eq!(
+        h.app
+            .state
+            .platform
+            .runs
+            .iter()
+            .find(|r| r.id == task)
+            .unwrap()
+            .status,
+        analytics_workflow::RunStatus::Cancelled
+    );
+    // Another client's SQL must not replace the App's page or cursor.
+    h.app.state.panel = Panel::Query;
+    h.app.state.query.sql = "SELECT range AS id FROM range(600)".into();
+    h.click("执行查询");
+    h.wait_for(|app| !app.state.busy() && app.state.query.rows.len() == 500);
+    let old_rows = h.app.state.query.rows.clone();
+    let old_cursor = h.app.state.query.next_cursor.clone();
+    let remote_query = Uuid::new_v4();
+    client
+        .call(Rpc::Submit {
+            id: remote_query,
+            request: Box::new(TaskRequest::Query {
+                query_id: None,
+                request: analytics_core::PageRequest {
+                    sql: "SELECT 999 AS foreign_value".into(),
+                    limit: 10,
+                    sort: vec![],
+                    after: None,
+                },
+            }),
+        })
+        .unwrap();
+    client.wait(remote_query, Some(10)).unwrap();
+    h.wait_for(|app| {
+        !app.state.busy() && app.state.platform.runs.iter().any(|r| r.id == remote_query)
+    });
+    assert_eq!(h.app.state.query.rows, old_rows);
+    assert_eq!(h.app.state.query.next_cursor, old_cursor);
+    h.click("下一页");
+    h.wait_for(|app| !app.state.busy() && app.state.query.rows.len() == 600);
+    assert_eq!(
+        h.app.state.query.rows[599][0],
+        analytics_core::ScalarValue::Int64(599)
+    );
+    h.app.state.panel = Panel::Runs;
+    let task = Uuid::new_v4();
+    client
+        .call(Rpc::Submit {
+            id: task,
+            request: Box::new(TaskRequest::Workflow {
+                request: Box::new(analytics_workflow::WorkflowRequest::CreateDemo {}),
+            }),
+        })
+        .unwrap();
+    h.wait_for(|app| !app.state.busy() && app.state.platform.runs.iter().any(|r| r.id == task));
+    assert_eq!(h.app.state.platform.template.last_year, 2010);
+    h.app.state.panel = Panel::Research;
+    h.click("执行年度研究");
+    h.wait_for(|app| !app.state.busy() && app.state.platform.details.get("aggregate").is_some());
+    let record = h
+        .app
+        .state
+        .platform
+        .runs
+        .iter()
+        .find(|r| r.operation.contains("年度滚动研究"))
+        .unwrap()
+        .clone();
+    assert_eq!(
+        client.call(Rpc::Results { id: record.id }).unwrap(),
+        h.app.state.platform.details
+    );
+    assert_eq!(
+        h.app.state.platform.details["annual_reports"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let expected = h.app.state.platform.details.clone();
+    let cli_id = Uuid::new_v4();
+    client
+        .call(Rpc::Submit {
+            id: cli_id,
+            request: Box::new(TaskRequest::Workflow {
+                request: Box::new(analytics_workflow::WorkflowRequest::Research {
+                    market: h.app.state.platform.market.clone(),
+                    actions: h.app.state.platform.actions.clone(),
+                    template: Box::new(h.app.state.platform.template.clone()),
+                    audit_only: false,
+                }),
+            }),
+        })
+        .unwrap();
+    h.wait_for(|app| !app.state.busy() && app.state.platform.runs.iter().any(|r| r.id == cli_id));
+    assert_eq!(h.app.state.platform.details, expected);
+    assert_eq!(client.call(Rpc::Results { id: cli_id }).unwrap(), expected);
+    for year in [2009, 2010] {
+        assert_eq!(
+            std::fs::read(
+                w.resolve(&record.output)
+                    .join(format!("fold-{year}/ledger.json"))
+            )
+            .unwrap(),
+            std::fs::read(w.resolve(format!(".jfquant/runs/{cli_id}/fold-{year}/ledger.json")))
+                .unwrap()
+        );
+    }
+    client.call(Rpc::Stop).unwrap();
+    server.join().unwrap();
+}
+
+#[test]
+fn unsupported_history_shows_error_without_nav_or_resumption_and_other_records_remain_readable() {
+    let (mut h, _tmp) = platform_harness(Panel::Runs);
+    let w = h.app.state.platform.workspace.as_ref().unwrap().clone();
+    let mut old = w.begin(Uuid::new_v4(), "旧格式研究", serde_json::json!({"request":{"operation":"compatibility","request":{"operation":"research"}}})).unwrap();
+    let summary = serde_json::json!({"schema_version":3,"execution":{"mode":"legacy_adjusted_fractional"},"aggregate":{"total_return":2.0}}).to_string();
+    std::fs::write(w.resolve(&old.output).join("summary.json"), &summary).unwrap();
+    std::fs::write(
+        w.resolve(&old.output).join("nav.csv"),
+        "date,nav_after_fees,csi500_price_index_nav\n2020-01-02,3,1\n2020-01-03,4,1\n",
+    )
+    .unwrap();
+    w.finish(&mut old, analytics_workflow::RunStatus::Interrupted, None)
+        .unwrap();
+    h.app.state.platform.runs = w.runs().unwrap();
+    h.app.state.platform.selected_run = Some(old.id);
+    let text = rendered_text(&h.frame(vec![]));
+    assert!(text.contains("unsupported_result_format"));
+    assert!(!text.contains("净值 ·"));
+    assert!(!text.contains("年化"));
+    assert!(h.commands.try_recv().is_err());
+    h.app.state.platform.import_run_path = old.output.display().to_string();
+    h.click("导入只读记录");
+    assert!(
+        h.app
+            .state
+            .platform
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("unsupported_result_format")
+    );
+    assert_eq!(w.runs().unwrap().len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(w.resolve(&old.output).join("summary.json")).unwrap(),
+        summary
+    );
+    let (market, actions, template) = analytics_workflow::testing::synthetic(&w);
+    let request = analytics_workflow::WorkflowRequest::Research {
+        template: Box::new(template),
+        market: market.id,
+        actions: actions.id,
+        audit_only: false,
+    };
+    let ctx = analytics_core::task::TaskContext::new(
+        Uuid::new_v4(),
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        |_| {},
+    );
+    let mut current = w
+        .begin(
+            ctx.id,
+            "当前研究",
+            analytics_workflow::snapshot(&w, &request).unwrap(),
+        )
+        .unwrap();
+    analytics_workflow::execute(&w, &request, &current, &ctx).unwrap();
+    w.finish(&mut current, analytics_workflow::RunStatus::Succeeded, None)
+        .unwrap();
+    h.app.state.platform.runs = w.runs().unwrap();
+    h.app.state.platform.selected_run = Some(current.id);
+    h.app.state.platform.error = None;
+    let text = rendered_text(&h.frame(vec![]));
+    assert!(text.contains("年化"));
+    assert!(!text.contains("unsupported_result_format"));
 }

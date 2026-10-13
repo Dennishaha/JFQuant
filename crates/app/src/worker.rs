@@ -1,722 +1,41 @@
-//! Background worker thread that owns every native handle.
-//!
-//! Per the repository engineering rules, the DuckDB connection and all
-//! LightGBM handles live exclusively on this single worker thread; the egui
-//! thread only exchanges plain data through [`WorkerCommand`] /
-//! [`WorkerEvent`] channels. Cancellation is cooperative: the UI keeps a
-//! shared `Arc<AtomicBool>` flag for the active task and the pipeline checks
-//! it between stages.
-
-use analytics_core::{
-    ColumnSchema, DatasetFile, ExportRequest, PageRequest, QueryPage, ScalarValue, SortKey,
-};
+//! Egui adapter for the shared backend and local service.
+#[cfg(test)]
+use analytics_core::{ExportRequest, PageRequest};
+#[cfg(test)]
 use analytics_engine::{DuckDbEngine, QueryEngine};
-use analytics_factor::FactorEvent;
-use analytics_ml::TrainEvent;
-use analytics_ml::pipeline::{
-    Cancellation, PipelineArtifact, PipelineError, PipelineEvent, PipelineRequest, TrainingConfig,
-    run_factor_pipeline, train_from_factor_cache,
+#[cfg(test)]
+use analytics_ml::TrainingConfig;
+pub use analytics_workflow::backend::{
+    RunSummary, TaskKind, WorkerCommand, WorkerEvent, WorkerHandle,
 };
-use analytics_storage::ParquetCatalog;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+#[cfg(test)]
+use analytics_workflow::backend::{Worker, pipeline_error_message};
+
+#[cfg(test)]
+use analytics_ml::pipeline::{PipelineError, PipelineRequest};
+
+#[cfg(test)]
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, Sender, channel};
+#[cfg(test)]
+use std::sync::mpsc::{Receiver, channel};
+#[cfg(test)]
 use uuid::Uuid;
 
-/// Subsystem a background task belongs to; used to route errors back to the
-/// panel that issued the request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TaskKind {
-    /// Parquet catalog scan.
-    Scan,
-    /// SQL `DESCRIBE`.
-    Describe,
-    /// SQL page query.
-    Query,
-    /// SQL export.
-    Export,
-    /// Full factor pipeline run.
-    Pipeline,
-    /// Cache-only retraining run.
-    Training,
+#[cfg(test)]
+pub fn spawn(ctx: egui::Context) -> (WorkerHandle, std::sync::mpsc::Receiver<WorkerEvent>) {
+    spawn_in_workspace(ctx, None)
 }
-
-/// Commands sent from the egui thread to the worker.
-#[derive(Debug)]
-pub enum WorkerCommand {
-    /// Scan a Parquet root into file metadata.
-    ScanDataset {
-        /// Task identifier.
-        task: Uuid,
-        /// Directory or single file.
-        root: PathBuf,
-    },
-    /// Describe the result columns of a SQL statement.
-    DescribeQuery {
-        /// Task identifier.
-        task: Uuid,
-        /// SQL without a trailing semicolon.
-        sql: String,
-    },
-    /// Fetch one keyset page of a SQL statement.
-    RunQuery {
-        /// Task identifier.
-        task: Uuid,
-        /// Validated page request.
-        request: PageRequest,
-    },
-    /// Export a SQL result to Parquet or CSV.
-    ExportQuery {
-        /// Task identifier.
-        task: Uuid,
-        /// Validated export request.
-        request: ExportRequest,
-    },
-    /// Run the full market-to-model pipeline.
-    RunPipeline {
-        /// Task identifier.
-        task: Uuid,
-        /// Pipeline configuration.
-        request: PipelineRequest,
-        /// Cooperative cancellation flag owned by the UI.
-        cancel: Cancellation,
-    },
-    /// Retrain from an existing factor cache with fresh hyperparameters.
-    TrainFromCache {
-        /// Task identifier.
-        task: Uuid,
-        /// Factor cache Parquet path.
-        cache_path: PathBuf,
-        /// Universe override; `None` keeps the cache value.
-        universe_id: Option<String>,
-        /// Output directory for retrained artifacts.
-        output_dir: PathBuf,
-        /// LightGBM hyperparameters.
-        config: TrainingConfig,
-        /// Cooperative cancellation flag owned by the UI.
-        cancel: Cancellation,
-    },
-    #[cfg(test)]
-    /// Injects a task panic to exercise failure routing and worker retirement.
-    PanicTask { task: Uuid, kind: TaskKind },
-    #[cfg(test)]
-    /// Injects a panic outside the task boundary to exercise the thread guard.
-    PanicOutsideTask,
-}
-
-/// Display-ready summary of a finished pipeline or retraining run.
-#[derive(Debug, Clone)]
-pub struct RunSummary {
-    /// Artifact paths and split row counts.
-    pub artifact: PipelineArtifact,
-    /// Raw `metrics.json` content for the metrics cards.
-    pub metrics_json: Option<String>,
-    /// Feature importance pairs `(factor, gain)` sorted descending.
-    pub importance: Vec<(String, f64)>,
-    /// First 100 rows of `predictions.parquet` for preview.
-    pub preview: Option<QueryPage>,
-}
-
-/// Events streamed from the worker back to the egui thread.
-#[derive(Debug, Clone)]
-pub enum WorkerEvent {
-    /// A command started executing.
-    Started {
-        /// Task identifier.
-        task: Uuid,
-        /// Owning subsystem.
-        kind: TaskKind,
-        /// Human-readable label.
-        label: String,
-    },
-    /// Intermediate progress line.
-    Progress {
-        /// Task identifier.
-        task: Uuid,
-        /// Display-ready progress text.
-        message: String,
-    },
-    /// Scan finished with discovered files.
-    DatasetScanned {
-        /// Task identifier.
-        task: Uuid,
-        /// Actual scanned path, independent of later form edits.
-        root: PathBuf,
-        /// Discovered Parquet files with metadata.
-        files: Vec<DatasetFile>,
-    },
-    /// `DESCRIBE` finished.
-    QueryDescribed {
-        /// Task identifier.
-        task: Uuid,
-        /// Result column schemas.
-        columns: Vec<ColumnSchema>,
-    },
-    /// A result page arrived.
-    QueryPaged {
-        /// Task identifier.
-        task: Uuid,
-        /// Fetched page.
-        page: QueryPage,
-    },
-    /// Export finished.
-    Exported {
-        /// Task identifier.
-        task: Uuid,
-        /// Written file.
-        destination: PathBuf,
-    },
-    /// Factor pipeline finished successfully.
-    PipelineFinished {
-        /// Task identifier.
-        task: Uuid,
-        /// Display summary.
-        summary: RunSummary,
-    },
-    /// Cache retraining finished successfully.
-    TrainingFinished {
-        /// Task identifier.
-        task: Uuid,
-        /// Display summary.
-        summary: RunSummary,
-    },
-    /// The command failed; `kind` routes the error to its panel.
-    Failed {
-        /// Task identifier.
-        task: Uuid,
-        /// Owning subsystem.
-        kind: TaskKind,
-        /// Error text.
-        message: String,
-    },
-    /// The command finished (after any payload event).
-    Finished {
-        /// Task identifier.
-        task: Uuid,
-    },
-    /// The worker must be replaced before accepting more commands.
-    Unavailable {
-        /// Display-ready reason for stopping the worker.
-        message: String,
-    },
-}
-
-/// Sending half of the worker protocol, held by the egui app.
-#[derive(Clone)]
-pub struct WorkerHandle {
-    tx: Sender<WorkerCommand>,
-}
-
-impl WorkerHandle {
-    #[cfg(test)]
-    pub(crate) fn recording() -> (Self, Receiver<WorkerCommand>) {
-        let (tx, rx) = channel();
-        (Self { tx }, rx)
-    }
-    /// Queues a command, or reports that the receiving worker has exited.
-    pub fn send(&self, command: WorkerCommand) -> Result<(), String> {
-        self.tx
-            .send(command)
-            .map_err(|_| "后台线程已退出，请重启后台后重试。".into())
-    }
-}
-
-impl WorkerCommand {
-    /// Identifies a submitted task before the background thread starts it.
-    pub fn task_info(&self) -> (Uuid, TaskKind) {
-        match self {
-            Self::ScanDataset { task, .. } => (*task, TaskKind::Scan),
-            Self::DescribeQuery { task, .. } => (*task, TaskKind::Describe),
-            Self::RunQuery { task, .. } => (*task, TaskKind::Query),
-            Self::ExportQuery { task, .. } => (*task, TaskKind::Export),
-            Self::RunPipeline { task, .. } => (*task, TaskKind::Pipeline),
-            Self::TrainFromCache { task, .. } => (*task, TaskKind::Training),
-            #[cfg(test)]
-            Self::PanicTask { task, kind } => (*task, *kind),
-            #[cfg(test)]
-            Self::PanicOutsideTask => unreachable!("fault injection has no task"),
-        }
-    }
-}
-
-/// Spawns the worker thread and returns both protocol halves.
-pub fn spawn(ctx: egui::Context) -> (WorkerHandle, Receiver<WorkerEvent>) {
-    let (command_tx, command_rx) = channel();
-    let (event_tx, event_rx) = channel();
-    let worker_events = event_tx.clone();
-    let worker_ctx = ctx.clone();
-    let started = std::thread::Builder::new()
-        .name("analytics-worker".into())
-        .spawn(move || {
-            let event_tx = worker_events;
-            let ctx = worker_ctx;
-            let outcome = catch_unwind(AssertUnwindSafe(|| {
-                Worker {
-                    engine: None,
-                    events: event_tx.clone(),
-                    ctx: ctx.clone(),
-                    stop_reason: None,
-                    query_snapshot: None,
-                }
-                .run(command_rx)
-            }));
-            let message = match outcome {
-                Ok(Some(message)) => message,
-                Ok(None) => "后台线程已停止，请重启后台后重试。".into(),
-                Err(payload) => format!(
-                    "后台线程发生内部错误：{}。请重启后台后重试。",
-                    panic_message(payload.as_ref())
-                ),
-            };
-            let _ = event_tx.send(WorkerEvent::Unavailable { message });
-            ctx.request_repaint();
-        });
-    if let Err(error) = started {
-        let _ = event_tx.send(WorkerEvent::Unavailable {
-            message: format!("后台线程启动失败：{error}。请重启后台后重试。"),
-        });
-        ctx.request_repaint();
-    }
-    (WorkerHandle { tx: command_tx }, event_rx)
-}
-
-struct Worker {
-    engine: Option<DuckDbEngine>,
-    events: Sender<WorkerEvent>,
+pub fn spawn_in_workspace(
     ctx: egui::Context,
-    stop_reason: Option<String>,
-    query_snapshot: Option<QuerySnapshot>,
+    root: Option<std::path::PathBuf>,
+) -> (WorkerHandle, std::sync::mpsc::Receiver<WorkerEvent>) {
+    let wake = analytics_workflow::backend::Wake::new(move || ctx.request_repaint());
+    #[cfg(not(test))]
+    if let Some(root) = root {
+        return analytics_workflow::service::bridge(wake, root);
+    }
+    analytics_workflow::backend::spawn_in_workspace(wake, root)
 }
-
-struct QuerySnapshot {
-    request: PageRequest,
-    sql: String,
-    ordinal: String,
-}
-
-fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
-    payload
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| payload.downcast_ref::<&str>().copied())
-        .unwrap_or("未知 panic")
-}
-
-impl Worker {
-    fn run(&mut self, commands: Receiver<WorkerCommand>) -> Option<String> {
-        while let Ok(command) = commands.recv() {
-            self.dispatch(command);
-            if self.stop_reason.is_some() {
-                break;
-            }
-        }
-        self.stop_reason.take()
-    }
-
-    fn engine(&mut self) -> Result<&mut DuckDbEngine, String> {
-        if self.engine.is_none() {
-            self.engine = Some(
-                DuckDbEngine::open_in_memory()
-                    .map_err(|error| format!("DuckDB 初始化失败：{error}"))?,
-            );
-        }
-        Ok(self.engine.as_mut().expect("engine initialized"))
-    }
-
-    fn emit(&self, event: WorkerEvent) {
-        let _ = self.events.send(event);
-        self.ctx.request_repaint();
-    }
-
-    fn query_page(&mut self, request: PageRequest) -> Result<QueryPage, String> {
-        // Desktop cursors contain a hidden ordinal, not the selected column's
-        // value. Sort all remaining columns to make ties deterministic; identical
-        // rows remain distinct and NULLs are placed last in either direction.
-        if request.after.is_none() {
-            self.query_snapshot = None;
-            if let Some(engine) = &mut self.engine {
-                engine
-                    .clear_query_snapshot()
-                    .map_err(|error| error.to_string())?;
-            }
-        }
-        let mut validation = request.clone();
-        validation.after = None;
-        validation.validate().map_err(|error| error.to_string())?;
-        if let Some(cursor) = &request.after
-            && !matches!(cursor.0.as_slice(), [ScalarValue::Int64(value)] if *value > 0)
-        {
-            return Err("分页游标无效，请重新执行查询。".into());
-        }
-        if request.after.is_some() {
-            let snapshot = self
-                .query_snapshot
-                .as_ref()
-                .ok_or("分页结果已失效，请重新执行查询。")?;
-            if !same_query(&request, &snapshot.request) {
-                return Err("查询条件已改变，请重新执行查询。".into());
-            }
-            let sql = snapshot.sql.clone();
-            let ordinal = snapshot.ordinal.clone();
-            return self.snapshot_page(sql, ordinal, request.limit, request.after);
-        }
-        let engine = self.engine()?;
-        let columns = engine
-            .describe(&request.sql)
-            .map_err(|error| error.to_string())?;
-        let mut sort = request.sort.clone();
-        for key in &mut sort {
-            key.column = columns
-                .iter()
-                .find(|column| column.name.eq_ignore_ascii_case(&key.column))
-                .ok_or_else(|| format!("排序列不存在：{}。请选择默认排序后重新执行。", key.column))?
-                .name
-                .clone();
-        }
-        for column in &columns {
-            if !sort.iter().any(|key| key.column == column.name) {
-                sort.push(SortKey {
-                    column: column.name.clone(),
-                    descending: false,
-                });
-            }
-        }
-        let quote = |name: &str| format!("\"{}\"", name.replace('"', "\"\""));
-        let order = sort
-            .iter()
-            .map(|key| {
-                format!(
-                    "q.{} {} NULLS LAST",
-                    quote(&key.column),
-                    if key.descending { "DESC" } else { "ASC" }
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        let mut ordinal = "__jfquant_page_row".to_string();
-        while columns
-            .iter()
-            .any(|column| column.name.eq_ignore_ascii_case(&ordinal))
-        {
-            ordinal.push('_');
-        }
-        let sql = format!(
-            "SELECT row_number() OVER (ORDER BY {order}) AS {}, q.* FROM ({}) AS q",
-            quote(&ordinal),
-            request.sql
-        );
-        let sql = engine
-            .replace_query_snapshot(&sql)
-            .map_err(|error| error.to_string())?;
-        self.query_snapshot = Some(QuerySnapshot {
-            request: request.clone(),
-            sql: sql.clone(),
-            ordinal: ordinal.clone(),
-        });
-        self.snapshot_page(sql, ordinal, request.limit, request.after)
-    }
-
-    fn snapshot_page(
-        &mut self,
-        sql: String,
-        ordinal: String,
-        limit: u32,
-        after: Option<analytics_core::KeysetCursor>,
-    ) -> Result<QueryPage, String> {
-        let mut page = self
-            .engine()?
-            .query_page(PageRequest {
-                sql,
-                limit,
-                sort: vec![SortKey {
-                    column: ordinal,
-                    descending: false,
-                }],
-                after,
-            })
-            .map_err(|error| error.to_string())?;
-        page.columns.remove(0);
-        for row in &mut page.rows {
-            row.remove(0);
-        }
-        Ok(page)
-    }
-
-    fn dispatch(&mut self, command: WorkerCommand) {
-        match command {
-            #[cfg(test)]
-            WorkerCommand::PanicTask { task, kind } => {
-                self.run_task(task, kind, "测试内部错误".into(), |worker| {
-                    let _ = worker.engine()?;
-                    panic!("模拟后台内部错误");
-                })
-            }
-            #[cfg(test)]
-            WorkerCommand::PanicOutsideTask => panic!("模拟任务外内部错误"),
-            WorkerCommand::ScanDataset { task, root } => self.run_task(
-                task,
-                TaskKind::Scan,
-                format!("扫描数据集 {}", root.display()),
-                |worker| {
-                    let catalog = ParquetCatalog::open(&root).map_err(|error| error.to_string())?;
-                    let files = catalog.scan().map_err(|error| error.to_string())?;
-                    worker.emit(WorkerEvent::DatasetScanned { task, root, files });
-                    Ok(())
-                },
-            ),
-            WorkerCommand::DescribeQuery { task, sql } => {
-                self.run_task(
-                    task,
-                    TaskKind::Describe,
-                    "描述查询结构".into(),
-                    |worker| {
-                        let columns = worker
-                            .engine()?
-                            .describe(&sql)
-                            .map_err(|error| error.to_string())?;
-                        worker.emit(WorkerEvent::QueryDescribed { task, columns });
-                        Ok(())
-                    },
-                );
-            }
-            WorkerCommand::RunQuery { task, request } => {
-                self.run_task(task, TaskKind::Query, "执行查询".into(), |worker| {
-                    let page = worker.query_page(request)?;
-                    worker.emit(WorkerEvent::QueryPaged { task, page });
-                    Ok(())
-                });
-            }
-            WorkerCommand::ExportQuery { task, request } => {
-                self.run_task(
-                    task,
-                    TaskKind::Export,
-                    "导出查询结果".into(),
-                    |worker| {
-                        let destination = request.destination.clone();
-                        worker
-                            .engine()?
-                            .export(request)
-                            .map_err(|error| error.to_string())?;
-                        worker.emit(WorkerEvent::Exported { task, destination });
-                        Ok(())
-                    },
-                );
-            }
-            WorkerCommand::RunPipeline {
-                task,
-                request,
-                cancel,
-            } => {
-                self.run_task(
-                    task,
-                    TaskKind::Pipeline,
-                    "运行因子流水线".into(),
-                    |worker| {
-                        let progress = worker.pipeline_progress(task);
-                        let artifact = run_factor_pipeline(&request, progress, cancel)
-                            .map_err(pipeline_error_message)?;
-                        let summary = worker.summarize(task, &artifact)?;
-                        worker.emit(WorkerEvent::PipelineFinished { task, summary });
-                        Ok(())
-                    },
-                );
-            }
-            WorkerCommand::TrainFromCache {
-                task,
-                cache_path,
-                universe_id,
-                output_dir,
-                config,
-                cancel,
-            } => {
-                self.run_task(task, TaskKind::Training, "训练模型".into(), |worker| {
-                    let progress = worker.pipeline_progress(task);
-                    let artifact = train_from_factor_cache(
-                        &cache_path,
-                        universe_id.as_deref(),
-                        &output_dir,
-                        &config,
-                        progress,
-                        cancel,
-                    )
-                    .map_err(pipeline_error_message)?;
-                    let summary = worker.summarize(task, &artifact)?;
-                    worker.emit(WorkerEvent::TrainingFinished { task, summary });
-                    Ok(())
-                });
-            }
-        }
-    }
-
-    fn run_task(
-        &mut self,
-        task: Uuid,
-        kind: TaskKind,
-        label: String,
-        body: impl FnOnce(&mut Self) -> Result<(), String>,
-    ) {
-        self.emit(WorkerEvent::Started { task, kind, label });
-        let result = match catch_unwind(AssertUnwindSafe(|| body(self))) {
-            Ok(result) => result,
-            Err(payload) => {
-                // Stop after unwinding: mutable/native state may be inconsistent.
-                // Its handles are dropped here on their owning worker thread.
-                let message = format!(
-                    "后台任务发生内部错误：{}。请重启后台后重试。",
-                    panic_message(payload.as_ref())
-                );
-                self.stop_reason = Some(message.clone());
-                Err(message)
-            }
-        };
-        match result {
-            Ok(()) => self.emit(WorkerEvent::Finished { task }),
-            Err(message) => {
-                self.emit(WorkerEvent::Failed {
-                    task,
-                    kind,
-                    message,
-                });
-            }
-        }
-    }
-
-    fn pipeline_progress(&self, task: Uuid) -> Sender<PipelineEvent> {
-        let (tx, rx) = channel::<PipelineEvent>();
-        let events = self.events.clone();
-        let ctx = self.ctx.clone();
-        std::thread::spawn(move || {
-            while let Ok(event) = rx.recv() {
-                let _ = events.send(WorkerEvent::Progress {
-                    task,
-                    message: describe_pipeline_event(&event),
-                });
-                ctx.request_repaint();
-            }
-        });
-        tx
-    }
-
-    fn summarize(&mut self, task: Uuid, artifact: &PipelineArtifact) -> Result<RunSummary, String> {
-        let metrics_json = std::fs::read_to_string(&artifact.training.metrics_path).ok();
-        let mut importance = Vec::new();
-        if let Ok(bytes) = std::fs::read(&artifact.training.feature_importance_path)
-            && let Ok(gains) = serde_json::from_slice::<Vec<f64>>(&bytes)
-        {
-            let names = analytics_ml::load_manifest(&artifact.training.manifest_path)
-                .map(|manifest| {
-                    manifest
-                        .features
-                        .iter()
-                        .map(|feature| feature.name.clone())
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            for (index, gain) in gains.into_iter().enumerate() {
-                let name = names
-                    .get(index)
-                    .cloned()
-                    .unwrap_or_else(|| format!("f{index}"));
-                importance.push((name, gain));
-            }
-            importance.sort_by(|a, b| b.1.total_cmp(&a.1));
-        }
-        let preview = self.predictions_preview(task, artifact);
-        Ok(RunSummary {
-            artifact: artifact.clone(),
-            metrics_json,
-            importance,
-            preview,
-        })
-    }
-
-    fn predictions_preview(
-        &mut self,
-        task: Uuid,
-        artifact: &PipelineArtifact,
-    ) -> Option<QueryPage> {
-        let path = artifact
-            .predictions_path
-            .display()
-            .to_string()
-            .replace('\'', "''");
-        let request = PageRequest {
-            sql: format!("SELECT * FROM read_parquet('{path}')"),
-            limit: 100,
-            sort: Vec::new(),
-            after: None,
-        };
-        match self.engine() {
-            Ok(engine) => match engine.query_page(request) {
-                Ok(page) => Some(page),
-                Err(error) => {
-                    self.emit(WorkerEvent::Progress {
-                        task,
-                        message: format!("预测预览不可用：{error}"),
-                    });
-                    None
-                }
-            },
-            Err(_) => None,
-        }
-    }
-}
-
-fn same_query(a: &PageRequest, b: &PageRequest) -> bool {
-    a.sql == b.sql
-        && a.limit == b.limit
-        && a.sort.len() == b.sort.len()
-        && a.sort
-            .iter()
-            .zip(&b.sort)
-            .all(|(a, b)| a.column == b.column && a.descending == b.descending)
-}
-
-fn pipeline_error_message(error: PipelineError) -> String {
-    if matches!(&error, PipelineError::Cancelled)
-        || matches!(&error, PipelineError::Ml(analytics_ml::MlError::Native(message)) if message == "training cancelled")
-    {
-        "任务已取消".into()
-    } else {
-        error.to_string()
-    }
-}
-
-/// Maps a pipeline stage event to a display line.
-fn describe_pipeline_event(event: &PipelineEvent) -> String {
-    match event {
-        PipelineEvent::LoadingMarket => "正在加载行情与股票池…".into(),
-        PipelineEvent::MarketLoaded { rows } => format!("行情加载完成：{rows} 行"),
-        PipelineEvent::Factors(FactorEvent::Started { total_factors }) => {
-            format!("开始计算 {total_factors} 个因子")
-        }
-        PipelineEvent::Factors(FactorEvent::Progress {
-            factor_id,
-            completed,
-            total,
-        }) => format!("因子 {factor_id}（{completed}/{total}）"),
-        PipelineEvent::Factors(FactorEvent::Finished { output_rows }) => {
-            format!("因子计算完成：{output_rows} 行")
-        }
-        PipelineEvent::Training(TrainEvent::Started { rows, features }) => {
-            format!("开始训练：{rows} 行 × {features} 特征")
-        }
-        PipelineEvent::Training(TrainEvent::Iteration { iteration, metrics }) => {
-            let metrics = metrics
-                .iter()
-                .map(|value| format!("{value:.6}"))
-                .collect::<Vec<_>>()
-                .join(" / ");
-            format!("迭代 {iteration}：{metrics}")
-        }
-        PipelineEvent::Training(TrainEvent::Finished { iterations }) => {
-            format!("训练完成：{iterations} 轮")
-        }
-        PipelineEvent::Training(TrainEvent::Cancelled) => "训练已取消".into(),
-        PipelineEvent::WritingArtifacts => "正在写出产物…".into(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -754,11 +73,17 @@ mod tests {
     fn desktop_pages_preserve_duplicate_and_null_keys_and_quote_column_names() {
         let (tx, _) = channel();
         let mut worker = Worker {
+            root: None,
+            record_request: None,
+            active_record: None,
+            active_cancel: None,
+            outcome: None,
             engine: None,
             events: tx,
-            ctx: egui::Context::default(),
+            ctx: analytics_workflow::backend::Wake::default(),
             stop_reason: None,
             query_snapshot: None,
+            query_sessions: std::collections::HashMap::new(),
         };
         for descending in [false, true] {
             let sql = "SELECT * FROM (VALUES (NULL, 5), (1, 2), (1, 2), (1, 3), (2, 4), (NULL, 6)) AS v(\"排序 列\", \"__JFQUANT_PAGE_ROW\")";
@@ -825,11 +150,17 @@ mod tests {
         let path = dir.path().join("source.parquet");
         let (tx, _) = channel();
         let mut worker = Worker {
+            root: None,
+            record_request: None,
+            active_record: None,
+            active_cancel: None,
+            outcome: None,
             engine: None,
             events: tx,
-            ctx: egui::Context::default(),
+            ctx: analytics_workflow::backend::Wake::default(),
             stop_reason: None,
             query_snapshot: None,
+            query_sessions: std::collections::HashMap::new(),
         };
         worker
             .engine()
@@ -1093,11 +424,17 @@ mod tests {
         for owned_string in [true, false] {
             let (tx, rx) = channel();
             let mut worker = Worker {
+                root: None,
+                record_request: None,
+                active_record: None,
+                active_cancel: None,
+                outcome: None,
                 engine: None,
                 events: tx,
-                ctx: egui::Context::default(),
+                ctx: analytics_workflow::backend::Wake::default(),
                 stop_reason: None,
                 query_snapshot: None,
+                query_sessions: std::collections::HashMap::new(),
             };
             let task = Uuid::new_v4();
             worker.run_task(task, TaskKind::Query, "测试 panic 内容".into(), |_| {
@@ -1494,9 +831,62 @@ mod tests {
     }
 
     #[test]
+    fn workspace_relative_query_export_and_scan_are_independent_of_cwd() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("workspace'中文");
+        let w = analytics_workflow::Workspace::open(&root).unwrap();
+        let (worker, rx) = spawn_in_workspace(egui::Context::default(), Some(w.root().to_owned()));
+        let task = Uuid::new_v4();
+        worker
+            .send(WorkerCommand::ExportQuery {
+                task,
+                request: ExportRequest {
+                    sql: "SELECT 42::BIGINT AS answer".into(),
+                    destination: PathBuf::from("data/sample.parquet"),
+                    format: ExportFormat::Parquet,
+                    compression: None,
+                },
+            })
+            .unwrap();
+        successful(&collect(&rx, task), task);
+        assert!(root.join("data/sample.parquet").exists());
+        let task = Uuid::new_v4();
+        worker
+            .send(WorkerCommand::RunQuery {
+                task,
+                request: PageRequest {
+                    sql: "SELECT * FROM read_parquet('data/sample.parquet')".into(),
+                    limit: 100,
+                    sort: Vec::new(),
+                    after: None,
+                },
+            })
+            .unwrap();
+        let events = collect(&rx, task);
+        successful(&events, task);
+        assert!(events.iter().any(|e|matches!(e,WorkerEvent::QueryPaged{page,..} if page.rows[0][0]==ScalarValue::Int64(42))));
+        let task = Uuid::new_v4();
+        worker
+            .send(WorkerCommand::ScanDataset {
+                task,
+                root: PathBuf::from("data"),
+            })
+            .unwrap();
+        let events = collect(&rx, task);
+        successful(&events, task);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e,WorkerEvent::DatasetScanned{files,..} if files.len()==1))
+        );
+    }
+
+    #[test]
     fn worker_pipeline_and_cache_retraining_publish_real_artifacts_and_previews() {
         let dir = tempfile::tempdir().unwrap();
-        let (worker, rx) = spawn(egui::Context::default());
+        let workspace = analytics_workflow::Workspace::open(dir.path()).unwrap();
+        let (worker, rx) =
+            spawn_in_workspace(egui::Context::default(), Some(workspace.root().to_owned()));
         let market = dir.path().join("market.parquet");
         let universe = dir.path().join("universe.parquet");
         export(
@@ -1588,5 +978,20 @@ mod tests {
         let summary = state.model.summary.unwrap();
         assert!(summary.artifact.predictions_path.is_file());
         assert!(!summary.preview.as_ref().unwrap().rows.is_empty());
+        let records = workspace.runs().unwrap();
+        assert_eq!(records.len(), 2);
+        assert!(
+            records
+                .iter()
+                .all(|r| r.status == analytics_workflow::RunStatus::Succeeded)
+        );
+        let saved = workspace.results(&records[0]).unwrap();
+        assert!(saved["metrics"].is_object());
+        assert!(
+            saved["artifact"]["predictions_path"]
+                .as_str()
+                .unwrap()
+                .starts_with(".jfquant/")
+        );
     }
 }

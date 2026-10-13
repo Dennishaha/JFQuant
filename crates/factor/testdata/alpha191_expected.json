@@ -1,6 +1,6 @@
 {
   "fixture": "unit-panel-v1",
-  "formula_version": "dolphindb-gtja191-2023.01.17",
+  "formula_version": "gtja191-paper-2017+jfquant-audit-v4",
   "expected": {
     "alpha_002": [null, -2.0, -2.0, null, -4.0, -4.0]
   },

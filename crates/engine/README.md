@@ -47,3 +47,5 @@ native 环境还要验证单 worker 连接、非法 sort identifier、cursor 长
 界面操作与真实 backend 的回归测试在 desktop crate，包含 Describe、分页、类型保留、含引号的导出，以及流水线/重训预览：
 
     DUCKDB_DOWNLOAD_LIB=1 cargo nextest run -p analytics-desktop -E 'test(worker::tests::)'
+
+`DuckDbEngine::set_file_root`在worker内配置固定的DuckDB文件搜索根目录；App查询相对输入路径按工作区解释，不改变进程cwd，输出路径由worker在提交时解析为工作区路径。工作区名中的单引号按SQL字面量转义，参数修改不影响其他线程的文件系统基准。

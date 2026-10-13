@@ -6,6 +6,9 @@ license.workspace = true
 build = "build.rs"
 
 [dependencies]
+analytics-workflow = { path = "../workflow" }
+rfd = "0.15"
+serde.workspace = true
 analytics-core = { path = "../core" }
 analytics-engine = { path = "../engine", features = ["duckdb-native"] }
 analytics-factor = { path = "../factor" }
@@ -19,5 +22,6 @@ serde_json.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+analytics-workflow = { path = "../workflow", features = ["test-support"] }
 tempfile = "3.23"
 

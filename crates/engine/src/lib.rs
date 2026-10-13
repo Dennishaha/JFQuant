@@ -80,6 +80,14 @@ mod duckdb_backend {
                 .map_err(|error| EngineError::DuckDb(error.to_string()))
         }
 
+        /// Resolve relative query input files against a fixed workspace root.
+        pub fn set_file_root(&mut self, root: &Path) -> Result<()> {
+            let path = root.to_string_lossy().replace('\'', "''");
+            self.connection
+                .execute_batch(&format!("SET file_search_path = '{path}'"))
+                .map_err(|e| EngineError::DuckDb(e.to_string()))
+        }
+
         /// Opens (or creates) a database file at `path`.
         pub fn open(path: impl AsRef<Path>) -> Result<Self> {
             Connection::open(path)

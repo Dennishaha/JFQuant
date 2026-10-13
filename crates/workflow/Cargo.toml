@@ -1,0 +1,24 @@
+[package]
+name = "analytics-workflow"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+test-support = []
+
+[dependencies]
+analytics-engine = { path = "../engine", features = ["duckdb-native"] }
+analytics-core = { path = "../core" }
+analytics-storage = { path = "../storage" }
+analytics-factor = { path = "../factor" }
+analytics-ml = { path = "../ml", features = ["lightgbm-native", "duckdb-native"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+rustix = { version = "1", features = ["process"] }
+
+[dev-dependencies]
+tempfile = "3.23"

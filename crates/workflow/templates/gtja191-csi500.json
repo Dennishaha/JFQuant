@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "id": "gtja191-csi500-annual",
+  "name": "GTJA191 / 中证500年度研究",
+  "formula_version": "gtja191-paper-2017+jfquant-audit-v4",
+  "first_test_year": 2013,
+  "last_year": 2026,
+  "initial_cash_cny": 1000000,
+  "dividend_withholding_rate": 0
+}

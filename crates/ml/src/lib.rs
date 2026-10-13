@@ -15,6 +15,8 @@ use std::{
 };
 use thiserror::Error;
 
+#[cfg(feature = "lightgbm-native")]
+pub mod backtest;
 #[cfg(all(feature = "lightgbm-native", feature = "duckdb-native"))]
 pub mod pipeline;
 
@@ -489,7 +491,11 @@ mod native {
             Ok(values)
         }
 
-        fn predict_regression(handle: BoosterHandle, matrix: &DenseMatrix) -> Result<Vec<f64>> {
+        fn predict_regression(
+            handle: BoosterHandle,
+            matrix: &DenseMatrix,
+            iterations: c_int,
+        ) -> Result<Vec<f64>> {
             let mut output_len = 0_i64;
             if unsafe {
                 LGBM_BoosterCalcNumPredict(
@@ -497,7 +503,7 @@ mod native {
                     matrix.rows as c_int,
                     PREDICT_NORMAL,
                     0,
-                    -1,
+                    iterations,
                     &mut output_len,
                 )
             } != 0
@@ -516,7 +522,7 @@ mod native {
                     1,
                     PREDICT_NORMAL,
                     0,
-                    -1,
+                    iterations,
                     params.as_ptr(),
                     &mut output_len,
                     output.as_mut_ptr(),
@@ -706,7 +712,8 @@ mod native {
             fs::write(&importance_path, serde_json::to_vec_pretty(&importance)?)?;
             let test_rmse = if let Some(matrix) = test {
                 if matches!(request.objective, Objective::Regression) {
-                    let predictions = Self::predict_regression(booster.0, matrix)?;
+                    let predictions =
+                        Self::predict_regression(booster.0, matrix, best_iteration as c_int)?;
                     let mse = predictions
                         .iter()
                         .zip(&matrix.labels)
@@ -743,7 +750,7 @@ mod native {
                 features,
                 objective: format!("{:?}", request.objective),
                 training_schema_hash: schema_hash,
-                formula_version: Some("dolphindb-gtja191-2023.01.17".into()),
+                formula_version: Some(analytics_factor::FORMULA_VERSION.into()),
                 universe_id: Some(request.universe_id.clone()),
                 date_range: Some(request.date_range.clone()),
                 input_snapshot_hash: None,
@@ -879,6 +886,71 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "lightgbm-native")]
+    #[test]
+    fn early_stopped_test_rmse_matches_the_saved_best_model() {
+        use analytics_core::{Date, DateRange, Objective};
+        use std::collections::BTreeMap;
+        let dataset = |sign: f32| DenseMatrix {
+            features: (-50..=50).map(|x| x as f64 / 50.0).collect(),
+            labels: (-50..=50).map(|x| sign * x as f32 / 50.0).collect(),
+            rows: 101,
+            columns: 1,
+        };
+        let split = TrainingSplit {
+            train: dataset(1.0),
+            validation: dataset(-1.0),
+            test: dataset(1.0),
+        };
+        let request = TrainRequest {
+            factor_ids: vec!["alpha_001".into()],
+            universe_id: "fixture".into(),
+            date_range: DateRange {
+                start: Date::from_ymd_opt(2020, 1, 1).unwrap(),
+                end: Date::from_ymd_opt(2020, 12, 31).unwrap(),
+            },
+            objective: Objective::Regression,
+            parameters: BTreeMap::from([
+                ("num_iterations".into(), "20".into()),
+                ("min_data_in_leaf".into(), "1".into()),
+                ("num_leaves".into(), "4".into()),
+                ("learning_rate".into(), "0.3".into()),
+                ("num_threads".into(), "1".into()),
+            ]),
+            early_stopping_rounds: Some(3),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, _) = std::sync::mpsc::channel();
+        let artifact = LightGbmTrainer
+            .train_split(
+                &request,
+                &split,
+                dir.path(),
+                tx,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap();
+        let metrics: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(artifact.metrics_path).unwrap()).unwrap();
+        assert!(
+            metrics["best_iteration"].as_u64().unwrap() < metrics["iterations"].as_u64().unwrap()
+        );
+        let predictions = LightGbmPredictor {
+            model_path: artifact.model_path,
+        }
+        .predict_dense(&split.test.features, 101, 1, false)
+        .unwrap();
+        let rmse = (predictions
+            .predictions
+            .iter()
+            .zip(&split.test.labels)
+            .map(|(p, y)| (p[0] - *y as f64).powi(2))
+            .sum::<f64>()
+            / 101.0)
+            .sqrt();
+        assert!((rmse - metrics["test_rmse"].as_f64().unwrap()).abs() < 1e-12);
+    }
+
     #[test]
     fn dense_matrix_rejects_shape_mismatch() {
         let mut value = matrix(2, 2);
@@ -896,3 +968,7 @@ mod tests {
         assert!(split.validate().is_err());
     }
 }
+
+mod training_config;
+/// Training configuration shared by rolling research and pipeline.
+pub use training_config::TrainingConfig;

@@ -12,6 +12,10 @@
 //! ```
 #![warn(missing_docs)]
 
+pub mod execution;
+pub mod market_rules;
+mod scalar_float;
+
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -183,7 +187,7 @@ pub enum ScalarValue {
     /// Integer value.
     Int64(i64),
     /// Float value.
-    Float64(f64),
+    Float64(#[serde(with = "scalar_float")] f64),
     /// String value.
     Utf8(String),
     /// Date value.
@@ -455,3 +459,6 @@ mod tests {
         assert_eq!(split.test.end, *dates.last().unwrap());
     }
 }
+
+/// Shared progress and cancellation for local tasks.
+pub mod task;

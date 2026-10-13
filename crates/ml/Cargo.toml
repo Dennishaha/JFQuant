@@ -9,10 +9,6 @@ build = "build.rs"
 name = "native_smoke"
 required-features = ["lightgbm-native"]
 
-[[example]]
-name = "factor_pipeline"
-required-features = ["lightgbm-native", "duckdb-native"]
-
 [features]
 default = []
 lightgbm-native = []
@@ -22,6 +18,7 @@ duckdb-native = ["analytics-engine/duckdb-native"]
 analytics-core = { path = "../core" }
 analytics-engine = { path = "../engine", default-features = false }
 analytics-factor = { path = "../factor" }
+analytics-storage = { path = "../storage" }
 arrow-array.workspace = true
 arrow-schema.workspace = true
 chrono.workspace = true

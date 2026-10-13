@@ -86,20 +86,6 @@ pub fn input_columns(source: &str) -> Vec<String> {
     columns.into_iter().collect()
 }
 
-pub fn estimate_lookback(source: &str) -> u32 {
-    tokenize(&normalize_source(source))
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|token| match token {
-            Token::Number(value) if value.fract() == 0.0 && (1.0..=1000.0).contains(&value) => {
-                Some(value as u32)
-            }
-            _ => None,
-        })
-        .max()
-        .unwrap_or(0)
-}
-
 fn normalize_source(source: &str) -> String {
     let normalized = source
         .replace(['–', '—'], "-")
@@ -113,6 +99,7 @@ fn normalize_source(source: &str) -> String {
         .replace("DELAT", "DELTA")
         .replace("SM A", "SMA")
         .replace("CLOS E", "CLOSE")
+        .replace("C LOSE", "CLOSE")
         .replace("OP EN", "OPEN")
         .replace("D ELAY", "DELAY")
         .replace("B ANCH", "BANCH")
@@ -181,6 +168,12 @@ fn tokenize(source: &str) -> Result<Vec<Token>, ParseError> {
                 .iter()
                 .collect::<String>()
                 .to_ascii_uppercase();
+            let name = match name.as_str() {
+                "VOL" => "VOLUME".into(),
+                "HGIH" => "HIGH".into(),
+                "L" => "LOW".into(),
+                _ => name,
+            };
             if name == "OR" {
                 tokens.push(Token::Op("||".into()));
             } else if name == "AND" {
@@ -310,7 +303,10 @@ impl Parser {
                 let right = self.parse_add()?;
                 left = match kind {
                     0 => FactorExpr::Eq(Box::new(left), Box::new(right)),
-                    1 => FactorExpr::Neg(Box::new(FactorExpr::Eq(Box::new(left), Box::new(right)))),
+                    1 => FactorExpr::Sub(
+                        Box::new(FactorExpr::Const(1.0)),
+                        Box::new(FactorExpr::Eq(Box::new(left), Box::new(right))),
+                    ),
                     2 => FactorExpr::Gt(Box::new(left), Box::new(right)),
                     3 => FactorExpr::Or(
                         Box::new(FactorExpr::Gt(
@@ -448,13 +444,7 @@ impl Parser {
             "ABS" => unary(FactorExpr::Abs),
             "LOG" => unary(FactorExpr::Log),
             "SIGN" => unary(FactorExpr::Sign),
-            "RANK" => {
-                if args.len() == 1 || args.len() == 2 {
-                    Ok(FactorExpr::Rank(Box::new(args[0].clone())))
-                } else {
-                    Err(ParseError("RANK expects one or two arguments".into()))
-                }
-            }
+            "RANK" => unary(FactorExpr::Rank),
             "DELAY" => {
                 if args.len() == 1 {
                     Ok(FactorExpr::Delay(Box::new(args[0].clone()), 1))
@@ -469,27 +459,9 @@ impl Parser {
                     rolling(FactorExpr::Delta)
                 }
             }
-            "SUM" => {
-                if args.len() == 1 {
-                    Ok(FactorExpr::CumulativeSum(Box::new(args[0].clone())))
-                } else {
-                    rolling(FactorExpr::TsSum)
-                }
-            }
-            "MEAN" | "MA" => {
-                if args.len() == 1 {
-                    Ok(args[0].clone())
-                } else {
-                    rolling(FactorExpr::TsMean)
-                }
-            }
-            "STD" => {
-                if args.len() == 1 {
-                    Ok(args[0].clone())
-                } else {
-                    rolling(FactorExpr::TsStd)
-                }
-            }
+            "SUM" => rolling(FactorExpr::TsSum),
+            "MEAN" | "MA" => rolling(FactorExpr::TsMean),
+            "STD" => rolling(FactorExpr::TsStd),
             "TSMAX" => rolling(FactorExpr::TsMax),
             "TSMIN" => rolling(FactorExpr::TsMin),
             "TSRANK" => rolling(FactorExpr::TsRank),
@@ -516,48 +488,31 @@ impl Parser {
             }
             "REGRESI" => {
                 if args.len() >= 3 {
-                    let window = constant_usize(args.last().expect("checked len"))?;
-                    Ok(FactorExpr::RegResi(
+                    Ok(FactorExpr::RegResiMulti(
                         Box::new(args[0].clone()),
-                        Box::new(args[1].clone()),
-                        window,
+                        args[1..args.len() - 1].to_vec(),
+                        constant_usize(args.last().expect("checked len"))?,
                     ))
                 } else {
                     Err(ParseError(
-                        "REGRESI expects at least three arguments".into(),
+                        "REGRESI expects response, predictors and window".into(),
                     ))
                 }
             }
             "SMA" => {
                 if args.len() == 3 {
-                    Ok(FactorExpr::Ema(
-                        Box::new(args[0].clone()),
-                        constant_usize(&args[1])?,
-                        constant_f64(&args[2])?,
-                    ))
-                } else if args.len() == 2 {
-                    Ok(FactorExpr::TsMean(
-                        Box::new(args[0].clone()),
-                        constant_usize(&args[1])?,
-                    ))
+                    let n = constant_usize(&args[1])?;
+                    let m = constant_f64(&args[2])?;
+                    if !m.is_finite() || m <= 0.0 || m > n as f64 {
+                        return Err(ParseError("SMA requires 0 < M <= N".into()));
+                    }
+                    Ok(FactorExpr::Ema(Box::new(args[0].clone()), n, m))
                 } else {
                     Err(ParseError("SMA expects three arguments".into()))
                 }
             }
-            "MAX" => {
-                if args.len() == 1 {
-                    Ok(args[0].clone())
-                } else {
-                    minmax(&args, name, true)
-                }
-            }
-            "MIN" => {
-                if args.len() == 1 {
-                    Ok(args[0].clone())
-                } else {
-                    minmax(&args, name, false)
-                }
-            }
+            "MAX" => minmax(&args, name, true),
+            "MIN" => minmax(&args, name, false),
             "HIGHDAY" => rolling(FactorExpr::HighDay),
             "LOWDAY" => rolling(FactorExpr::LowDay),
             "SUMIF" => {
@@ -581,16 +536,18 @@ impl Parser {
                     Err(ParseError("FILTER expects two arguments".into()))
                 }
             }
-            "SUMAC" => {
+            "SUMAC" => Err(ParseError(
+                "SUMAC requires an explicitly audited cumulative-window interpretation".into(),
+            )),
+            "SEQUENCE" => {
                 if args.len() == 1 {
-                    Ok(FactorExpr::CumulativeSum(Box::new(args[0].clone())))
+                    Ok(FactorExpr::Sequence(constant_usize(&args[0])?))
                 } else {
-                    Err(ParseError("SUMAC expects one argument".into()))
+                    Err(ParseError(
+                        "SEQUENCE expects one positive integer window".into(),
+                    ))
                 }
             }
-            "SEQUENCE" => Ok(FactorExpr::Sequence(
-                args.first().map(constant_usize).transpose()?.unwrap_or(1),
-            )),
             _ => Err(ParseError(format!("unsupported function {name}"))),
         }
     }
@@ -598,8 +555,14 @@ impl Parser {
 
 fn constant_usize(expr: &FactorExpr) -> Result<usize, ParseError> {
     match expr {
-        FactorExpr::Const(value) if *value >= 0.0 => Ok(*value as usize),
-        _ => Err(ParseError("window must be constant".into())),
+        FactorExpr::Const(value)
+            if value.is_finite() && *value > 0.0 && value.fract() == 0.0 && *value <= 100_000.0 =>
+        {
+            Ok(*value as usize)
+        }
+        _ => Err(ParseError(
+            "window must be a positive integer <= 100000".into(),
+        )),
     }
 }
 fn constant_f64(expr: &FactorExpr) -> Result<f64, ParseError> {
@@ -627,7 +590,9 @@ fn minmax(args: &[FactorExpr], name: &str, is_max: bool) -> Result<FactorExpr, P
     if args.len() != 2 {
         return Err(ParseError(format!("{name} expects two arguments")));
     }
-    if let Ok(window) = constant_usize(&args[1]) {
+    if let Ok(window) = constant_usize(&args[1])
+        && window > 0
+    {
         Ok(if is_max {
             FactorExpr::TsMax(Box::new(args[0].clone()), window)
         } else {

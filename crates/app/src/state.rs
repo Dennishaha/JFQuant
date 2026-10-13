@@ -9,7 +9,7 @@ use analytics_core::{
     ColumnSchema, DataType, DatasetFile, DateRange, KeysetCursor, PageRequest, QueryPage,
     ScalarValue, SortKey,
 };
-use analytics_ml::pipeline::TrainingConfig;
+use analytics_ml::TrainingConfig;
 use chrono::NaiveDate;
 use std::collections::BTreeMap;
 use uuid::Uuid;
@@ -27,6 +27,10 @@ pub enum Panel {
     Factor,
     /// LightGBM retraining and result inspection.
     Model,
+    /// Saved annual research recipes.
+    Research,
+    /// Persistent local task history.
+    Runs,
 }
 
 /// State of the dataset management panel.
@@ -321,6 +325,8 @@ pub struct TaskInfo {
 /// Root UI state reduced from worker events.
 #[derive(Debug)]
 pub struct AppState {
+    /// Local platform state and workspace ownership.
+    pub platform: crate::platform::PlatformState,
     /// Active sidebar panel.
     pub panel: Panel,
     /// Dataset panel state.
@@ -344,6 +350,7 @@ pub struct AppState {
 impl Default for AppState {
     fn default() -> Self {
         Self {
+            platform: crate::platform::PlatformState::default(),
             panel: Panel::Dataset,
             dataset: DatasetPanel {
                 root: "data/market".into(),
@@ -484,6 +491,43 @@ pub fn apply_event(state: &mut AppState, event: &WorkerEvent) {
             state.model.error = None;
             state.push_message("模型训练完成".into());
         }
+        WorkerEvent::WorkflowFinished {
+            task,
+            outcome,
+            record,
+            datasets,
+            runs,
+        } => {
+            if !is_active(state, task) {
+                return;
+            }
+            state.platform.datasets = datasets.clone();
+            state.platform.runs = runs.clone();
+            state.platform.details = outcome.details.clone();
+            state.platform.selected_run = Some(record.id);
+            if let Some(data) = &outcome.data {
+                if data.kind == "market" {
+                    state.platform.market = data.id.clone();
+                } else {
+                    state.platform.actions = data.id.clone();
+                }
+            }
+            if let Some(id) = outcome.details["demo_actions"].as_str() {
+                state.platform.actions = id.into();
+            }
+            if let Ok(template) = serde_json::from_value(outcome.details["demo_template"].clone()) {
+                state.platform.template = template;
+            }
+            if let Some(tag) = outcome.details["tag"].as_str() {
+                state.platform.release_tag = tag.into();
+            }
+            state.platform.error = record.error.clone();
+            state.push_message(format!(
+                "{}：{}",
+                record.operation,
+                crate::platform::status_label(record.status)
+            ));
+        }
         WorkerEvent::Failed {
             task,
             kind,
@@ -499,6 +543,7 @@ pub fn apply_event(state: &mut AppState, event: &WorkerEvent) {
                 }
                 TaskKind::Pipeline => state.factor.error = Some(message.clone()),
                 TaskKind::Training => state.model.error = Some(message.clone()),
+                TaskKind::Workflow => state.platform.error = Some(message.clone()),
             }
             state.push_message(format!("任务失败：{message}"));
             clear_task(state, task);

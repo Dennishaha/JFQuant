@@ -3,11 +3,12 @@
 //! The egui thread only renders [`AppState`] and sends
 //! [`worker::WorkerCommand`]s;
 //! every DuckDB/LightGBM handle lives on the single worker thread spawned in
-//! [`worker::spawn`]. Layout: left navigation rail, top task bar, central
+//! [`worker::spawn_in_workspace`]. Layout: left navigation rail, top task bar, central
 //! panel, and a bottom status bar with a collapsible message log.
 #![warn(missing_docs)]
 
 mod panels;
+mod platform;
 mod state;
 mod theme;
 mod worker;
@@ -43,9 +44,16 @@ struct DesktopApp {
 impl DesktopApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::install(&cc.egui_ctx);
-        let (worker, events) = worker::spawn(cc.egui_ctx.clone());
+        let mut state = AppState::default();
+        platform::load_preferences(&mut state);
+        let root = state
+            .platform
+            .workspace
+            .as_ref()
+            .map(|w| w.root().to_owned());
+        let (worker, events) = worker::spawn_in_workspace(cc.egui_ctx.clone(), root);
         Self {
-            state: AppState::default(),
+            state,
             worker,
             events,
             cancel: None,
@@ -81,7 +89,14 @@ impl DesktopApp {
     }
 
     fn restart_worker(&mut self, ctx: &egui::Context) {
-        (self.worker, self.events) = worker::spawn(ctx.clone());
+        (self.worker, self.events) = worker::spawn_in_workspace(
+            ctx.clone(),
+            self.state
+                .platform
+                .workspace
+                .as_ref()
+                .map(|w| w.root().to_owned()),
+        );
         self.cancel = None;
         self.state.worker_restarted();
     }
@@ -89,6 +104,10 @@ impl DesktopApp {
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::top("top_bar").show(ui, |ui| {
             ui.add_space(4.0);
+            let changed = platform::workspace_bar(ui, &mut self.state);
+            if changed {
+                self.restart_worker(ui.ctx());
+            }
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("JFQuant Analytics").strong().size(16.0));
                 ui.label(
@@ -105,7 +124,7 @@ impl DesktopApp {
                     } else if let Some(task) = &self.state.active_task {
                         if ui
                             .add_enabled(
-                                self.cancel.is_some(),
+                                self.cancel.is_some() || self.state.platform.workspace.is_some(),
                                 egui::Button::new(
                                     egui::RichText::new("取消")
                                         .color(theme::semantic(ui.ctx()).error),
@@ -113,9 +132,13 @@ impl DesktopApp {
                             )
                             .on_disabled_hover_text("该任务暂不支持取消")
                             .clicked()
-                            && let Some(flag) = &self.cancel
                         {
-                            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                            if let Some(flag) = &self.cancel {
+                                flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            if self.state.platform.workspace.is_some() {
+                                let _ = self.worker.cancel(task.id);
+                            }
                         }
                         ui.label(&task.label);
                         ui.spinner();
@@ -141,6 +164,8 @@ impl DesktopApp {
                     (Panel::Query, "查询工作台"),
                     (Panel::Factor, "因子工作台"),
                     (Panel::Model, "建模"),
+                    (Panel::Research, "研究流程"),
+                    (Panel::Runs, "运行记录"),
                 ] {
                     let selected = self.state.panel == panel;
                     let text = if selected {
@@ -233,6 +258,29 @@ impl eframe::App for DesktopApp {
 }
 
 fn main() -> eframe::Result {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "--self-check") {
+        if args.len() != 2 {
+            eprintln!("usage: analytics-desktop --self-check OUTPUT_DIRECTORY");
+            std::process::exit(2);
+        }
+        let root = std::path::PathBuf::from(&args[1]);
+        let result = std::thread::spawn(move || {
+            analytics_workflow::self_check(&root).map_err(|e| e.to_string())
+        })
+        .join();
+        match result {
+            Ok(Ok(value)) => {
+                println!("{value}");
+                return Ok(());
+            }
+            other => {
+                eprintln!("native self-check failed: {other:?}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     let mut options = eframe::NativeOptions::default();
     options.viewport = options
         .viewport

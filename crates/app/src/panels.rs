@@ -37,18 +37,30 @@ pub fn render(
             });
         ui.add_space(8.0);
     }
+    if state.platform.require_workspace && state.platform.workspace.is_none() {
+        ui.heading("欢迎使用JFQuant");
+        ui.label("请在顶部选择或创建工作区，然后更新数据并运行研究。");
+        return;
+    }
     match state.panel {
-        Panel::Dataset => dataset_panel(ui, state, worker),
+        Panel::Dataset => {
+            crate::platform::data_panel(ui, state, worker, cancel_slot);
+            dataset_panel(ui, state, worker)
+        }
         Panel::Query => query_panel(ui, state, worker),
         Panel::Factor => factor_panel(ui, state, worker, cancel_slot, registry),
         Panel::Model => model_panel(ui, state, worker, cancel_slot),
+        Panel::Research => {
+            crate::platform::research_panel(ui, state, worker, cancel_slot, registry)
+        }
+        Panel::Runs => crate::platform::runs_panel(ui, state),
     }
     if state.worker_error.is_some() {
         *cancel_slot = None;
     }
 }
 
-fn send_command(state: &mut AppState, worker: &WorkerHandle, command: WorkerCommand) {
+pub(crate) fn send_command(state: &mut AppState, worker: &WorkerHandle, command: WorkerCommand) {
     let (task, kind) = command.task_info();
     let query = match &command {
         WorkerCommand::RunQuery { request, .. } => Some(request.clone()),
@@ -145,7 +157,7 @@ fn dataset_panel(ui: &mut egui::Ui, state: &mut AppState, worker: &WorkerHandle)
 
     let files = &state.dataset.files;
     if files.is_empty() {
-        ui.weak("尚未扫描。默认路径来自 .vscode/settings.json 的 data/market。");
+        ui.weak("尚未扫描。相对路径从所选工作区解析，默认目录为 data/market。");
         return;
     }
     let total_rows: u64 = files.iter().filter_map(|file| file.rows).sum();
@@ -441,16 +453,23 @@ fn factor_panel(
             });
             ui.end_row();
             ui.label("输出目录");
-            ui.add(egui::TextEdit::singleline(&mut state.factor.output_dir).desired_width(360.0));
+            if state.platform.workspace.is_some() {
+                ui.label(".jfquant/runs/任务编号（自动创建）");
+            } else {
+                ui.add(
+                    egui::TextEdit::singleline(&mut state.factor.output_dir).desired_width(360.0),
+                );
+            }
             ui.end_row();
         });
     ui.add_space(8.0);
 
     ui.horizontal(|ui| {
         ui.label(format!(
-            "因子选择（已选 {} / {}）",
+            "因子选择（已选 {} / {} 可执行，{} 项隔离）",
             state.factor.selected.len(),
-            registry.len()
+            registry.len() - registry.unsupported_ids().len(),
+            registry.unsupported_ids().len()
         ));
         ui.add(
             egui::TextEdit::singleline(&mut state.factor.filter)
@@ -459,7 +478,12 @@ fn factor_panel(
         );
         if ui.button("全选筛选结果").clicked() {
             for spec in registry.all() {
-                if state.factor.matches_filter(&spec.id, &spec.formula) {
+                if state.factor.matches_filter(&spec.id, &spec.formula)
+                    && !matches!(
+                        spec.expression,
+                        analytics_factor::FactorExpr::Unsupported { .. }
+                    )
+                {
                     state.factor.selected.insert(spec.id.clone());
                 }
             }
@@ -478,8 +502,21 @@ fn factor_panel(
                         continue;
                     }
                     let mut checked = state.factor.selected.contains(&spec.id);
-                    let response =
-                        ui.checkbox(&mut checked, egui::RichText::new(&spec.id).monospace());
+                    let unsupported = matches!(
+                        spec.expression,
+                        analytics_factor::FactorExpr::Unsupported { .. }
+                    );
+                    if unsupported {
+                        state.factor.selected.remove(&spec.id);
+                        checked = false;
+                    }
+                    let response = ui.add_enabled(
+                        !unsupported,
+                        egui::Checkbox::new(
+                            &mut checked,
+                            egui::RichText::new(&spec.id).monospace(),
+                        ),
+                    );
                     if response.changed() {
                         if checked {
                             state.factor.selected.insert(spec.id.clone());
@@ -487,8 +524,18 @@ fn factor_panel(
                             state.factor.selected.remove(&spec.id);
                         }
                     }
-                    ui.label(egui::RichText::new(&spec.formula).small().weak())
-                        .on_hover_text(&spec.formula);
+                    if let analytics_factor::FactorExpr::Unsupported { formula: reason } =
+                        &spec.expression
+                    {
+                        ui.label(
+                            egui::RichText::new(format!("已隔离：{reason}"))
+                                .small()
+                                .weak(),
+                        );
+                    } else {
+                        ui.label(egui::RichText::new(&spec.formula).small().weak())
+                            .on_hover_text(&spec.formula);
+                    }
                     ui.end_row();
                 }
             });
@@ -550,7 +597,7 @@ fn run_pipeline_request(
         date_range,
         factor_ids,
         output_dir: PathBuf::from(factor.output_dir.trim()),
-        training: analytics_ml::pipeline::TrainingConfig::default(),
+        training: analytics_ml::TrainingConfig::default(),
     })
 }
 
@@ -571,7 +618,11 @@ fn model_panel(
         ui.add(egui::TextEdit::singleline(&mut state.model.cache_path).desired_width(360.0));
         ui.end_row();
         ui.label("输出目录");
-        ui.add(egui::TextEdit::singleline(&mut state.model.output_dir).desired_width(360.0));
+        if state.platform.workspace.is_some() {
+            ui.label(".jfquant/runs/任务编号（自动创建）");
+        } else {
+            ui.add(egui::TextEdit::singleline(&mut state.model.output_dir).desired_width(360.0));
+        }
         ui.end_row();
         ui.label("股票池 ID");
         ui.add(

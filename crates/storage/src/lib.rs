@@ -1,14 +1,19 @@
-//! Local Parquet catalog and market-data schema validation.
+//! Local Parquet catalog, schema validation and independently acquired daily data.
 //!
 //! `analytics-storage` reads Parquet footers to enumerate files, row counts,
 //! leaf column names, physical types, and nullability without loading row
 //! data, and validates the normalized market schema required by the factor
-//! pipeline. CSV/XLSX/JSON import is intentionally out of scope for v1.
+//! pipeline. `acquisition` downloads and verifies pinned public archives;
+//! `qlib` reads explicit-root daily binary fields without a Qlib runtime.
 //!
 //! ```text
 //! Parquet directory -> ParquetCatalog -> Vec<DatasetFile> -> engine / factor
 //! ```
 #![warn(missing_docs)]
+
+pub mod acquisition;
+pub mod corporate_actions;
+pub mod qlib;
 
 use analytics_core::{ColumnSchema, DataType, DatasetFile};
 use parquet::{
@@ -231,3 +236,6 @@ mod tests {
         assert_eq!(files[0].schema.len(), 2);
     }
 }
+
+/// Cancellable public-data network transport.
+pub mod transport;

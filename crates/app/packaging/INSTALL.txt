@@ -1,0 +1,20 @@
+JFQuant 内部试用版 · Apple Silicon · macOS 14及以上
+
+将JFQuant.app拖入Applications，打开后选择工作区。
+无需Codex、Cargo、Python或Homebrew。下载使用macOS自带curl。
+安装包使用本地签名，尚无Developer ID签名及Apple公证。
+首次打开若被macOS阻止，请在“系统设置 → 隐私与安全性”允许打开可信的内部试用包。
+不要求关闭Gatekeeper，不自动修改系统安全设置。
+
+工作区保存data/及.jfquant/内的模板、运行记录、日志、模型与结果。
+更新或移除App不会删除工作区。研究开始前必须完成数据完整性检查。
+当前公开公司行动仍存在缺项，严格研究会显示“数据未就绪”。
+请勿将旧版复权碎股近似结果作为新版不复权账户收益。
+
+命令行入口：
+/Applications/JFQuant.app/Contents/MacOS/jfquant --help
+/Applications/JFQuant.app/Contents/MacOS/jfquant --workspace "$HOME/JFQuantWorkspace" jobs list
+
+可自行建立~/.local/bin/jfquant链接；不自动修改PATH或shell配置。
+App与CLI连接同一工作区后台；下载/研究默认返回任务ID，使用jobs wait等待结果。
+关闭界面不会取消任务；需要停止时使用界面取消或jobs cancel。

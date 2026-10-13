@@ -13,8 +13,8 @@
 //! ```
 //!
 //! All DuckDB and LightGBM handles are created inside the calling thread and
-//! never cross thread boundaries, so both the CLI example and the desktop
-//! worker can drive the pipeline from their own worker thread. Cancellation
+//! never cross thread boundaries. App, jfquant and the retained CLI example
+//! use the same service worker for pipeline execution. Cancellation
 //! is cooperative through a shared [`Cancellation`] flag checked between
 //! stages and inside factor/trainer loops.
 
@@ -49,9 +49,9 @@ use crate::{
     DenseMatrix, LightGbmPredictor, LightGbmTrainer, Predictor, TrainEvent, Trainer, TrainingSplit,
 };
 
-/// Everything needed for one full pipeline run, mirroring the CLI example
-/// arguments.
+/// Shared pipeline request used by the App and standalone CLI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PipelineRequest {
     /// Directory or single file of normalized daily market Parquet.
     pub market_path: PathBuf,
@@ -65,33 +65,11 @@ pub struct PipelineRequest {
     pub factor_ids: Vec<String>,
     /// Output directory for the factor cache, model, and predictions.
     pub output_dir: PathBuf,
-    /// LightGBM hyperparameters and early-stopping policy.
+    /// Model parameters and early stopping.
     pub training: TrainingConfig,
 }
 
-/// LightGBM hyperparameters used by pipeline and cache retraining runs.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TrainingConfig {
-    /// Native LightGBM `key=value` parameters.
-    pub parameters: BTreeMap<String, String>,
-    /// Early-stopping patience on the validation split; `None` disables it.
-    pub early_stopping_rounds: Option<u32>,
-}
-
-impl Default for TrainingConfig {
-    fn default() -> Self {
-        Self {
-            parameters: BTreeMap::from([
-                ("num_iterations".into(), "100".into()),
-                ("learning_rate".into(), "0.08".into()),
-                ("num_leaves".into(), "15".into()),
-                ("min_data_in_leaf".into(), "10".into()),
-                ("seed".into(), "17".into()),
-            ]),
-            early_stopping_rounds: Some(8),
-        }
-    }
-}
+use crate::TrainingConfig;
 
 /// Progress stream emitted by [`run_factor_pipeline`] and
 /// [`train_from_factor_cache`].
@@ -240,7 +218,7 @@ pub fn run_factor_pipeline(
             date_range: request.date_range.clone(),
             universe_id: request.universe_id.clone(),
             factor_ids: request.factor_ids.clone(),
-            formula_version: "dolphindb-gtja191-2023.01.17".into(),
+            formula_version: analytics_factor::FORMULA_VERSION.into(),
         },
         factor_progress,
         cancel.clone(),
@@ -699,6 +677,12 @@ fn write_factor_manifest(
         .filter_map(|id| registry.get(id).map(|spec| spec.lookback))
         .max()
         .unwrap_or_default()
+        .into();
+    value["requires_recursive_state"] = request
+        .factor_ids
+        .iter()
+        .filter_map(|id| registry.get(id))
+        .any(|spec| spec.requires_recursive_state)
         .into();
     let path = cache.with_file_name("factor_run_manifest.json");
     std::fs::write(&path, serde_json::to_vec_pretty(&value)?)?;

@@ -200,9 +200,14 @@ dependencies = [
  "analytics-engine",
  "analytics-factor",
  "analytics-ml",
+ "analytics-storage",
+ "chrono",
  "eframe",
  "egui",
  "egui_extras",
+ "serde_json",
+ "tempfile",
+ "uuid",
 ]
 
 [[package]]
@@ -244,6 +249,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror 2.0.21",
  "uuid",
 ]

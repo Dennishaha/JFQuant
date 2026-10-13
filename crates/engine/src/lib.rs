@@ -1,23 +1,55 @@
+//! DuckDB access isolated behind the [`QueryEngine`] trait.
+//!
+//! The UI and pipeline never touch DuckDB directly. The default build has no
+//! native dependency; enable `duckdb-native` for a system (or downloaded)
+//! library and `duckdb-bundled` for a source build with the Parquet, JSON,
+//! and ICU extensions. The native backend additionally exposes
+//! `DuckDbEngine::load_market_rows`, a worker-local loader that joins
+//! historical universe membership as-of each market date and returns
+//! normalized [`analytics_core::MarketRow`] values for factor execution.
+//!
+//! The DuckDB connection is not `Sync` by design: create and use it on one
+//! worker thread only.
+#![warn(missing_docs)]
+
 use analytics_core::{ColumnSchema, DatasetFile, ExportRequest, PageRequest, QueryPage};
 use std::path::Path;
 use thiserror::Error;
 
+/// Errors returned by the SQL and market-loading boundary.
 #[derive(Debug, Error)]
 pub enum EngineError {
+    /// Built without a DuckDB backend; enable `duckdb-native` or
+    /// `duckdb-bundled`.
     #[error("DuckDB backend is not enabled; build with `duckdb-native` or `duckdb-bundled`")]
     BackendUnavailable,
+    /// Structurally invalid request (bad page size, invalid identifier, ...).
     #[error("invalid request: {0}")]
     InvalidRequest(String),
+    /// Error reported by DuckDB itself.
     #[error("DuckDB error: {0}")]
     DuckDb(String),
 }
 
+/// Convenience result alias for engine calls.
 pub type Result<T> = std::result::Result<T, EngineError>;
 
+/// SQL surface used by the UI and pipeline.
+///
+/// All methods take `&mut self` because a DuckDB connection is single
+/// threaded; implementations are expected to live on one worker thread.
 pub trait QueryEngine {
+    /// Lists Parquet files under `root` without reading row data.
     fn list_parquet(&mut self, root: &Path) -> Result<Vec<DatasetFile>>;
+    /// Returns the result column schemas of `sql` by executing it with
+    /// `LIMIT 0`.
     fn describe(&mut self, sql: &str) -> Result<Vec<ColumnSchema>>;
+    /// Fetches one page of `request` using keyset (cursor) pagination:
+    /// sort keys are validated as identifiers, cursor values become a
+    /// lexicographic predicate, and no `OFFSET` is generated.
     fn query_page(&mut self, request: PageRequest) -> Result<QueryPage>;
+    /// Streams the full result of `request.sql` into `request.destination`
+    /// as Parquet (ZSTD) or CSV via DuckDB `COPY`.
     fn export(&mut self, request: ExportRequest) -> Result<()>;
 }
 
@@ -29,21 +61,64 @@ mod duckdb_backend {
     use duckdb::Connection;
     use std::fs;
 
+    /// DuckDB-backed [`QueryEngine`] over one worker-local connection.
     pub struct DuckDbEngine {
         connection: Connection,
+        query_snapshot: Option<String>,
+        snapshot_generation: u64,
     }
 
     impl DuckDbEngine {
+        /// Opens an in-memory database.
         pub fn open_in_memory() -> Result<Self> {
             Connection::open_in_memory()
-                .map(|connection| Self { connection })
+                .map(|connection| Self {
+                    connection,
+                    query_snapshot: None,
+                    snapshot_generation: 0,
+                })
                 .map_err(|error| EngineError::DuckDb(error.to_string()))
         }
 
+        /// Opens (or creates) a database file at `path`.
         pub fn open(path: impl AsRef<Path>) -> Result<Self> {
             Connection::open(path)
-                .map(|connection| Self { connection })
+                .map(|connection| Self {
+                    connection,
+                    query_snapshot: None,
+                    snapshot_generation: 0,
+                })
                 .map_err(|error| EngineError::DuckDb(error.to_string()))
+        }
+
+        /// Replaces the connection-local query snapshot with the result of `sql`.
+        /// Returns a SELECT over the temporary table; source expressions are
+        /// evaluated once. The previous snapshot is removed even if SQL fails.
+        pub fn replace_query_snapshot(&mut self, sql: &str) -> Result<String> {
+            self.clear_query_snapshot()?;
+            self.snapshot_generation =
+                self.snapshot_generation.checked_add(1).ok_or_else(|| {
+                    EngineError::InvalidRequest("query snapshot generation exhausted".into())
+                })?;
+            let table = format!("__jfquant_snapshot_{}", self.snapshot_generation);
+            self.connection
+                .execute_batch(&format!(
+                    "CREATE TEMP TABLE {table} AS SELECT * FROM ({sql}) AS snapshot_source"
+                ))
+                .map_err(|error| EngineError::DuckDb(error.to_string()))?;
+            self.query_snapshot = Some(table.clone());
+            Ok(format!("SELECT * FROM {table}"))
+        }
+
+        /// Drops the active query snapshot on this connection's worker thread.
+        pub fn clear_query_snapshot(&mut self) -> Result<()> {
+            if let Some(table) = &self.query_snapshot {
+                self.connection
+                    .execute_batch(&format!("DROP TABLE IF EXISTS {table}"))
+                    .map_err(|error| EngineError::DuckDb(error.to_string()))?;
+                self.query_snapshot = None;
+            }
+            Ok(())
         }
 
         /// Loads normalized market rows after an as-of historical-universe
@@ -129,7 +204,7 @@ mod duckdb_backend {
             match request.format {
                 analytics_core::ExportFormat::Parquet => format!(
                     "COPY ({}) TO '{}' (FORMAT PARQUET, COMPRESSION ZSTD)",
-                    request.sql.replace('\'', "''"),
+                    request.sql,
                     request
                         .destination
                         .display()
@@ -138,7 +213,7 @@ mod duckdb_backend {
                 ),
                 analytics_core::ExportFormat::Csv => format!(
                     "COPY ({}) TO '{}' (HEADER, FORMAT CSV)",
-                    request.sql.replace('\'', "''"),
+                    request.sql,
                     request
                         .destination
                         .display()
@@ -207,10 +282,15 @@ mod duckdb_backend {
 
         fn describe(&mut self, sql: &str) -> Result<Vec<ColumnSchema>> {
             let query = format!("SELECT * FROM ({sql}) AS q LIMIT 0");
-            let statement = self
+            let mut statement = self
                 .connection
                 .prepare(&query)
                 .map_err(|e| EngineError::DuckDb(e.to_string()))?;
+            {
+                let _rows = statement
+                    .query([])
+                    .map_err(|e| EngineError::DuckDb(e.to_string()))?;
+            }
             let columns = statement
                 .column_names()
                 .iter()
@@ -224,7 +304,7 @@ mod duckdb_backend {
             Ok(columns)
         }
 
-        fn query_page(&mut self, request: PageRequest) -> Result<QueryPage> {
+        fn query_page(&mut self, mut request: PageRequest) -> Result<QueryPage> {
             request
                 .validate()
                 .map_err(|e| EngineError::InvalidRequest(e.to_string()))?;
@@ -234,6 +314,16 @@ mod duckdb_backend {
                 ));
             }
             let columns = self.describe(&request.sql)?;
+            for key in &mut request.sort {
+                key.column = columns
+                    .iter()
+                    .find(|column| column.name.eq_ignore_ascii_case(&key.column))
+                    .ok_or_else(|| {
+                        EngineError::InvalidRequest(format!("unknown sort column {}", key.column))
+                    })?
+                    .name
+                    .clone();
+            }
             let cursor_filter = request
                 .after
                 .as_ref()
@@ -267,16 +357,41 @@ mod duckdb_backend {
             {
                 let mut result = Vec::new();
                 for index in 0..row.as_ref().column_count() {
-                    let value: String = row.get(index).unwrap_or_default();
-                    result.push(ScalarValue::Utf8(value));
+                    let value = row
+                        .get_ref(index)
+                        .map_err(|e| EngineError::DuckDb(e.to_string()))?;
+                    result.push(scalar_value(value)?);
                 }
                 values.push(result);
             }
             let has_next = values.len() > request.limit as usize;
+            if has_next && !request.sort.is_empty() {
+                let keys = |row: &Vec<ScalarValue>| {
+                    request
+                        .sort
+                        .iter()
+                        .filter_map(|sort| {
+                            columns.iter().position(|column| column.name == sort.column)
+                        })
+                        .map(|index| row[index].clone())
+                        .collect::<Vec<_>>()
+                };
+                let previous = keys(&values[values.len() - 2]);
+                let following = keys(&values[values.len() - 1]);
+                let identical = previous.iter().zip(&following).all(|(a, b)| {
+                    a == b || matches!((a, b), (ScalarValue::Float64(a), ScalarValue::Float64(b)) if a.is_nan() && b.is_nan())
+                });
+                if identical {
+                    return Err(EngineError::InvalidRequest(
+                        "sort keys are not unique at the page boundary; add a unique tie-breaker"
+                            .into(),
+                    ));
+                }
+            }
             if has_next {
                 values.pop();
             }
-            let next_cursor = has_next.then(|| {
+            let next_cursor = (has_next && !request.sort.is_empty()).then(|| {
                 KeysetCursor(
                     values
                         .last()
@@ -302,7 +417,11 @@ mod duckdb_backend {
         }
 
         fn export(&mut self, request: ExportRequest) -> Result<()> {
-            if let Some(parent) = request.destination.parent() {
+            if let Some(parent) = request
+                .destination
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+            {
                 fs::create_dir_all(parent).map_err(|e| EngineError::DuckDb(e.to_string()))?;
             }
             self.connection
@@ -312,12 +431,42 @@ mod duckdb_backend {
         }
     }
 
+    fn scalar_value(value: duckdb::types::ValueRef<'_>) -> Result<ScalarValue> {
+        use duckdb::types::ValueRef;
+        Ok(match value {
+            ValueRef::Null => ScalarValue::Null,
+            ValueRef::Boolean(value) => ScalarValue::Boolean(value),
+            ValueRef::TinyInt(value) => ScalarValue::Int64(value.into()),
+            ValueRef::SmallInt(value) => ScalarValue::Int64(value.into()),
+            ValueRef::Int(value) => ScalarValue::Int64(value.into()),
+            ValueRef::BigInt(value) => ScalarValue::Int64(value),
+            ValueRef::UTinyInt(value) => ScalarValue::Int64(value.into()),
+            ValueRef::USmallInt(value) => ScalarValue::Int64(value.into()),
+            ValueRef::UInt(value) => ScalarValue::Int64(value.into()),
+            ValueRef::UBigInt(value) => ScalarValue::Int64(value.try_into().map_err(|_| {
+                EngineError::InvalidRequest("uint64 result exceeds int64 range".into())
+            })?),
+            ValueRef::Float(value) => ScalarValue::Float64(value.into()),
+            ValueRef::Double(value) => ScalarValue::Float64(value),
+            ValueRef::Text(value) => ScalarValue::Utf8(String::from_utf8_lossy(value).into_owned()),
+            ValueRef::Date32(days) => ScalarValue::Date(
+                NaiveDate::from_ymd_opt(1970, 1, 1)
+                    .unwrap()
+                    .checked_add_signed(chrono::Duration::days(days.into()))
+                    .ok_or_else(|| {
+                        EngineError::InvalidRequest("date result out of range".into())
+                    })?,
+            ),
+            other => ScalarValue::Utf8(format!("{other:?}")),
+        })
+    }
+
     fn order_clause(sort: &[analytics_core::SortKey]) -> Result<String> {
         sort.iter()
             .map(|key| {
                 validate_identifier(&key.column)?;
                 Ok(format!(
-                    "q.{} {}",
+                    "q.{} {} NULLS LAST",
                     key.column,
                     if key.descending { "DESC" } else { "ASC" }
                 ))
@@ -341,19 +490,24 @@ mod duckdb_backend {
             for (prefix, key) in sort.iter().enumerate().take(index) {
                 validate_identifier(&key.column)?;
                 parts.push(format!(
-                    "q.{} = {}",
+                    "q.{} IS NOT DISTINCT FROM {}",
                     key.column,
                     scalar_literal(&cursor.0[prefix])?
                 ));
             }
             validate_identifier(&sort[index].column)?;
             let operator = if sort[index].descending { "<" } else { ">" };
-            parts.push(format!(
-                "q.{} {} {}",
-                sort[index].column,
-                operator,
-                scalar_literal(&cursor.0[index])?
-            ));
+            parts.push(if matches!(&cursor.0[index], ScalarValue::Null) {
+                "FALSE".into()
+            } else {
+                format!(
+                    "(q.{} {} {} OR q.{} IS NULL)",
+                    sort[index].column,
+                    operator,
+                    scalar_literal(&cursor.0[index])?,
+                    sort[index].column
+                )
+            });
             terms.push(format!("({})", parts.join(" AND ")));
         }
         Ok(terms.join(" OR "))
@@ -377,6 +531,13 @@ mod duckdb_backend {
             ScalarValue::Null => "NULL".into(),
             ScalarValue::Boolean(value) => value.to_string(),
             ScalarValue::Int64(value) => value.to_string(),
+            ScalarValue::Float64(value) if value.is_nan() => "CAST('NaN' AS DOUBLE)".into(),
+            ScalarValue::Float64(value) if *value == f64::INFINITY => {
+                "CAST('Infinity' AS DOUBLE)".into()
+            }
+            ScalarValue::Float64(value) if *value == f64::NEG_INFINITY => {
+                "CAST('-Infinity' AS DOUBLE)".into()
+            }
             ScalarValue::Float64(value) => value.to_string(),
             ScalarValue::Utf8(value) => format!("'{}'", value.replace('\'', "''")),
             ScalarValue::Date(value) => format!("DATE '{}'", value),
@@ -390,10 +551,13 @@ mod duckdb_backend {
 pub use duckdb_backend::PublicDuckDbEngine as DuckDbEngine;
 
 #[cfg(not(feature = "duckdb-native"))]
+/// Placeholder used when no DuckDB backend is compiled in; every constructor
+/// returns [`EngineError::BackendUnavailable`].
 pub struct DuckDbEngine;
 
 #[cfg(not(feature = "duckdb-native"))]
 impl DuckDbEngine {
+    /// Always fails with [`EngineError::BackendUnavailable`].
     pub fn open_in_memory() -> Result<Self> {
         Err(EngineError::BackendUnavailable)
     }

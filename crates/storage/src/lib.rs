@@ -1,3 +1,15 @@
+//! Local Parquet catalog and market-data schema validation.
+//!
+//! `analytics-storage` reads Parquet footers to enumerate files, row counts,
+//! leaf column names, physical types, and nullability without loading row
+//! data, and validates the normalized market schema required by the factor
+//! pipeline. CSV/XLSX/JSON import is intentionally out of scope for v1.
+//!
+//! ```text
+//! Parquet directory -> ParquetCatalog -> Vec<DatasetFile> -> engine / factor
+//! ```
+#![warn(missing_docs)]
+
 use analytics_core::{ColumnSchema, DataType, DatasetFile};
 use parquet::{
     basic::Type as PhysicalType,
@@ -9,26 +21,39 @@ use std::{
 };
 use thiserror::Error;
 
+/// Errors returned while opening/scanning Parquet or validating the market
+/// schema.
 #[derive(Debug, Error)]
 pub enum StorageError {
+    /// Filesystem failure.
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
+    /// The path is neither a directory nor a Parquet file.
     #[error("path is not a directory or parquet file: {0}")]
     InvalidPath(PathBuf),
+    /// Market schema contract violation.
     #[error("schema error: {0}")]
     Schema(String),
+    /// Parquet footer decoding failure.
     #[error("Parquet error: {0}")]
     Parquet(String),
 }
 
+/// Convenience result alias for storage calls.
 pub type Result<T> = std::result::Result<T, StorageError>;
 
+/// Read-only catalog over a directory tree (or single file) of Parquet data.
 #[derive(Debug, Clone)]
 pub struct ParquetCatalog {
     root: PathBuf,
 }
 
 impl ParquetCatalog {
+    /// Opens a catalog rooted at an existing directory or Parquet file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidPath`] when the path does not exist.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
         if !root.exists() {
@@ -37,10 +62,40 @@ impl ParquetCatalog {
         Ok(Self { root })
     }
 
+    /// The catalog root path.
     pub fn root(&self) -> &Path {
         &self.root
     }
 
+    /// Recursively scans the root and returns every `.parquet` file with its
+    /// footer metadata (row count and leaf column schemas), sorted by path.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use analytics_storage::ParquetCatalog;
+    /// use arrow_array::{ArrayRef, Int64Array, RecordBatch};
+    /// use arrow_schema::{DataType, Field, Schema};
+    /// use parquet::arrow::ArrowWriter;
+    /// use std::{fs::File, sync::Arc};
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, true)]));
+    /// let batch = RecordBatch::try_new(
+    ///     schema.clone(),
+    ///     vec![Arc::new(Int64Array::from(vec![Some(1), None])) as ArrayRef],
+    /// )
+    /// .unwrap();
+    /// let mut writer =
+    ///     ArrowWriter::try_new(File::create(dir.path().join("a.parquet")).unwrap(), schema, None)
+    ///         .unwrap();
+    /// writer.write(&batch).unwrap();
+    /// writer.close().unwrap();
+    ///
+    /// let files = ParquetCatalog::open(dir.path()).unwrap().scan().unwrap();
+    /// assert_eq!(files.len(), 1);
+    /// assert_eq!(files[0].rows, Some(2));
+    /// ```
     pub fn scan(&self) -> Result<Vec<DatasetFile>> {
         let mut files = Vec::new();
         visit_parquet(&self.root, &mut files)?;
@@ -102,6 +157,14 @@ fn map_physical_type(physical: PhysicalType, converted: parquet::basic::Converte
     }
 }
 
+/// Validates that a column set satisfies the normalized market contract:
+/// `instrument_id`, `trade_date`, raw and adjusted OHLC, `volume`, `amount`,
+/// `is_trading`, and `listing_date`, each with the expected logical type.
+///
+/// # Errors
+///
+/// Returns [`StorageError::Schema`] naming the first missing or mistyped
+/// column.
 pub fn validate_required_market_columns(columns: &[ColumnSchema]) -> Result<()> {
     const REQUIRED: &[(&str, DataType)] = &[
         ("instrument_id", DataType::Utf8),

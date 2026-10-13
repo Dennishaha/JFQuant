@@ -43,7 +43,10 @@
       "request": "launch",
       "program": "${workspaceFolder}/target/debug/analytics-desktop",
       "cwd": "${workspaceFolder}",
-      "preLaunchTask": "Rust: build desktop app"
+      "preLaunchTask": "Rust: build desktop app",
+      "preRunCommands": [
+        "script [bp.SetEnabled(False) for bp in lldb.debugger.GetSelectedTarget().breakpoint_iter() if bp.MatchesName('cpp_exception')]"
+      ]
     }
   ]
 }

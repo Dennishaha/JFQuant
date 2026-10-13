@@ -3,13 +3,21 @@ name = "analytics-desktop"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+build = "build.rs"
 
 [dependencies]
 analytics-core = { path = "../core" }
-analytics-engine = { path = "../engine" }
+analytics-engine = { path = "../engine", features = ["duckdb-native"] }
 analytics-factor = { path = "../factor" }
-analytics-ml = { path = "../ml" }
+analytics-ml = { path = "../ml", features = ["lightgbm-native", "duckdb-native"] }
+analytics-storage = { path = "../storage" }
+chrono.workspace = true
 eframe.workspace = true
 egui.workspace = true
 egui_extras.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile = "3.23"
 

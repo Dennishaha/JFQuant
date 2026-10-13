@@ -1,3 +1,11 @@
+//! LightGBM training and prediction boundary.
+//!
+//! The default build has no native dependency. With `lightgbm-native`, the
+//! C API wrapper owns dataset and booster handles on the calling worker
+//! thread. The optional [`pipeline`] module composes DuckDB, Alpha191, and
+//! this trainer into the full local pipeline.
+#![warn(missing_docs)]
+
 use analytics_core::{ModelManifest, PredictionBatch, TrainRequest, TrainingArtifact};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -7,39 +15,74 @@ use std::{
 };
 use thiserror::Error;
 
+#[cfg(all(feature = "lightgbm-native", feature = "duckdb-native"))]
+pub mod pipeline;
+
+/// Errors returned by matrix validation, native LightGBM calls, and artifact
+/// serialization.
 #[derive(Debug, Error)]
 pub enum MlError {
+    /// The native LightGBM feature was not compiled.
     #[error("native LightGBM backend is not enabled")]
     BackendUnavailable,
+    /// Matrix shape, labels, or request metadata are invalid.
     #[error("invalid training data: {0}")]
     InvalidData(String),
+    /// The native C API returned an error.
     #[error("LightGBM error: {0}")]
     Native(String),
+    /// Filesystem failure.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+    /// JSON serialization or parsing failure.
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 }
 
+/// Convenience result alias for ML calls.
 pub type Result<T> = std::result::Result<T, MlError>;
 
+/// Progress events emitted by a trainer.
 #[derive(Debug, Clone)]
 pub enum TrainEvent {
-    Started { rows: usize, features: usize },
-    Iteration { iteration: u32, metrics: Vec<f64> },
-    Finished { iterations: u32 },
+    /// Dataset creation has started.
+    Started {
+        /// Number of training rows.
+        rows: usize,
+        /// Number of feature columns.
+        features: usize,
+    },
+    /// One boosting iteration completed, with train then validation metrics.
+    Iteration {
+        /// One-based boosting iteration.
+        iteration: u32,
+        /// Metrics in backend order.
+        metrics: Vec<f64>,
+    },
+    /// Training completed successfully.
+    Finished {
+        /// Number of completed boosting iterations.
+        iterations: u32,
+    },
+    /// Training noticed the cancellation flag.
     Cancelled,
 }
 
+/// Row-major dense feature matrix and one label per row.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DenseMatrix {
+    /// Feature values in row-major order; `NaN` represents missing data.
     pub features: Vec<f64>,
+    /// Regression/classification labels.
     pub labels: Vec<f32>,
+    /// Number of rows.
     pub rows: usize,
+    /// Number of feature columns.
     pub columns: usize,
 }
 
 impl DenseMatrix {
+    /// Checks non-empty shape and feature/label lengths.
     pub fn validate(&self) -> Result<()> {
         if self.rows == 0 || self.columns == 0 {
             return Err(MlError::InvalidData("empty matrix".into()));
@@ -58,14 +101,19 @@ impl DenseMatrix {
     }
 }
 
+/// Chronological train/validation/test matrices with matching columns.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrainingSplit {
+    /// Training matrix.
     pub train: DenseMatrix,
+    /// Validation matrix used by early stopping.
     pub validation: DenseMatrix,
+    /// Test matrix used only for final metrics and predictions.
     pub test: DenseMatrix,
 }
 
 impl TrainingSplit {
+    /// Validates every matrix and requires equal feature counts.
     pub fn validate(&self) -> Result<()> {
         self.train.validate()?;
         self.validation.validate()?;
@@ -80,7 +128,12 @@ impl TrainingSplit {
     }
 }
 
+/// Training abstraction implemented by the native LightGBM adapter and test
+/// doubles.
 pub trait Trainer {
+    /// Trains a dense feature matrix and writes model artifacts to
+    /// `output_dir`. Implementations must validate shape and honor
+    /// `cancel` between boosting iterations.
     #[allow(clippy::too_many_arguments)]
     fn train_dense(
         &self,
@@ -94,6 +147,8 @@ pub trait Trainer {
         cancel: Arc<AtomicBool>,
     ) -> Result<TrainingArtifact>;
 
+    /// Trains on the train split and registers validation/test matrices when
+    /// the backend supports them.
     fn train_split(
         &self,
         request: &TrainRequest,
@@ -116,7 +171,10 @@ pub trait Trainer {
     }
 }
 
+/// Prediction abstraction for dense feature matrices.
 pub trait Predictor {
+    /// Predicts `rows` rows of `columns` features; optionally returns feature
+    /// contributions alongside normal predictions.
     fn predict_dense(
         &self,
         features: &[f64],
@@ -260,7 +318,9 @@ mod native {
         }
     }
 
+    /// Native predictor backed by a model text file.
     pub struct LightGbmPredictor {
+        /// Path to the saved LightGBM model.
         pub model_path: PathBuf,
     }
 
@@ -351,6 +411,8 @@ mod native {
         }
     }
 
+    /// Native LightGBM trainer. Dataset and booster handles stay in the
+    /// calling worker thread.
     pub struct LightGbmTrainer;
 
     impl LightGbmTrainer {
@@ -768,6 +830,7 @@ pub use native::PublicLightGbmPredictor as LightGbmPredictor;
 pub use native::PublicLightGbmTrainer as LightGbmTrainer;
 
 #[cfg(not(feature = "lightgbm-native"))]
+/// Placeholder trainer that reports [`MlError::BackendUnavailable`].
 pub struct LightGbmTrainer;
 
 #[cfg(not(feature = "lightgbm-native"))]
@@ -788,6 +851,7 @@ impl Trainer for LightGbmTrainer {
 }
 
 #[cfg(not(feature = "lightgbm-native"))]
+/// Placeholder predictor that reports [`MlError::BackendUnavailable`].
 pub struct LightGbmPredictor;
 
 #[cfg(not(feature = "lightgbm-native"))]
@@ -797,6 +861,7 @@ impl Predictor for LightGbmPredictor {
     }
 }
 
+/// Loads and deserializes a model manifest from JSON.
 pub fn load_manifest(path: impl AsRef<Path>) -> Result<ModelManifest> {
     Ok(serde_json::from_slice(&fs::read(path)?)?)
 }

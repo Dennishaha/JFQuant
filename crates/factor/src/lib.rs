@@ -1,3 +1,17 @@
+//! Alpha191 registry and panel executor.
+//!
+//! The registry contains all 191 canonical GTJA Alpha191 formula strings
+//! pinned to the DolphinDB reference version; a small recursive-descent
+//! parser normalizes them into the [`FactorExpr`] DSL. The panel executor
+//! evaluates expressions with time-series groups by instrument and
+//! cross-sectional groups by trade date; missing history stays null rather
+//! than being forward-filled, matching the "missing values are data" rule.
+//!
+//! ```text
+//! FactorSpec registry -> Panel executor -> {time-series, cross-sectional} ops -> Parquet cache
+//! ```
+#![warn(missing_docs)]
+
 use analytics_core::{Date, DateRange};
 use arrow_array::{ArrayRef, Date32Array, Float64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType as ArrowDataType, Field, Schema};
@@ -19,99 +33,184 @@ use thiserror::Error;
 mod formulas;
 mod parser;
 
+/// Factor expression AST produced by the formula parser and executed by the
+/// panel executor. Window lengths are in observations (per instrument).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FactorExpr {
+    /// Panel input column (`close`, `volume`, ...).
     Column(String),
+    /// Numeric literal.
     Const(f64),
+    /// Element-wise addition.
     Add(Box<FactorExpr>, Box<FactorExpr>),
+    /// Element-wise subtraction.
     Sub(Box<FactorExpr>, Box<FactorExpr>),
+    /// Element-wise multiplication.
     Mul(Box<FactorExpr>, Box<FactorExpr>),
+    /// Element-wise division (null on zero divisor).
     Div(Box<FactorExpr>, Box<FactorExpr>),
+    /// Element-wise negation.
     Neg(Box<FactorExpr>),
+    /// Element-wise absolute value.
     Abs(Box<FactorExpr>),
+    /// Natural logarithm (null for non-positive input).
     Log(Box<FactorExpr>),
+    /// Sign function (-1, 0, 1).
     Sign(Box<FactorExpr>),
+    /// Constant exponent power.
     Pow(Box<FactorExpr>, f64),
+    /// Expression exponent power.
     PowExpr(Box<FactorExpr>, Box<FactorExpr>),
+    /// Element-wise equality (1.0/0.0).
     Eq(Box<FactorExpr>, Box<FactorExpr>),
+    /// Element-wise greater-than (1.0/0.0).
     Gt(Box<FactorExpr>, Box<FactorExpr>),
+    /// Element-wise less-than (1.0/0.0).
     Lt(Box<FactorExpr>, Box<FactorExpr>),
+    /// Conditional select: `If(cond, then, else)`.
     If(Box<FactorExpr>, Box<FactorExpr>, Box<FactorExpr>),
+    /// Value `n` observations ago (time series).
     Delay(Box<FactorExpr>, usize),
+    /// Difference from `n` observations ago (time series).
     Delta(Box<FactorExpr>, usize),
+    /// Rolling sum over `n` observations.
     TsSum(Box<FactorExpr>, usize),
+    /// Rolling mean over `n` observations.
     TsMean(Box<FactorExpr>, usize),
+    /// Rolling standard deviation over `n` observations.
     TsStd(Box<FactorExpr>, usize),
+    /// Rolling minimum over `n` observations.
     TsMin(Box<FactorExpr>, usize),
+    /// Rolling maximum over `n` observations.
     TsMax(Box<FactorExpr>, usize),
+    /// Rank of the latest value within the trailing `n` observations.
     TsRank(Box<FactorExpr>, usize),
+    /// Linearly decayed weighted mean over `n` observations.
     DecayLinear(Box<FactorExpr>, usize),
+    /// Rolling Pearson correlation of two series over `n` observations.
     Corr(Box<FactorExpr>, Box<FactorExpr>, usize),
+    /// Rolling covariance of two series over `n` observations.
     Cov(Box<FactorExpr>, Box<FactorExpr>, usize),
+    /// Rolling OLS beta of the first series on the second over `n` points.
     RegBeta(Box<FactorExpr>, Box<FactorExpr>, usize),
+    /// Rolling OLS residual of the first series on the second.
     RegResi(Box<FactorExpr>, Box<FactorExpr>, usize),
+    /// Cross-sectional percentile rank per trade date.
     Rank(Box<FactorExpr>),
+    /// Cross-sectional z-score per trade date.
     ZScore(Box<FactorExpr>),
+    /// Cross-sectional scaling to sum(|x|) = 1 per trade date.
     Scale(Box<FactorExpr>),
+    /// Element-wise minimum of two series.
     Min(Box<FactorExpr>, Box<FactorExpr>),
+    /// Element-wise maximum of two series.
     Max(Box<FactorExpr>, Box<FactorExpr>),
+    /// Rolling count of non-null truthy values over `n` observations.
     Count(Box<FactorExpr>, usize),
+    /// Rolling product over `n` observations.
     Product(Box<FactorExpr>, usize),
+    /// Rolling weighted mean over `n` observations.
     WeightedMean(Box<FactorExpr>, usize),
+    /// Exponential moving average over `n` observations with smoothing `alpha`.
     Ema(Box<FactorExpr>, usize, f64),
+    /// Observations since the rolling `n`-window maximum occurred.
     HighDay(Box<FactorExpr>, usize),
+    /// Observations since the rolling `n`-window minimum occurred.
     LowDay(Box<FactorExpr>, usize),
+    /// Rolling sum of the first series where the second is truthy.
     SumIf(Box<FactorExpr>, Box<FactorExpr>, usize),
+    /// Values of the first series where the second is truthy, else null.
     Filter(Box<FactorExpr>, Box<FactorExpr>),
+    /// Cumulative sum per instrument.
     CumulativeSum(Box<FactorExpr>),
+    /// Element-wise logical and (1.0/0.0).
     And(Box<FactorExpr>, Box<FactorExpr>),
+    /// Element-wise logical or (1.0/0.0).
     Or(Box<FactorExpr>, Box<FactorExpr>),
+    /// The constant sequence 1..=n used by a few catalog formulas.
     Sequence(usize),
-    Unsupported { formula: String },
+    /// Formula parsed but needs an operator that is not yet implemented.
+    /// Formula parsed but needs an operator that is not yet implemented.
+    Unsupported {
+        /// Original formula text.
+        formula: String,
+    },
 }
 
+/// One registered Alpha191 factor: parsed expression plus catalog metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FactorSpec {
+    /// Canonical ID such as `alpha_001`.
     pub id: String,
+    /// Parsed expression (or [`FactorExpr::Unsupported`]).
     pub expression: FactorExpr,
+    /// Maximum trailing window the expression reads.
     pub lookback: u32,
+    /// Panel input columns the expression reads.
     pub input_columns: Vec<String>,
+    /// Formula catalog version pin.
     pub version: String,
+    /// Original published formula string.
     pub formula: String,
 }
 
+/// One factor computation run over a panel.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FactorRunRequest {
+    /// Inclusive date bounds (validated by the caller).
     pub date_range: DateRange,
+    /// Universe recorded in the output manifest.
     pub universe_id: String,
+    /// Factors to compute, in output column order.
     pub factor_ids: Vec<String>,
+    /// Formula catalog version pin recorded in the manifest.
     pub formula_version: String,
 }
 
+/// Progress events emitted by [`FactorExecutor::compute`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FactorEvent {
+    /// Computation started.
     Started {
+        /// Number of factors that will be computed.
         total_factors: usize,
     },
+    /// One factor finished.
     Progress {
+        /// Factor that just completed.
         factor_id: String,
+        /// Factors completed so far.
         completed: usize,
+        /// Total factors in this run.
         total: usize,
     },
+    /// All factors finished.
     Finished {
+        /// Rows in the output panel.
         output_rows: usize,
     },
 }
 
+/// Computed factor values plus the serialized run manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FactorRunArtifact {
+    /// Factor IDs in output column order.
     pub factor_ids: Vec<String>,
+    /// Panel row count.
     pub rows: usize,
+    /// Nullable values keyed by factor ID, each `rows` long.
     pub values: BTreeMap<String, Vec<Option<f64>>>,
+    /// Run manifest JSON (formula version, factor IDs, ...).
     pub manifest_json: String,
 }
 
 impl FactorRunArtifact {
+    /// Writes the wide factor cache Parquet without a label column.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FactorError::LengthMismatch`] when key or value lengths do
+    /// not match `rows`.
     pub fn write_parquet(
         &self,
         destination: impl AsRef<Path>,
@@ -122,6 +221,13 @@ impl FactorRunArtifact {
         self.write_parquet_with_labels(destination, instrument_ids, trade_dates, universe_id, None)
     }
 
+    /// Writes the wide factor cache Parquet with an optional
+    /// `label_next_return` column appended.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FactorError::LengthMismatch`] when key, label, or value
+    /// lengths do not match `rows`.
     pub fn write_parquet_with_labels(
         &self,
         destination: impl AsRef<Path>,
@@ -198,23 +304,34 @@ impl FactorRunArtifact {
     }
 }
 
+/// Errors returned by parsing, execution, and factor cache writing.
 #[derive(Debug, Error)]
 pub enum FactorError {
+    /// Requested factor ID is absent from the registry.
     #[error("unknown factor: {0}")]
     UnknownFactor(String),
+    /// Formula is registered but its expression is not executable.
     #[error("factor {0} is registered but not yet executable: {1}")]
     Unsupported(String, String),
+    /// Expression references a missing panel column.
     #[error("missing input column: {0}")]
     MissingColumn(String),
+    /// Parallel panel vectors have different lengths.
     #[error("input columns have different lengths")]
     LengthMismatch,
+    /// Request or output contract is invalid.
     #[error("invalid request: {0}")]
     InvalidRequest(String),
 }
 
+/// Convenience result alias for factor calls.
 pub type Result<T> = std::result::Result<T, FactorError>;
 
+/// Executes a factor request and emits progress while preserving null values.
 pub trait FactorExecutor {
+    /// Computes selected factors. Cancellation is checked between factors;
+    /// when set, the implementation returns the artifact for completed work
+    /// or an error according to its executor contract.
     fn compute(
         &self,
         request: FactorRunRequest,
@@ -226,6 +343,11 @@ pub trait FactorExecutor {
 /// Creates the next available observation return per instrument.
 /// The value at row `t` only uses a later row for the label, so it must be
 /// joined after factor computation when building a training table.
+///
+/// # Errors
+///
+/// Returns [`FactorError::LengthMismatch`] when the three input vectors do not
+/// have equal lengths. The last observation of every instrument is `None`.
 pub fn next_return_labels(
     instrument_ids: &[String],
     trade_dates: &[Date],
@@ -253,6 +375,7 @@ pub fn next_return_labels(
     Ok(labels)
 }
 
+/// Registry of the pinned 191 Alpha191 formula specifications.
 #[derive(Debug, Clone)]
 pub struct FactorRegistry {
     specs: BTreeMap<String, FactorSpec>,
@@ -265,6 +388,7 @@ impl Default for FactorRegistry {
 }
 
 impl FactorRegistry {
+    /// Builds the 191-entry registry from the pinned formula catalog.
     pub fn new() -> Self {
         let mut specs = BTreeMap::new();
         for (index, formula) in formulas::ALPHA_FORMULAS.iter().enumerate() {
@@ -289,19 +413,25 @@ impl FactorRegistry {
         Self { specs }
     }
 
+    /// Looks up a factor by canonical ID.
     pub fn get(&self, id: &str) -> Option<&FactorSpec> {
         self.specs.get(id)
     }
+    /// Iterates factors in canonical ID order.
     pub fn all(&self) -> impl Iterator<Item = &FactorSpec> {
         self.specs.values()
     }
+    /// Number of registered factors.
     pub fn len(&self) -> usize {
         self.specs.len()
     }
+    /// Whether the registry has no factors.
     pub fn is_empty(&self) -> bool {
         self.specs.is_empty()
     }
 
+    /// Returns registered factors whose source formula still needs an operator
+    /// implementation or source normalization before execution.
     /// Returns registered factors whose source formula still needs an operator
     /// implementation or source normalization before execution.
     pub fn unsupported_ids(&self) -> Vec<String> {
@@ -313,14 +443,19 @@ impl FactorRegistry {
     }
 }
 
+/// Row-aligned market inputs consumed by the factor executor.
 #[derive(Debug, Clone)]
 pub struct Panel {
+    /// Instrument ID per row.
     pub instrument_id: Vec<String>,
+    /// Trade date per row.
     pub trade_date: Vec<Date>,
+    /// Nullable numeric inputs keyed by column name.
     pub columns: HashMap<String, Vec<Option<f64>>>,
 }
 
 impl Panel {
+    /// Checks all vectors have the same row count.
     pub fn validate(&self) -> Result<()> {
         if self.instrument_id.len() != self.trade_date.len()
             || self
@@ -356,8 +491,11 @@ impl Panel {
     }
 }
 
+/// In-memory factor executor for one panel and registry.
 pub struct InMemoryFactorExecutor {
+    /// Factor definitions used by this executor.
     pub registry: FactorRegistry,
+    /// Input panel; kept worker-local during computation.
     pub panel: Panel,
 }
 

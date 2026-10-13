@@ -10,6 +10,13 @@
   },
   "tasks": [
     {
+      "label": "Rust: desktop interaction tests (nextest)",
+      "type": "shell",
+      "command": "cargo nextest run -p analytics-desktop",
+      "problemMatcher": "$rustc",
+      "group": "test"
+    },
+    {
       "label": "Rust: workspace tests",
       "type": "shell",
       "command": "cargo test --workspace",

@@ -2,6 +2,7 @@
   "rust-analyzer.check.command": "clippy",
   "rust-analyzer.check.extraArgs": ["--workspace", "--all-targets", "--", "-D", "warnings"],
   "extensions.ignoreRecommendations": false,
+  "lldb.server": "/Library/Developer/CommandLineTools/Library/PrivateFrameworks/LLDB.framework/Versions/A/Resources/debugserver",
   "jfquant.duckdbDownloadLib": "1",
   "jfquant.marketPath": "data/market",
   "jfquant.universePath": "data/universe",

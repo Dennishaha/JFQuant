@@ -1,5 +1,7 @@
 # JFQuant Analytics
 
+开发导航：[Crates分层与逐目录文档](crates/README.md)。
+
 本项目是一个 macOS 优先的本地量化分析平台：App 和独立 jfquant CLI 共用工作区服务，进行数据获取、DuckDB 查询、Alpha191 因子计算、LightGBM 训练与年度研究。原生句柄留在服务计算 worker；客户端只交换数据。
 
 ## 分层架构
@@ -124,9 +126,7 @@ jfquant research run --template .jfquant/templates/default.json --market MARKET_
 
 所选快照覆盖至2026-10-12；历史中证500成分始于2007年，样本外评估始于2013年。Alpha191注册191项，v4隔离12条公式/初值歧义项，另排除缺三因子输入的Alpha030，当前研究选择178项；不能将此结果称为完整2000—2026年或191项严格参考实现回测。开发构建对因子计算和 ml 热路径分别启用 opt-level=3/2，不改变其他依赖的开发优化级别。
 
-
 A股市场规则由 `analytics-core::market_rules` 统一预设：最新经手费、证管费、过户费、卖出印花税及可自定义的账户佣金。默认全佣万2.5、每笔最低5元、初始资金100万元；回测全区间使用同一最新快照，不还原历史费率，不再输出多档单边成本。账户佣金、资金和税率在App或完整研究模板中配置；模板validate后用research run执行。规则来源、费率口径、JSON格式见 [core README](crates/core/README.md)，执行快照、schema 4与复现命令见 [ml README](crates/ml/README.md)。
-
 
 默认回测使用不复权价格、整数股、T+1及跨年持续的现金/分红/送转账本；公司行动缺实际到账日/上市日、来源冲突或复权因子无法对账时，在训练前明确阻止运行。公开动作获取和缺失统计见[storage README](crates/storage/README.md)，191项逐条审计和验证边界见[FACTOR_AUDIT.md](crates/factor/FACTOR_AUDIT.md)。旧v3复权碎股结果仅作历史存档，不能作为本版真实股份收益。补齐公开动作的下载命令见storage README；仓库不提交数据、模型或临时输出。
 

@@ -1,5 +1,7 @@
 # analytics-storage
 
+目录导航：[全部组件](../README.md) · [src：文件、获取、解析与证据](src/README.md)
+
 ## 职责
 
 analytics-storage 负责本地 Parquet 目录发现、footer 元数据读取，以及独立下载、校验公开日行情。`qlib` 模块只是 Rust 二进制格式读取器，不依赖 Qlib Python 包，不查找其他项目或用户级缓存。DuckDB 查询由 engine 负责。
@@ -30,21 +32,29 @@ analytics-storage 负责本地 Parquet 目录发现、footer 元数据读取，�
 
 ## 数据流
 
-    Parquet directory -> ParquetCatalog -> DatasetFile -> UI/schema validation
+```mermaid
+flowchart TD
+  PARQUET["Parquet目录与schema"] --> CATALOG["ParquetCatalog扫描"]
+  CATALOG --> META["类型化DatasetFile"]
+  SOURCE["独立release或公司行动页面"] --> ACQUIRE["下载与来源证据校验"]
+  ACQUIRE --> SNAP["已验证的行情或ActionBundle"]
+  META --> PLATFORM["App / workflow数据管理"]
+  SNAP --> PLATFORM
+  PLATFORM --> VERSION["UUID产物与不可变版本登记"]
+```
 
 ## 构建
 
     cargo check -p analytics-storage
-    cargo test -p analytics-storage
+    cargo nextest run -p analytics-storage
     RUSTDOCFLAGS="-D warnings" cargo doc -p analytics-storage --no-deps
 
 ## 验收
 
-    cargo test -p analytics-storage
+    cargo nextest run -p analytics-storage
     cargo test --doc -p analytics-storage
 
 验收覆盖嵌套目录、非 Parquet 文件忽略、footer 行数、列类型映射和行情必需列错误定位。StorageError::Schema 会指出第一个缺失或类型错误的列。
-
 
 ## 独立数据获取
 
@@ -69,7 +79,7 @@ jfquant jobs wait TASK_UUID
 `QlibDataset` 读取 `calendars/day.txt` 和 `instruments/csi500.txt`；成分区间首尾包含对应交易日。`features/<lowercase symbol>/<field>.day.bin` 为 little-endian float32，首值为非负整数日历偏移，后续为日数据，非有限值转为 null；拒绝截断、非法偏移、超出实际日历和非法标识符。预测日历不参与读取。价格和成交量已经过上游归一化，单位还原由研究适配器负责。
 
 ```mermaid
-flowchart LR
+flowchart TD
   G[固定公开 release] --> D[JFQuant curl 新下载]
   D --> V[大小与 SHA-256 校验]
   V --> X[安全解包与实际末日核对]
@@ -78,7 +88,6 @@ flowchart LR
 ```
 
 验收：`cargo nextest run -p analytics-storage`，覆盖归档大小/哈希错误、链接拒绝、二进制偏移、空值和历史成分日历对齐。真实下载为联网手工验收，不在单元测试中重复下载。
-
 
 ## 公开公司行动与原价恢复
 
@@ -100,7 +109,7 @@ jfquant jobs wait TASK_UUID
 接口：`ActionBundle::read / require_coverage`，schema_version=1；downloader固定身份、downloaded_at UTC、queried_symbols、actions、failures和raw_sha256。事件格式遵循core `CorporateAction`；JSON拒绝未知字段。原始每10股数量转换成每旧股，缺失pay_date/listing_date保留null，失败与空历史分开；校验数量/分页、股票身份和日期。公开来源相互冲突记录到failures，不能静默选一边。coverage.json、details_coverage.json和payment_coverage.json列出缺字段及失败；“下载成功”不代表“可执行回测”。源HTML若改版或编码异常则拒绝。
 
 ```mermaid
-flowchart LR
+flowchart TD
   E[东方财富实施历史及近期支付日] --> J[JFQuant规范化事件]
   S[新浪历史表及分红详情] --> J
   J --> H[原始响应及SHA256]
@@ -114,7 +123,6 @@ flowchart LR
 公开源：[阿思达克现金派送记录](https://quotes.aastocks.com/sc/cnhk/analysis/dividend.aspx?shsymbol=600004)、[东方财富分红](https://data.eastmoney.com/yjfp/)、[F10分红融资](https://emweb.securities.eastmoney.com/PC_HSF10/BonusFinancing/Index?type=web&code=SH600000)、[新浪历史及详情入口](https://money.finance.sina.com.cn/corp/go.php/vISSUE_ShareBonus/stockid/600000.phtml)。旧支付日、送股上市日、退市股与来源冲突仍可能不完整，应据公司实施公告补充并保留依据，不能用复权因子反推事件种类/到账日。
 
 验收：`cargo nextest run -p analytics-storage`。合成provider fixture核对每10股单位、派息/除息日期不同、混合方案不猜现金日、身份/分页错误、空页面/改版拒绝、上市日期提取及现金行/送股行的派送日分离；真实联网下载不在测试中重复执行。所有下载产物位于已忽略data/，禁止提交。
-
 
 采集器只解码分红表/详情表的GBK区段，不因页面广告的混合编码误报整张表失败；真正表内编码或字段问题仍拒绝。修复解析器后可以重读**本项目自己下载**、哈希校验过的原始响应，避免重复联网：
 

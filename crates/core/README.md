@@ -1,5 +1,7 @@
 # analytics-core
 
+目录导航：[全部组件](../README.md) · [src：普通数据、费用、股份权益与任务上下文](src/README.md)
+
 ## 职责
 
 `analytics-core` 是工作区最底层的领域契约，不依赖 DuckDB、egui、Arrow 或 LightGBM。它定义数据行、日期拆分、分页请求、模型 manifest、训练请求和异步任务事件。

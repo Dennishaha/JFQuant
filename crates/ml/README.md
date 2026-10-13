@@ -1,5 +1,7 @@
 # analytics-ml
 
+目录导航：[全部组件](../README.md) · [src：公共模型接口、流水线与年度研究](src/README.md) · [examples：原生开发验收与完成结果绘图](examples/README.md)
+
 ## 职责
 
 analytics-ml 是 LightGBM C API、训练/预测接口和端到端 pipeline 的边界。默认构建不链接原生库；desktop 和 native example 显式开启 lightgbm-native 与 duckdb-native。
@@ -22,7 +24,16 @@ Pipeline manifest 保留 feature order、training schema hash、formula version�
 
 ## 数据流
 
-    pipeline -> DuckDB -> MarketRow -> Alpha191 -> FactorRunArtifact -> LightGBM -> model/metrics/predictions
+```mermaid
+flowchart TD
+  PARQUET["Parquet与历史股票池"] --> PIPE["pipeline：按日期切分与因子缓存"]
+  QLIB["Qlib行情与公司行动版本"] --> YEAR["backtest：年度滚动与严格准入"]
+  PIPE --> TRAIN["共享LightGBM训练与预测接口"]
+  YEAR --> TRAIN
+  TRAIN --> MODEL["有序manifest、模型与样本外预测"]
+  MODEL --> TABLE["流水线预览与重训产物"]
+  MODEL --> LEDGER["年度原价股份账本与结果schema4"]
+```
 
 ## 构建与环境
 
@@ -41,7 +52,6 @@ Pipeline manifest 保留 feature order、training schema hash、formula version�
     jfquant factors --help
 
 native 测试包含 synthetic market/universe 端到端 pipeline 和从 cache 重训；真实数据验收需检查 factors、model、manifest、metrics、importance、predictions 六类产物。
-
 
 ## 中证500年度滚动研究
 
@@ -108,7 +118,7 @@ backtest::RESEARCH_SCHEMA_VERSION=4；validate_result返回可识别的Unsupport
 特征签名覆盖数据、顺序、v4公式和价量适配约定；执行签名另含费用、初始资金、年份、模式、税率和完整公司行动文件哈希。改变金额/日期/来源会改变执行签名；已有不同签名输出拒绝覆盖。因子manifest的lookback由AST组合，requires_recursive_state单列说明，不能把递归历史表示成有限窗口。
 
 ```mermaid
-flowchart LR
+flowchart TD
   D[独立行情及历史成分] --> F[复权因子视图和v4审计]
   F --> T[5年训练及1年验证]
   T --> P[逐年样本外预测]

@@ -1,5 +1,7 @@
 # analytics-engine
 
+目录导航：[全部组件](../README.md) · [src：DuckDB查询、快照、分页与导出](src/README.md)
+
 ## 职责
 
 analytics-engine 将 DuckDB 隔离在 QueryEngine trait 后，提供 SQL 描述、keyset 分页、Parquet/CSV 导出，以及市场行情与历史股票池的 as-of join。所有连接和 DuckDB statement 都在 worker 线程内创建和使用。
@@ -24,7 +26,18 @@ desktop 在 worker 中将任意列名引用、补全排序和隐藏唯一行号�
 
 ## 数据流
 
-    UI -> Worker -> DuckDB connection -> QueryPage/result file -> WorkerEvent -> UI
+```mermaid
+flowchart TD
+  REQUEST["App / CLI 公共查询请求"] --> WORKER["workflow计算worker"]
+  WORKER --> ENGINE["DuckDbEngine：线程内连接"]
+  ENGINE --> PAGE["类型化QueryPage与cursor"]
+  ENGINE --> FILE["CSV / Parquet导出文件"]
+  ENGINE --> JOIN["历史membership as-of行情行"]
+  PAGE --> EVENT["持久化结果与WorkerEvent"]
+  FILE --> EVENT
+  EVENT --> VIEW["客户端展示与后续页"]
+  JOIN --> ML["因子流水线"]
+```
 
 ## 构建与环境
 
@@ -37,12 +50,11 @@ duckdb-native 使用系统或下载的 DuckDB 动态库；DUCKDB_DOWNLOAD_LIB=1 
 
 ## 验收
 
-    cargo test -p analytics-engine
+    cargo nextest run -p analytics-engine
     cargo test --doc -p analytics-engine
     cargo clippy -p analytics-engine --all-targets -- -D warnings
 
 native 环境还要验证单 worker 连接、非法 sort identifier、cursor 长度错误、CSV/Parquet 导出和 as-of membership 边界。
-
 
 界面操作与真实 backend 的回归测试在 desktop crate，包含 Describe、分页、类型保留、含引号的导出，以及流水线/重训预览：
 

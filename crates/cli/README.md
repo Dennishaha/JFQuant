@@ -1,5 +1,7 @@
 # analytics-cli
 
+目录导航：[全部组件](../README.md) · [src：clap、请求转换、JSON与退出码](src/README.md) · [tests：真实客户端、服务与临时工作区集成](tests/README.md)
+
 ## 职责与公共接口
 
 jfquant是与App共用后台的独立终端入口，分发目标Apple Silicon、macOS 14及以上。clap 4的Parser/Subcommand/Args/ValueEnum负责参数、帮助和基础类型；所有业务校验及采集、查询、因子、模型、研究和任务生命周期由analytics-workflow执行，不复制计算或费用逻辑。Cli::try_parse、execute、exit_code和wait用于命令验收；clap类型不进入领域模块。
@@ -82,7 +84,7 @@ run --request不执行脚本，JSON直接提交公共协议。示例流水线：
 factors run --request只需上例内层PipelineRequest；model train --cache factors.parquet --config training.json使用training对象，省略配置沿用默认。服务实际输出绑定新UUID，PipelineRequest.output_dir用于直接模块调用，服务提交则统一分配UUID目录，不覆盖已有产物。研究请求为`{"operation":"workflow","request":{"operation":"research","template":完整模板,"market":"版本ID","actions":"版本ID","audit_only":false}}`。特征顺序、版本、签名、模板和费用均由公共校验器冻结，不能只改manifest冒充新版公式。完整协议/状态/文件格式见[workflow README](../workflow/README.md)。
 
 ```mermaid
-flowchart LR
+flowchart TD
   CLI[clap 命令 / 请求JSON] --> CLIENT[公共服务客户端]
   APP[egui App] --> CLIENT
   CLIENT --> SERVICE[工作区独占锁 / Unix socket]
@@ -93,7 +95,6 @@ flowchart LR
 ```
 
 socket仅当前用户可访问，无网络监听端口；协议version=2，连接一条JSON请求/响应。启动竞争由工作区锁解决。服务无请求/任务/有效查询会话十分钟退出，状态和读取任务历史不依赖计算worker持有的原生句柄。
-
 
 ## 开发构建与验收
 
@@ -113,7 +114,6 @@ crates/app/packaging/package-macos.sh
 packaging/verify-cli.sh清空开发环境执行帮助、原生自检、标准完整合成研究、正式因子流水线和停服后离线读取；不用Python/Homebrew/Cargo。运行记录、socket、日志、数据、模型和安装包不提交Git。另一台Apple Silicon/macOS 14实机验收继续待完成。
 
 服务自动启动时使用独立进程组；首次前台等待被Ctrl+C中断不会把SIGINT送到后台。该行为已用真实前台进程组发送信号并验证已提交任务继续成功的测试覆盖。
-
 
 研究结果只接受schema4及raw_integer_shares；不提供旧口径执行、重新计费或旧报告格式转换。jobs import先验证当前格式，失败不创建记录；旧文件保留。run --request只接受带operation的TaskRequest，例如{"operation":"workflow","request":{"operation":"create_demo"}}。不接受裸WorkflowRequest或未知参数。unsupported_result_format退出码为1，stdout为错误JSON，诊断写stderr。
 

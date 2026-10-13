@@ -1,5 +1,7 @@
 # analytics-factor
 
+目录导航：[全部组件](../README.md) · [src：目录、AST、执行与隔离](src/README.md) · [examples：带版本AST与审计目录导出](examples/README.md) · [testdata：合成fixture与独立NumPy参考](testdata/README.md)
+
 ## 职责与公共接口
 
 注册国泰君安191个canonical ID，解析公式并在单个worker的内存面板上执行，输出保留缺失值的因子宽表。当前版本 `gtja191-paper-2017+jfquant-audit-v4`；版本变化必须重算缓存、重训模型，不能复用v3模型/预测冒充v4。
@@ -28,7 +30,7 @@ MAX/MIN第二参数为正整数时采用目录中滚动窗口的约定，0或表
 Panel可选`__universe_member`列：只有1参与当日横截面排名、缩放、标准化，时间历史仍保留；无此列时全体参与。研究适配器删除缺失价格行会压缩交易时间，该局限见ml README。
 
 ```mermaid
-flowchart LR
+flowchart TD
   R[191项原始目录与审计] --> G[明确隔离歧义项]
   G --> A[AST与历史依赖元数据]
   P[nullable面板与历史成分掩码] --> E[worker内算子执行]

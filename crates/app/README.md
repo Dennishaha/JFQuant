@@ -1,5 +1,7 @@
 # analytics-desktop
 
+目录导航：[全部组件](../README.md) · [src：界面状态、面板与服务事件](src/README.md) · [packaging：原生依赖、App/CLI打包与安装验收](packaging/README.md)
+
 ## 职责
 
 macOS-first egui shell for local Parquet analysis, SQL, Alpha191 factors, and LightGBM training. UI state is kept in state.rs, visual rules in theme.rs, workbench views in panels.rs and platform views in platform.rs. worker.rs adapts the shared analytics-workflow service; native execution and task lifecycle are owned by the backend.
@@ -86,7 +88,7 @@ flowchart LR
     R --> UI
     W -->|panic / 退出| U[Unavailable]
     U --> R
-    UI -->|重启：新线程与通道| W
+    UI -->|重启：服务重建worker| W
 ```
 
 ## 视觉约定
@@ -169,7 +171,6 @@ VS Code 任务 `Rust: desktop interaction tests (nextest)` 运行同一套桌面
     cargo build -p analytics-desktop -p analytics-cli
     cargo run -p analytics-desktop
 
-
 ## 本地研究平台与公共后台
 
 保留数据、查询、因子、建模四工作台，新增研究流程及运行记录。首次启动在顶部选择工作区（推荐~/JFQuantWorkspace），保存于~/Library/Application Support/JFQuant/preferences.json；之后所有相对数据/产物路径从工作区解析，不依赖仓库或cwd。运行中禁用重复提交及切换工作区，参数/模板可编辑和保存，输入JSON不执行脚本。
@@ -181,7 +182,7 @@ VS Code 任务 `Rust: desktop interaction tests (nextest)` 运行同一套桌面
 App和独立jfquant连接同一工作区Unix socket服务，服务持锁并恢复interrupted记录；同时一个计算任务且无队列。界面显示CLI任务进度、结果、取消，业务与记录生命周期全在workflow。SQL快照按query_id隔离，其他客户端的SQL payload不覆盖App分页。关闭App不取消任务；首次前台CLI等待中断也不会SIGINT到服务，自动启动服务使用独立进程组。普通错误可重试，panic退役worker并在线程内销毁句柄。
 
 ```mermaid
-flowchart LR
+flowchart TD
   UI[egui六面板] --> ADAPTER[worker服务适配器]
   CLI[jfquant] --> SERVICE[工作区服务及记录]
   ADAPTER --> SERVICE

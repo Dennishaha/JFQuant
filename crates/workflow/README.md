@@ -1,5 +1,7 @@
 # analytics-workflow
 
+目录导航：[全部组件](../README.md) · [src：持锁服务、worker与持久化任务](src/README.md) · [templates：受控默认模板、完整导出与冻结参数](templates/README.md)
+
 ## 职责与公共接口
 
 把JFQuant内置采集与研究模块组合为独立App可运行的本地流程，不调用Codex、Cargo或Python。原生查询、因子与LightGBM计算由本crate共用worker完成；App与CLI只传递可序列化数据，不传递原生句柄。
@@ -38,7 +40,7 @@ WORKSPACE/
 运行、模板和版本记录JSON使用schema_version=1；JSON模板拒绝未知字段及不支持的公式版本。运行状态为running/succeeded/failed/blocked/cancelled/interrupted/imported。元数据用新临时文件、sync及rename发布；记录ID与目录相互校验，不能通过记录中的路径覆盖工作区外文件。数据引用在执行前复核签名；行情details.content_sha256按排序后的相对文件名、长度和实际字节计算，执行时在后台重新哈希，增删、改名或修改行情均拒绝。旧目录记录没有内容哈希时需重新登记，不自动沿用旧身份。公司行动原始证据哈希也在后台复核；更改已登记输入需登记为新版本。提交时只读取版本元数据，较长的字节校验保留取消检查且不阻塞控制请求。目录整体迁移后，相对版本和运行路径仍可读取；导入的当前研究保留原路径引用，其来源目录需继续可访问。
 
 ```mermaid
-flowchart LR
+flowchart TD
   UI[App表单与内置模板] --> R[冻结请求及输入版本]
   R --> W[单个worker与TaskContext]
   W --> D[独立下载 校验 注册新版本]

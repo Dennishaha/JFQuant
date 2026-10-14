@@ -162,6 +162,8 @@ impl QueryPanel {
 /// State of the Alpha191 factor panel.
 #[derive(Debug)]
 pub struct FactorPanel {
+    /// Independently selected factor family.
+    pub factor_set: analytics_core::research_quality::FactorSet,
     /// Market Parquet root.
     pub market_path: String,
     /// Historical-universe Parquet root.
@@ -187,6 +189,7 @@ pub struct FactorPanel {
 impl Default for FactorPanel {
     fn default() -> Self {
         Self {
+            factor_set: Default::default(),
             market_path: "data/market".into(),
             universe_path: "data/universe".into(),
             universe_id: "csi500".into(),

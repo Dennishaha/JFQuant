@@ -170,7 +170,7 @@ ActionBundle另允许显式身份`JFQuant analytics-workflow synthetic-demo-v1`�
 
 ## 双源采集与统一日行情
 
-`collector::CollectionRequest / Provider / collect / collect_actions` 使用包内 CPython 3.12，AKShare 1.19.1、yfinance 1.7.0，依赖和发行包 SHA256 在组件旁锁定。Rust 服务监督单任务子进程，JSON Lines 协议6承载进度、证券分片、完成或稳定错误；取消、超时和异常均回收进程。owner、证券文件及证据哈希匹配后才恢复，成功证券不重复下载。详见 [采集包](./collectors/README.md)。
+`collector::CollectionRequest / Provider / collect / collect_actions` 使用包内 CPython 3.12，AKShare 1.19.1、yfinance 1.7.0，依赖和发行包 SHA256 在组件旁锁定。Rust 服务监督单任务子进程，JSON Lines 协议7承载进度、证券分片、完成或稳定错误；取消、超时和异常均回收进程。owner、证券文件及证据哈希匹配后才恢复，成功证券不重复下载。详见 [采集包](./collectors/README.md)。
 
 `daily::DailyDataset` 同时读取 Qlib 和规范 Parquet，提供交易日历、历史成员、归一化因子字段及独立 `raw_field`。规范格式5含 `daily_manifest.json` 和 `bars/SHxxxxxx.parquet`；实际价格、后复权价格、股数及人民币成交额分别保存，缺失值保留 null。`field` 采用固定价量重基准规则，`raw_field` 只接收已经验证的原价。Yahoo 标为 `split_adjusted_candidate`，不能用于严格撮合。
 
@@ -202,7 +202,7 @@ adjustment模块定义AdjustmentSource、AdjustmentRecord、AdjustmentBasis和Ad
 
 ## 公司行动4与公告证据
 
-ActionBundle仅接收格式4；规范行情为5，采集协议6。旧动作/规范行情/检查点不转换，Qlib当前读取保持。ordinary的公共金额是实际持有人权益；EventTerms的Reference独立核验除权。特殊事件或仅供历史核验的Historical条款都须有实施证据；后者不能进入实际账户。
+ActionBundle仅接收格式4；规范行情为5，采集协议7。旧动作/规范行情/检查点不转换，Qlib当前读取保持。ordinary的公共金额是实际持有人权益；EventTerms的Reference独立核验除权。特殊事件或仅供历史核验的Historical条款都须有实施证据；后者不能进入实际账户。
 
 新增内置announcements采集：固定CNINFO查询及static.cninfo.com.cn PDF路径，验证分页、证券、日期、状态和附件身份；pypdf5.9.0锁定在依赖中，记录PDF、逐页提取文本哈希和候选字段。预案、风险提示及无法确定实施身份的文档不能直接修订。扫描PDF无文本时保留待复核，不OCR猜数值。
 
@@ -238,7 +238,7 @@ flowchart LR
 
 为什么调整：普通市场代码无需先登记身份；独立目录、审核和权威名录下载增加了研究前置负担。特殊历史代码仍需在快照内明确区间，不能将旧证券行情或权益接到另一证券。训练使用价量和标签，到账／交付资料只在实际账户执行时检查。
 
-当前格式：模板6、需求3、准入4、股票池3、公司行动4、规范行情5、系数3、采集6、服务9、研究结果11；快照内来源映射1、训练产物1。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
+当前格式：模板8、需求3、准入5、股票池3、公司行动4、规范行情5、系数3、采集7、服务10、研究结果12；快照内来源映射1、训练产物2。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
 
 来源映射位于快照source_map.json，普通证券可用空exceptions。每个例外含市场代码、资产类别、适用区间及provider/symbol/coverage定位。冲突拒绝；SHT00018只能读取自身旧文件，不自动绑定SH600018。原Qlib文件不改写；显式重新登记冻结文件内容和映射。worker内缓存字段，取消检查以证券和固定批次执行。
 
@@ -252,3 +252,22 @@ flowchart LR
 ```
 
 验收：nextest覆盖来源日期边界、三档掩码、训练／回测分离及模型保留；Clippy、Rustdoc、格式、组件文档和包内CLI共同检查。生成数据、模型、运行记录和安装包不提交。另一台Apple Silicon/macOS14实机验收继续待完成。
+
+## 独立系数与组合视图的理由和边界
+
+东方财富报价接口失效时，新浪日期系数仍可能可用。`collect_quotes`、`collect_coefficients`、`collect_actions`可以独立提交、取消和恢复；仅报价快照缺复权依据时仍不具备验证口径准入资格。`CoefficientBundle`格式1保存完整系数、原文和HTTP/协议证据哈希，损坏/部分分片不注册为完整系数版本。采集协议7。
+
+`MarketView`格式1明确组合原Qlib快照和独立新浪系数。原factor用于恢复原价和真实股数，新F/F0用于研究OHLC和反向成交量缩放；金额保持真实元、VWAP由真实金额/股数乘倍率。覆盖前缺系数不使用未来值。两个factor不能互换：原factor含供应商归一化比例，直接覆盖会改变撮合价及真实股数。
+
+组合不改源二进制，不做全量转换；冻结原文件树哈希、恢复规则、单位、系数bundle/原文哈希和首个原价收盘锚点。该原价明确标注“由Qlib恢复”，不冒充本轮独立下载。首版懒视图组合支持原Qlib基底，规范Parquet继续使用其已登记显式依据。未经核验的AKShare后复权报价或Yahoo候选不能通过provider开关进入训练。
+
+```mermaid
+flowchart TD
+  Q[原Qlib价格与原factor] --> R[恢复原价及真实股数]
+  S[独立新浪日期系数版本] --> K[F/F0]
+  R --> V[不可变懒研究视图]
+  K --> V
+  V --> T[研究价量]
+  R --> E[真实账户执行]
+  H[原文/解析/文件哈希] --> V
+```

@@ -53,6 +53,8 @@ use crate::{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PipelineRequest {
+    /// Single independently versioned feature family.
+    pub factor_set: analytics_core::research_quality::FactorSet,
     /// Directory or single file of normalized daily market Parquet.
     pub market_path: PathBuf,
     /// Directory or single file of historical-universe membership Parquet.
@@ -195,7 +197,7 @@ pub fn run_factor_pipeline(
     check_cancel(&cancel)?;
 
     let mut panel = panel_from_rows(&rows);
-    let registry = FactorRegistry::default();
+    let registry = FactorRegistry::for_set(request.factor_set);
     for id in &request.factor_ids {
         let spec = registry
             .get(id)
@@ -218,7 +220,7 @@ pub fn run_factor_pipeline(
             date_range: request.date_range.clone(),
             universe_id: request.universe_id.clone(),
             factor_ids: request.factor_ids.clone(),
-            formula_version: analytics_factor::FORMULA_VERSION.into(),
+            formula_version: analytics_factor::alpha158::version(request.factor_set).into(),
         },
         factor_progress,
         cancel.clone(),
@@ -266,10 +268,19 @@ pub fn run_factor_pipeline(
         progress,
         cancel,
     )
-    .map(|mut artifact| {
+    .and_then(|mut artifact| {
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&artifact.training.manifest_path)?)?;
+        manifest["formula_version"] =
+            analytics_factor::alpha158::version(request.factor_set).into();
+        manifest["factor_set"] = serde_json::to_value(request.factor_set)?;
+        std::fs::write(
+            &artifact.training.manifest_path,
+            serde_json::to_vec_pretty(&manifest)?,
+        )?;
         artifact.factor_cache_path = Some(factor_cache);
         artifact.factor_manifest_path = Some(factor_manifest);
-        artifact
+        Ok(artifact)
     })
 }
 
@@ -447,6 +458,33 @@ pub fn train_from_factor_cache(
         progress,
         cancel,
     )
+    .and_then(|artifact| {
+        let source_path = cache_path.with_file_name("factor_run_manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&artifact.training.manifest_path)?)?;
+        manifest["factor_cache_sha256"] =
+            format!("sha256:{:x}", Sha256::digest(std::fs::read(cache_path)?)).into();
+        if source_path.is_file() {
+            let source: serde_json::Value = serde_json::from_slice(&std::fs::read(&source_path)?)?;
+            let family: analytics_core::research_quality::FactorSet =
+                serde_json::from_value(source["factor_set"].clone())?;
+            if source["formula_version"] != analytics_factor::alpha158::version(family)
+                || source["factor_ids"] != serde_json::to_value(&cache.factor_ids)?
+            {
+                return Err(PipelineError::InvalidInput(
+                    "factor cache provenance/order mismatch".into(),
+                ));
+            }
+            manifest["formula_version"] = source["formula_version"].clone();
+            manifest["factor_set"] = source["factor_set"].clone();
+            manifest["factor_provenance"] = source;
+        }
+        std::fs::write(
+            &artifact.training.manifest_path,
+            serde_json::to_vec_pretty(&manifest)?,
+        )?;
+        Ok(artifact)
+    })
 }
 
 /// Trains, predicts on the test split, and writes all model artifacts.
@@ -662,6 +700,7 @@ fn write_factor_manifest(
     input_snapshot_hash: &str,
 ) -> Result<PathBuf> {
     let mut value: serde_json::Value = serde_json::from_str(&artifact.manifest_json)?;
+    value["factor_set"] = serde_json::to_value(request.factor_set)?;
     value["market_path"] = request.market_path.to_string_lossy().to_string().into();
     value["universe_path"] = request.universe_path.to_string_lossy().to_string().into();
     value["universe_id"] = request.universe_id.clone().into();
@@ -670,7 +709,7 @@ fn write_factor_manifest(
     value["input_snapshot_hash"] = input_snapshot_hash.into();
     value["price_mode"] = "adjusted_price".into();
     value["missing_value_rule"] = "preserve_null".into();
-    let registry = FactorRegistry::default();
+    let registry = FactorRegistry::for_set(request.factor_set);
     value["max_lookback"] = request
         .factor_ids
         .iter()
@@ -897,166 +936,186 @@ mod tests {
     /// and LightGBM libraries at link time.
     #[test]
     fn end_to_end_pipeline_on_synthetic_data() {
-        use arrow_array::{ArrayRef, BooleanArray, Date32Array, Float64Array, StringArray};
+        for family in [
+            analytics_core::research_quality::FactorSet::Gtja191,
+            analytics_core::research_quality::FactorSet::Alpha158,
+        ] {
+            use arrow_array::{ArrayRef, BooleanArray, Date32Array, Float64Array, StringArray};
 
-        let dir = tempfile::tempdir().unwrap();
-        let market = dir.path().join("market");
-        let universe = dir.path().join("universe");
-        std::fs::create_dir_all(&market).unwrap();
-        std::fs::create_dir_all(&universe).unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let market = dir.path().join("market");
+            let universe = dir.path().join("universe");
+            std::fs::create_dir_all(&market).unwrap();
+            std::fs::create_dir_all(&universe).unwrap();
 
-        let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-        let start = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
-        let instruments = ["AAA", "BBB", "CCC"];
-        let days = 30_i64;
-        let mut ids = Vec::new();
-        let mut dates = Vec::new();
-        let mut prices = Vec::new();
-        for (offset, instrument) in instruments.iter().enumerate() {
-            for day in 0..days {
-                ids.push(instrument.to_string());
-                dates.push(((start + chrono::Duration::days(day)) - epoch).num_days() as i32);
-                prices.push(10.0 + offset as f64 + (day as f64) * 0.05);
+            let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+            let start = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+            let instruments = ["AAA", "BBB", "CCC"];
+            let days = 30_i64;
+            let mut ids = Vec::new();
+            let mut dates = Vec::new();
+            let mut prices = Vec::new();
+            for (offset, instrument) in instruments.iter().enumerate() {
+                for day in 0..days {
+                    ids.push(instrument.to_string());
+                    dates.push(((start + chrono::Duration::days(day)) - epoch).num_days() as i32);
+                    prices.push(10.0 + offset as f64 + (day as f64) * 0.05);
+                }
             }
-        }
-        let write_parquet = |path: &Path, schema: Arc<Schema>, batch: RecordBatch| {
-            let file = File::create(path).unwrap();
-            let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
-            writer.write(&batch).unwrap();
-            writer.close().unwrap();
-        };
-        let listing: Vec<i32> = ids
-            .iter()
-            .map(|_| ((start - epoch).num_days() - 10) as i32)
-            .collect();
-        let market_schema = Arc::new(Schema::new(vec![
-            Field::new("instrument_id", ArrowDataType::Utf8, false),
-            Field::new("trade_date", ArrowDataType::Date32, false),
-            Field::new("open", ArrowDataType::Float64, true),
-            Field::new("high", ArrowDataType::Float64, true),
-            Field::new("low", ArrowDataType::Float64, true),
-            Field::new("close", ArrowDataType::Float64, true),
-            Field::new("volume", ArrowDataType::Float64, true),
-            Field::new("amount", ArrowDataType::Float64, true),
-            Field::new("adj_open", ArrowDataType::Float64, true),
-            Field::new("adj_high", ArrowDataType::Float64, true),
-            Field::new("adj_low", ArrowDataType::Float64, true),
-            Field::new("adj_close", ArrowDataType::Float64, true),
-            Field::new("is_trading", ArrowDataType::Boolean, true),
-            Field::new("listing_date", ArrowDataType::Date32, true),
-        ]));
-        let price_column = || -> ArrayRef { Arc::new(Float64Array::from(prices.clone())) };
-        let market_batch = RecordBatch::try_new(
-            market_schema.clone(),
-            vec![
-                Arc::new(StringArray::from(ids.clone())) as ArrayRef,
-                Arc::new(Date32Array::from(dates.clone())) as ArrayRef,
-                price_column(),
-                price_column(),
-                price_column(),
-                price_column(),
-                Arc::new(Float64Array::from(vec![Some(1_000.0); ids.len()])) as ArrayRef,
-                Arc::new(Float64Array::from(
-                    prices.iter().map(|p| Some(p * 1_000.0)).collect::<Vec<_>>(),
-                )) as ArrayRef,
-                price_column(),
-                price_column(),
-                price_column(),
-                price_column(),
-                Arc::new(BooleanArray::from(vec![Some(true); ids.len()])) as ArrayRef,
-                Arc::new(Date32Array::from(listing)) as ArrayRef,
-            ],
-        )
-        .unwrap();
-        write_parquet(&market.join("part.parquet"), market_schema, market_batch);
+            let write_parquet = |path: &Path, schema: Arc<Schema>, batch: RecordBatch| {
+                let file = File::create(path).unwrap();
+                let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+                writer.write(&batch).unwrap();
+                writer.close().unwrap();
+            };
+            let listing: Vec<i32> = ids
+                .iter()
+                .map(|_| ((start - epoch).num_days() - 10) as i32)
+                .collect();
+            let market_schema = Arc::new(Schema::new(vec![
+                Field::new("instrument_id", ArrowDataType::Utf8, false),
+                Field::new("trade_date", ArrowDataType::Date32, false),
+                Field::new("open", ArrowDataType::Float64, true),
+                Field::new("high", ArrowDataType::Float64, true),
+                Field::new("low", ArrowDataType::Float64, true),
+                Field::new("close", ArrowDataType::Float64, true),
+                Field::new("volume", ArrowDataType::Float64, true),
+                Field::new("amount", ArrowDataType::Float64, true),
+                Field::new("adj_open", ArrowDataType::Float64, true),
+                Field::new("adj_high", ArrowDataType::Float64, true),
+                Field::new("adj_low", ArrowDataType::Float64, true),
+                Field::new("adj_close", ArrowDataType::Float64, true),
+                Field::new("is_trading", ArrowDataType::Boolean, true),
+                Field::new("listing_date", ArrowDataType::Date32, true),
+            ]));
+            let price_column = || -> ArrayRef { Arc::new(Float64Array::from(prices.clone())) };
+            let market_batch = RecordBatch::try_new(
+                market_schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(ids.clone())) as ArrayRef,
+                    Arc::new(Date32Array::from(dates.clone())) as ArrayRef,
+                    price_column(),
+                    price_column(),
+                    price_column(),
+                    price_column(),
+                    Arc::new(Float64Array::from(vec![Some(1_000.0); ids.len()])) as ArrayRef,
+                    Arc::new(Float64Array::from(
+                        prices.iter().map(|p| Some(p * 1_000.0)).collect::<Vec<_>>(),
+                    )) as ArrayRef,
+                    price_column(),
+                    price_column(),
+                    price_column(),
+                    price_column(),
+                    Arc::new(BooleanArray::from(vec![Some(true); ids.len()])) as ArrayRef,
+                    Arc::new(Date32Array::from(listing)) as ArrayRef,
+                ],
+            )
+            .unwrap();
+            write_parquet(&market.join("part.parquet"), market_schema, market_batch);
 
-        let universe_schema = Arc::new(Schema::new(vec![
-            Field::new("instrument_id", ArrowDataType::Utf8, false),
-            Field::new("universe_id", ArrowDataType::Utf8, false),
-            Field::new("trade_date", ArrowDataType::Date32, false),
-            Field::new("is_member", ArrowDataType::Boolean, false),
-        ]));
-        let first_day = ((start - epoch).num_days()) as i32;
-        let universe_batch = RecordBatch::try_new(
-            universe_schema.clone(),
-            vec![
-                Arc::new(StringArray::from(
-                    instruments
-                        .iter()
-                        .map(|id| id.to_string())
-                        .collect::<Vec<_>>(),
-                )) as ArrayRef,
-                Arc::new(StringArray::from(vec!["test-univ"; instruments.len()])) as ArrayRef,
-                Arc::new(Date32Array::from(vec![first_day; instruments.len()])) as ArrayRef,
-                Arc::new(BooleanArray::from(vec![true; instruments.len()])) as ArrayRef,
-            ],
-        )
-        .unwrap();
-        write_parquet(
-            &universe.join("part.parquet"),
-            universe_schema,
-            universe_batch,
-        );
+            let universe_schema = Arc::new(Schema::new(vec![
+                Field::new("instrument_id", ArrowDataType::Utf8, false),
+                Field::new("universe_id", ArrowDataType::Utf8, false),
+                Field::new("trade_date", ArrowDataType::Date32, false),
+                Field::new("is_member", ArrowDataType::Boolean, false),
+            ]));
+            let first_day = ((start - epoch).num_days()) as i32;
+            let universe_batch = RecordBatch::try_new(
+                universe_schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(
+                        instruments
+                            .iter()
+                            .map(|id| id.to_string())
+                            .collect::<Vec<_>>(),
+                    )) as ArrayRef,
+                    Arc::new(StringArray::from(vec!["test-univ"; instruments.len()])) as ArrayRef,
+                    Arc::new(Date32Array::from(vec![first_day; instruments.len()])) as ArrayRef,
+                    Arc::new(BooleanArray::from(vec![true; instruments.len()])) as ArrayRef,
+                ],
+            )
+            .unwrap();
+            write_parquet(
+                &universe.join("part.parquet"),
+                universe_schema,
+                universe_batch,
+            );
 
-        let output = dir.path().join("runs");
-        let (tx, rx) = channel();
-        std::thread::spawn(move || while rx.recv().is_ok() {});
-        let artifact = run_factor_pipeline(
-            &PipelineRequest {
-                market_path: market,
-                universe_path: universe,
-                universe_id: "test-univ".into(),
-                date_range: DateRange {
-                    start,
-                    end: start + chrono::Duration::days(days - 1),
+            let output = dir.path().join("runs");
+            let (tx, rx) = channel();
+            std::thread::spawn(move || while rx.recv().is_ok() {});
+            let artifact = run_factor_pipeline(
+                &PipelineRequest {
+                    factor_set: family,
+                    market_path: market,
+                    universe_path: universe,
+                    universe_id: "test-univ".into(),
+                    date_range: DateRange {
+                        start,
+                        end: start + chrono::Duration::days(days - 1),
+                    },
+                    factor_ids: vec![if matches!(
+                        family,
+                        analytics_core::research_quality::FactorSet::Gtja191
+                    ) {
+                        "alpha_001".into()
+                    } else {
+                        "alpha158_014_ROC5".into()
+                    }],
+                    output_dir: output.clone(),
+                    training: TrainingConfig {
+                        parameters: BTreeMap::from([
+                            ("num_iterations".into(), "5".into()),
+                            ("num_leaves".into(), "7".into()),
+                            ("min_data_in_leaf".into(), "2".into()),
+                        ]),
+                        early_stopping_rounds: None,
+                    },
                 },
-                factor_ids: vec!["alpha_001".into()],
-                output_dir: output.clone(),
-                training: TrainingConfig {
+                tx,
+                cancellation(),
+            )
+            .expect("pipeline succeeds on synthetic data");
+
+            assert!(output.join("factors.parquet").exists());
+            assert!(output.join("factor_run_manifest.json").exists());
+            assert!(artifact.training.model_path.exists());
+            assert!(artifact.training.metrics_path.exists());
+            assert!(artifact.predictions_path.exists());
+            assert!(artifact.train_rows > 0);
+            assert!(artifact.test_rows > 0);
+            let metrics: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(artifact.training.metrics_path).unwrap())
+                    .unwrap();
+            assert!(metrics["iterations"].as_u64().unwrap_or_default() > 0);
+
+            // Cache retraining reuses the same artifacts without market data.
+            let (tx2, rx2) = channel();
+            std::thread::spawn(move || while rx2.recv().is_ok() {});
+            let retrain = train_from_factor_cache(
+                &output.join("factors.parquet"),
+                None,
+                &dir.path().join("retrain"),
+                &TrainingConfig {
                     parameters: BTreeMap::from([
-                        ("num_iterations".into(), "5".into()),
-                        ("num_leaves".into(), "7".into()),
+                        ("num_iterations".into(), "3".into()),
                         ("min_data_in_leaf".into(), "2".into()),
                     ]),
                     early_stopping_rounds: None,
                 },
-            },
-            tx,
-            cancellation(),
-        )
-        .expect("pipeline succeeds on synthetic data");
-
-        assert!(output.join("factors.parquet").exists());
-        assert!(output.join("factor_run_manifest.json").exists());
-        assert!(artifact.training.model_path.exists());
-        assert!(artifact.training.metrics_path.exists());
-        assert!(artifact.predictions_path.exists());
-        assert!(artifact.train_rows > 0);
-        assert!(artifact.test_rows > 0);
-        let metrics: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(artifact.training.metrics_path).unwrap())
-                .unwrap();
-        assert!(metrics["iterations"].as_u64().unwrap_or_default() > 0);
-
-        // Cache retraining reuses the same artifacts without market data.
-        let (tx2, rx2) = channel();
-        std::thread::spawn(move || while rx2.recv().is_ok() {});
-        let retrain = train_from_factor_cache(
-            &output.join("factors.parquet"),
-            None,
-            &dir.path().join("retrain"),
-            &TrainingConfig {
-                parameters: BTreeMap::from([
-                    ("num_iterations".into(), "3".into()),
-                    ("min_data_in_leaf".into(), "2".into()),
-                ]),
-                early_stopping_rounds: None,
-            },
-            tx2,
-            cancellation(),
-        )
-        .expect("retraining from cache succeeds");
-        assert!(retrain.training.model_path.exists());
-        assert!(retrain.predictions_path.exists());
+                tx2,
+                cancellation(),
+            )
+            .expect("retraining from cache succeeds");
+            let manifest: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&retrain.training.manifest_path).unwrap())
+                    .unwrap();
+            assert_eq!(
+                manifest["formula_version"],
+                analytics_factor::alpha158::version(family)
+            );
+            assert!(retrain.training.model_path.exists());
+            assert!(retrain.predictions_path.exists());
+        }
     }
 }

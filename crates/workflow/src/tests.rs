@@ -62,7 +62,7 @@ fn synthetic_annual_recipe_runs_native_model_and_dated_real_share_account() {
     let request = WorkflowRequest::Research {
         template: Box::new(t),
         market: m.id,
-        actions: a.id,
+        actions: Some(a.id),
         audit_only: false,
     };
     let c = context();
@@ -70,7 +70,7 @@ fn synthetic_annual_recipe_runs_native_model_and_dated_real_share_account() {
         .begin(c.id, "synthetic research", snapshot(&w, &request).unwrap())
         .unwrap();
     let result = execute(&w, &request, &run, &c).unwrap();
-    assert_eq!(result.details["schema_version"], 11);
+    assert_eq!(result.details["schema_version"], 12);
     assert!(
         result.details["aggregate"]["total_return"]
             .as_f64()
@@ -111,7 +111,7 @@ fn changed_registered_actions_are_rejected_and_new_registration_keeps_old_snapsh
     let request = WorkflowRequest::Research {
         template: Box::new(t),
         market: m.id,
-        actions: a.id.clone(),
+        actions: Some(a.id.clone()),
         audit_only: true,
     };
     let original = snapshot(&w, &request).unwrap();
@@ -133,7 +133,7 @@ fn market_bytes_and_action_evidence_are_verified_before_execution() {
     let request = WorkflowRequest::Research {
         template: Box::new(t),
         market: m.id.clone(),
-        actions: a.id.clone(),
+        actions: Some(a.id.clone()),
         audit_only: false,
     };
     let frozen = snapshot(&w, &request).unwrap();
@@ -180,7 +180,7 @@ fn canonical_parquet_and_qlib_preserve_account_fees_and_feature_order() {
         let request = WorkflowRequest::Research {
             template: Box::new(t),
             market: m.id,
-            actions: a.id,
+            actions: Some(a.id),
             audit_only: false,
         };
         let r = w
@@ -298,7 +298,7 @@ fn unexplained_historical_security_codes_are_readiness_issues_not_training_failu
     let request = WorkflowRequest::Research {
         template: Box::new(t),
         market: market.id,
-        actions: a.id,
+        actions: Some(a.id),
         audit_only: true,
     };
     let r = w
@@ -347,7 +347,7 @@ fn independent_coefficient_conflicts_in_training_history_stop_before_cache_and_t
     let request = WorkflowRequest::Research {
         template: Box::new(t.clone()),
         market: m.id.clone(),
-        actions: a.id.clone(),
+        actions: Some(a.id.clone()),
         audit_only: true,
     };
     let r = w
@@ -369,7 +369,7 @@ fn independent_coefficient_conflicts_in_training_history_stop_before_cache_and_t
     let request = WorkflowRequest::Research {
         template: Box::new(t),
         market: m.id,
-        actions: a.id,
+        actions: Some(a.id),
         audit_only: false,
     };
     let r = w
@@ -416,21 +416,21 @@ fn historical_adjustment_terms_do_not_require_old_settlement_dates_but_execution
     let request = WorkflowRequest::Research {
         template: Box::new(t.clone()),
         market: m.id.clone(),
-        actions: a.id.clone(),
+        actions: Some(a.id.clone()),
         audit_only: false,
     };
     let r = w
         .begin(c.id, "historical terms", snapshot(&w, &request).unwrap())
         .unwrap();
     let out = execute(&w, &request, &r, &c).unwrap();
-    assert_eq!(out.details["schema_version"], 11);
+    assert_eq!(out.details["schema_version"], 12);
     assert_eq!(out.details["annual_reports"][0]["year"], 2010);
     t = demo::create_canonical(&w).unwrap().2;
     let c = context();
     let request = WorkflowRequest::Research {
         template: Box::new(t),
         market: m.id,
-        actions: a.id,
+        actions: Some(a.id),
         audit_only: true,
     };
     let r = w
@@ -468,7 +468,7 @@ fn source_adjusted_quotes_are_audit_only_and_report_provenance_is_required() {
     let request = WorkflowRequest::Research {
         template: Box::new(t),
         market: m.id,
-        actions: a.id,
+        actions: Some(a.id),
         audit_only: false,
     };
     let r = w
@@ -479,7 +479,7 @@ fn source_adjusted_quotes_are_audit_only_and_report_provenance_is_required() {
         )
         .unwrap();
     let out = execute(&w, &request, &r, &c).unwrap();
-    assert_eq!(out.details["schema_version"], 11);
+    assert_eq!(out.details["schema_version"], 12);
     let input = &out.details["execution"]["price_inputs"]["securities"]
         [demo::fixture_security_id("SH600000")];
     let frozen = if input["source"].is_object() {
@@ -594,7 +594,7 @@ fn missing_reverse_special_and_unpriced_distribution_terms_block_every_entry_bef
             let request = WorkflowRequest::Research {
                 template: Box::new(t.clone()),
                 market: m.id.clone(),
-                actions: a.id.clone(),
+                actions: Some(a.id.clone()),
                 audit_only,
             };
             let r = w
@@ -652,7 +652,7 @@ fn arbitrary_date_folds_without_validation_keep_gaps_and_tail_predictions() {
     let request = WorkflowRequest::Research {
         template: Box::new(t),
         market: m.id,
-        actions: a.id,
+        actions: Some(a.id),
         audit_only: false,
     };
     let c = context();
@@ -705,7 +705,7 @@ fn a_selected_all_null_feature_blocks_before_publishing_cache_or_training() {
     let request = WorkflowRequest::Research {
         template: Box::new(t),
         market: m.id,
-        actions: a.id,
+        actions: Some(a.id),
         audit_only: true,
     };
     let c = context();
@@ -750,7 +750,7 @@ fn independent_training_survives_settlement_gap_and_repaired_backtest_does_not_r
         WorkflowRequest::TrainResearch {
             template: Box::new(t),
             market: m.id,
-            actions: bad.id.clone(),
+            actions: Some(bad.id.clone()),
         },
     );
     out.unwrap();
@@ -826,7 +826,7 @@ fn actual_holding_gap_stops_backtest_and_preserves_completed_models() {
         WorkflowRequest::Research {
             template: Box::new(t),
             market: m.id,
-            actions: a.id,
+            actions: Some(a.id),
             audit_only: false,
         },
     );
@@ -868,7 +868,7 @@ fn absent_unheld_execution_coverage_retains_cash_and_reports_no_valid_trades() {
         WorkflowRequest::Research {
             template: Box::new(t),
             market: m.id,
-            actions: a.id,
+            actions: Some(a.id),
             audit_only: false,
         },
     );
@@ -888,7 +888,7 @@ fn damaged_training_descriptor_or_model_is_rejected_without_prediction_or_refitt
         WorkflowRequest::TrainResearch {
             template: Box::new(t),
             market: m.id,
-            actions: a.id.clone(),
+            actions: Some(a.id.clone()),
         },
     );
     out.unwrap();
@@ -938,7 +938,7 @@ fn relocated_workspace_reuses_models_from_verified_relative_market_version() {
         WorkflowRequest::TrainResearch {
             template: Box::new(t),
             market: m.id,
-            actions: a.id.clone(),
+            actions: Some(a.id.clone()),
         },
     );
     out.unwrap();

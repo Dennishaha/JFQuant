@@ -11,7 +11,7 @@
 | [lib.rs](lib.rs) | `DenseMatrix/TrainingSplit`、`Trainer/Predictor`、`LightGbmTrainer/LightGbmPredictor`、`TrainEvent`、`load_manifest`；native句柄作用域与释放 |
 | [training_config.rs](training_config.rs) | crate根路径 `TrainingConfig`：原生参数映射、早停轮数；禁止未知字段 |
 | [pipeline.rs](pipeline.rs) | `PipelineRequest/run_factor_pipeline/load_factor_cache/train_from_factor_cache/build_training_split`；Parquet输入到缓存/模型/预测 |
-| [backtest.rs](backtest.rs) | `ResearchConfig/ResearchRequest/run_with_context/validate_result`；年度滚动、输入准入、持续真实股数账本、schema11结果 |
+| [backtest.rs](backtest.rs) | `ResearchConfig/ResearchRequest/run_with_context/validate_result`；年度滚动、输入准入、持续真实股数账本、schema12结果 |
 
 ```mermaid
 flowchart TD
@@ -26,7 +26,7 @@ flowchart TD
   MODEL --> PRED["同一 predictor：按固定特征顺序预测"]
   PRED --> TABLE["流水线样本外预测表"]
   PRED --> LEDGER["年度研究：原价整数股、T+1、连续账户"]
-  LEDGER --> RESULT["schema11 年度结果、费用与净值"]
+  LEDGER --> RESULT["schema12 年度结果、费用与净值"]
 ```
 
 Parquet流水线标签为每证券下一条 close 收益；年度研究标签是下一开盘到再下一开盘的复权收益，并剔除跨训练/验证/IC边界标签。标签期限与组合调仓间隔不是同一个参数。年度研究细节见 [backtest README](backtest/README.md)。
@@ -52,20 +52,20 @@ cargo clippy -p analytics-ml --all-targets --features lightgbm-native,duckdb-nat
 
 ## 动态股票池与 Python 采集接口
 
-当前模板schema 6、研究结果schema11、服务协议9；公式仍为v4。模板增加 `pool_version`、`benchmark` 和 `pool_exit_policy`；默认 `builtin:csi500` / `SH000905`，沪深300模板使用 `builtin:csi300` / `SH000300`。自选和集合组合引用不可变pool版本，冻结成员区间、人工日期调整及输入哈希；模型manifest和缓存签名包含这些研究输入。原schema结果明确拒绝，历史状态和日志仍可查看，不转换旧文件。
+当前模板schema 8、研究结果schema12、服务协议10；公式仍为v4。解析后配置包含 `pool_version`、`benchmark` 和 `pool_exit_policy`（磁盘保存于TargetProfile）；默认 `builtin:csi500` / `SH000905`，沪深300模板使用 `builtin:csi300` / `SH000300`。自选和集合组合引用不可变pool版本，冻结成员区间、人工日期调整及输入哈希；模型manifest和缓存签名包含这些研究输入。原schema结果明确拒绝，历史状态和日志仍可查看，不转换旧文件。
 
 ```mermaid
 flowchart LR
-  CLIENT["App / jfquant"] --> SERVICE["协议9公共服务"]
+  CLIENT["App / jfquant"] --> SERVICE["协议10公共服务"]
   SERVICE --> POOL["保存/预览不可变股票池"]
   SERVICE --> COLLECT["Rust监督内置Python双源采集"]
   COLLECT --> SNAPSHOT["验证后的Parquet版本与公司行动候选"]
-  POOL --> FREEZE["模板6：池、基准、退出策略、签名"]
+  POOL --> FREEZE["模板8：池、基准、退出策略、签名"]
   SNAPSHOT --> READY["原价、历史覆盖、公司行动准入"]
   QLIB["现有Qlib读取器"] --> READY
   FREEZE --> READY
   READY --> RESEARCH["统一日行情、年度模型、持续整数股账户"]
-  RESEARCH --> RESULT["结果11：成员变化、退出/阻碍、账本、费用"]
+  RESEARCH --> RESULT["结果12：成员变化、退出/阻碍、账本、费用"]
 ```
 
 `pools create/validate/import/export/list/versions/preview` 使用公共定义及解析器；`data collect --provider akshare|yfinance --kind market|actions` 提交后台任务，使用 jobs wait 显式等待。`run --request` 可提交完整公共请求。App提供来源、采集日期/证券、股票池JSON编辑、日期预览、退出策略及失败采集恢复按钮。包内Python和依赖只用于采集，不需要外部Python；日常操作不调用Cargo。
@@ -86,7 +86,7 @@ jfquant research demo-parquet
 
 年度研究预检核验独立系数、训练/验证/预热历史公司行动及执行权益。失败按证券写入 `factor_basis_issues`、`adjustment_issues` 与受影响 `affected_factor_ids`，在生成因子缓存前停止；Qlib已有系数读取契约继续保留。
 
-年度研究先核验独立系数及训练/验证/预热历史事件，再核验当前执行权益；逐证券错误位于factor_basis_issues、adjustment_issues及affected_factor_ids。execution价量清单和哈希加入缓存与模型manifest；schema11拒绝缺失或被修改的价量来源。
+年度研究先核验独立系数及训练/验证/预热历史事件，再核验当前执行权益；逐证券错误位于factor_basis_issues、adjustment_issues及affected_factor_ids。execution价量清单和哈希加入缓存与模型manifest；schema12拒绝缺失或被修改的价量来源。
 
 ## 日期执行职责
 
@@ -104,7 +104,7 @@ backtest.rs先解析/冻结schedule和独立检查结果，再生成缓存与模
 
 第二档保持原成员，纯缺失传播null；第三档派生每日合格成员，不改原始成员或证据。不能看到后来缺价而倒删早期股票。账户仍采用原价、整数股、T+1和连续权益；未裁定冲突、损坏、基准缺项及剩余必要依赖仍阻断。默认有效因子比例0表示至少一项有效，最低有标签样本1只表示可执行，不表示样本在统计上充分。所选因子整列无有效值不会被自动删除。
 
-[backtest/quality.rs](backtest/quality.rs)在工作线程生成每日资格，不对可能持仓执行保守预检；[backtest/data.rs](backtest/data.rs)在因子计算后生成样本掩码。两者不是同一个股票集合：仅排除训练行不修改截面，缺测试标签也不排除预测。ResearchRequest增加quality_policy，schema11读取检查准入格式4及策略/掩码哈希，模型和DuckDB句柄仍不跨线程。
+[backtest/quality.rs](backtest/quality.rs)在工作线程生成每日资格，不对可能持仓执行保守预检；[backtest/data.rs](backtest/data.rs)在因子计算后生成样本掩码。两者不是同一个股票集合：仅排除训练行不修改截面，缺测试标签也不排除预测。ResearchRequest增加quality_policy，schema12读取检查准入格式5及策略/掩码哈希，模型和DuckDB句柄仍不跨线程。
 
 ```mermaid
 flowchart LR
@@ -121,7 +121,7 @@ flowchart LR
 
 为什么调整：普通市场代码无需先登记身份；独立目录、审核和权威名录下载增加了研究前置负担。特殊历史代码仍需在快照内明确区间，不能将旧证券行情或权益接到另一证券。训练使用价量和标签，到账／交付资料只在实际账户执行时检查。
 
-当前格式：模板6、需求3、准入4、股票池3、公司行动4、规范行情5、系数3、采集6、服务9、研究结果11；快照内来源映射1、训练产物1。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
+当前格式：模板8、需求3、准入5、股票池3、公司行动4、规范行情5、系数3、采集7、服务10、研究结果12；快照内来源映射1、训练产物2。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
 
 ```mermaid
 flowchart LR
@@ -133,3 +133,9 @@ flowchart LR
 ```
 
 验收：nextest覆盖来源日期边界、三档掩码、训练／回测分离及模型保留；Clippy、Rustdoc、格式、组件文档和包内CLI共同检查。生成数据、模型、运行记录和安装包不提交。另一台Apple Silicon/macOS14实机验收继续待完成。
+
+## 按组合与口径调度
+
+backtest.rs共同处理price_basis/factor_set、独立训练签名及告警；pipeline.rs冻结family。预测保持训练口径，到账修订不应无故重训供应商模型。 完整接口、why、边界和验收见[组件契约](../README.md)。
+
+低层Trainer只接收矩阵，不能从列名猜测因子公式，所以基础ModelManifest.formula_version为null；年度调度/流水线在已知组合时写入准确版本。缓存重训核对相邻factor_run_manifest的组合、公式和顺序，并冻结缓存字节哈希；缺来源清单的通用矩阵不冒称GTJA191产物。

@@ -989,6 +989,8 @@ fn research_template_saves_and_real_worker_finishes_synthetic_annual_account() {
     assert_eq!(
         std::fs::read_dir(w.resolve(".jfquant/templates"))
             .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|s| s == "json"))
             .count(),
         1
     );
@@ -1283,7 +1285,7 @@ fn service_client_tasks_appear_in_egui_can_be_cancelled_and_share_research_resul
         })
         .unwrap();
     h.wait_for(|app| !app.state.busy() && app.state.platform.runs.iter().any(|r| r.id == task));
-    assert_eq!(h.app.state.platform.template.schema_version, 6);
+    assert_eq!(h.app.state.platform.template.schema_version, 8);
     h.app.state.panel = Panel::Research;
     h.click("执行年度研究");
     h.wait_for(|app| !app.state.busy() && app.state.platform.details.get("aggregate").is_some());
@@ -1315,7 +1317,7 @@ fn service_client_tasks_appear_in_egui_can_be_cancelled_and_share_research_resul
             request: Box::new(TaskRequest::Workflow {
                 request: Box::new(analytics_workflow::WorkflowRequest::Research {
                     market: h.app.state.platform.market.clone(),
-                    actions: h.app.state.platform.actions.clone(),
+                    actions: Some(h.app.state.platform.actions.clone()),
                     template: Box::new(h.app.state.platform.template.clone()),
                     audit_only: false,
                 }),
@@ -1383,7 +1385,7 @@ fn unsupported_history_shows_error_without_nav_or_resumption_and_other_records_r
     let request = analytics_workflow::WorkflowRequest::Research {
         template: Box::new(template),
         market: market.id,
-        actions: actions.id,
+        actions: Some(actions.id),
         audit_only: false,
     };
     let ctx = analytics_core::task::TaskContext::new(
@@ -1524,4 +1526,39 @@ fn research_stage_results_distinguish_preserved_models_and_no_valid_trades() {
     assert!(!text.contains("尚未进行训练"));
     h.app.state.platform.details = serde_json::json!({"backtest_status":"no_valid_trades"});
     assert!(rendered_text(&h.frame(vec![])).contains("无有效交易"));
+}
+
+#[test]
+fn alpha158_provider_training_without_actions_uses_shared_backend_and_split_profiles() {
+    use analytics_core::research_quality::{FactorSet, PriceBasis};
+    let (mut h, _tmp) = platform_harness(Panel::Research);
+    let w = h.app.state.platform.workspace.as_ref().unwrap().clone();
+    let (m, _, mut t) = analytics_workflow::testing::synthetic(&w);
+    t.select_factor_set(FactorSet::Alpha158);
+    t.config.factor_ids = vec!["alpha158_001_KMID".into(), "alpha158_014_ROC5".into()];
+    t.price_basis = PriceBasis::Provider;
+    let (worker, events) = worker::spawn_in_workspace(h.ctx.clone(), Some(w.root().to_owned()));
+    h.app.worker = worker;
+    h.app.events = events;
+    h.app.state.platform.template = t;
+    h.app.state.platform.datasets = w.datasets().unwrap();
+    h.app.state.platform.market = m.id;
+    h.app.state.platform.actions.clear();
+    h.click("保存模板");
+    assert!(w.resolve(".jfquant/templates/factors").is_dir());
+    assert!(w.resolve(".jfquant/templates/targets").is_dir());
+    h.click("仅训练模型");
+    h.wait_for(|app| !app.state.busy() && app.state.platform.details["status"] == "trained");
+    assert_eq!(h.app.state.platform.details["factor_set"], "alpha158");
+    assert_eq!(h.app.state.platform.details["price_basis"], "provider");
+    assert!(
+        !h.app.state.platform.details["source_warnings"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        h.app.state.platform.details["feature_order"],
+        serde_json::json!(h.app.state.platform.template.config.factor_ids)
+    );
 }

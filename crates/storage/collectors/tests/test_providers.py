@@ -93,7 +93,7 @@ class ProviderContracts(unittest.TestCase):
                 [sys.executable, "-I", "-B", "-m", "jfquant_collectors"],
                 input=json.dumps(
                     {
-                        "version": 6,
+                        "version": 7,
                         "operation": "market",
                         "expected_collector_signature": "wrong",
                         "cache_dir": str(cache),
@@ -165,6 +165,74 @@ class ProviderContracts(unittest.TestCase):
         self.assertIs(kwargs["keepna"], True)
         self.assertIs(kwargs["actions"], True)
         self.assertEqual(events[-1][0], "complete")
+
+    def test_independent_coefficients_do_not_call_quotes_or_actions(self):
+        from jfquant_collectors.providers import coefficients
+
+        request = {
+            "provider": "akshare",
+            "adjustment_source": "sina_hfq",
+            "instruments": ["SH600000"],
+            "benchmarks": [],
+            "end": "2020-01-03",
+        }
+        events = []
+        with (
+            patch(
+                "jfquant_collectors.providers.fetch_adjustment", return_value={"fixture": True}
+            ) as factor,
+            patch("akshare.stock_zh_a_hist", side_effect=AssertionError("quote dependency")),
+            patch(
+                "akshare.stock_history_dividend_detail",
+                side_effect=AssertionError("action dependency"),
+            ),
+        ):
+            coefficients(request, lambda event, **value: events.append((event, value)))
+        factor.assert_called_once()
+        self.assertEqual(events[0][0], "adjustment_shard")
+        self.assertEqual(events[-1][0], "complete")
+
+    def test_quotes_only_does_not_depend_on_factor_endpoint(self):
+        raw = pd.DataFrame(
+            [
+                {
+                    "日期": "2020-01-02",
+                    "股票代码": "600000",
+                    "开盘": 10,
+                    "最高": 11,
+                    "最低": 9,
+                    "收盘": 10,
+                    "成交量": 12,
+                    "成交额": 12000,
+                }
+            ]
+        )
+        request = {
+            "operation": "quotes",
+            "provider": "akshare",
+            "adjustment_source": "sina_hfq",
+            "start": "2020-01-02",
+            "end": "2020-01-03",
+            "instruments": ["SH600000"],
+            "benchmarks": [],
+            "universes": [],
+        }
+        events = []
+        with (
+            patch("akshare.stock_zh_a_hist", return_value=raw),
+            patch(
+                "akshare.tool_trade_date_hist_sina",
+                return_value=pd.DataFrame({"trade_date": ["2020-01-02", "2020-01-03"]}),
+            ),
+            patch(
+                "jfquant_collectors.providers.fetch_adjustment",
+                side_effect=AssertionError("factor dependency"),
+            ),
+        ):
+            market(request, lambda event, **value: events.append((event, value)))
+        shard = next(v for e, v in events if e == "shard")
+        self.assertEqual(shard["adjustment"]["basis"]["kind"], "unavailable")
+        self.assertEqual(shard["bars"][0]["volume"], 1200)
 
     def test_empty_yahoo_response_fails(self):
         ticker = MagicMock()

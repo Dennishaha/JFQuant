@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "pool_version": "builtin:csi300",
+  "benchmark": "SH000300",
+  "pool_exit_policy": "next_tradable_day"
+}

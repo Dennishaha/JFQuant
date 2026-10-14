@@ -14,14 +14,14 @@ run_cli research demo-parquet > "$check_root/submission.json"
 demo_id="$(plutil -extract task_id raw -o - "$check_root/submission.json")"
 run_cli jobs wait "$demo_id" --timeout 30 > "$check_root/demo-wait.json"
 run_cli jobs results "$demo_id" > "$check_root/demo.json"
-plutil -extract details.demo_template json -o "$check_root/recipe.json" "$check_root/demo.json"
+recipe="$(plutil -extract details.demo_template_path raw -o - "$check_root/demo.json")"
 market="$(plutil -extract data.id raw -o - "$check_root/demo.json")"
 actions="$(plutil -extract details.demo_actions raw -o - "$check_root/demo.json")"
-run_cli research run --template "$check_root/recipe.json" --market "$market" --actions "$actions" > "$check_root/research-submission.json"
+run_cli research run --template "$recipe" --market "$market" --actions "$actions" > "$check_root/research-submission.json"
 research_id="$(plutil -extract task_id raw -o - "$check_root/research-submission.json")"
 run_cli jobs wait "$research_id" --timeout 60 > "$check_root/research.json"
 run_cli jobs results "$research_id" > "$check_root/online-results.json"
-[ "$(plutil -extract schema_version raw -o - "$check_root/online-results.json")" = 11 ]
+[ "$(plutil -extract schema_version raw -o - "$check_root/online-results.json")" = 12 ]
 [ "$(plutil -extract execution.mode raw -o - "$check_root/online-results.json")" = raw_integer_shares ]
 "$app/Contents/Resources/python/bin/python3" -I -B - "$check_root/online-results.json" <<'PY'
 import hashlib
@@ -41,20 +41,20 @@ for security in inputs["securities"].values():
 PY
 # All three user-facing modes run through the same shipped service and produce current results.
 for strictness in strict allow_missing qualified_only; do
-  run_cli research run --template "$check_root/recipe.json" --market "$market" --actions "$actions" \
+  run_cli research run --template "$recipe" --market "$market" --actions "$actions" \
     --strictness "$strictness" --min-valid-feature-ratio 0 --min-labeled-rows 1 > "$check_root/quality-$strictness-submission.json"
   quality_id="$(plutil -extract task_id raw -o - "$check_root/quality-$strictness-submission.json")"
   run_cli jobs wait "$quality_id" --timeout 60 > "$check_root/quality-$strictness.json"
   [ "$(plutil -extract results.execution.quality_policy.strictness raw -o - "$check_root/quality-$strictness.json")" = "$strictness" ]
-  [ "$(plutil -extract results.admission.schema_version raw -o - "$check_root/quality-$strictness.json")" = 4 ]
+  [ "$(plutil -extract results.admission.schema_version raw -o - "$check_root/quality-$strictness.json")" = 5 ]
 done
 # Exercise real date controls and absence of a validation set through the same service.
-run_cli research preview --template "$check_root/recipe.json" --market "$market" \
+run_cli research preview --template "$recipe" --market "$market" \
   --train-start 2007-01-02 --train-end 2008-01-12 \
   --test-start 2009-01-05 --test-end 2009-01-12 --no-validation > "$check_root/date-preview-submission.json"
 preview_id="$(plutil -extract task_id raw -o - "$check_root/date-preview-submission.json")"
 run_cli jobs wait "$preview_id" --timeout 30 > "$check_root/date-preview.json"
-run_cli research run --template "$check_root/recipe.json" --market "$market" --actions "$actions" \
+run_cli research run --template "$recipe" --market "$market" --actions "$actions" \
   --train-start 2007-01-02 --train-end 2008-01-12 \
   --test-start 2009-01-05 --test-end 2009-01-12 --no-validation > "$check_root/date-run-submission.json"
 date_id="$(plutil -extract task_id raw -o - "$check_root/date-run-submission.json")"
@@ -68,7 +68,7 @@ run_cli query export --sql "SELECT 'SH600000' AS instrument_id, DATE '2020-01-01
 run_cli query export --sql "SELECT 'SH600000' AS instrument_id, 'csi500' AS universe_id, DATE '2000-01-01' AS trade_date, true AS is_member" \
   --output "$pipeline_dir/universe.parquet" > "$check_root/universe.json"
 cat > "$check_root/pipeline-request.json" <<JSON
-{"market_path":"$pipeline_dir/market.parquet","universe_path":"$pipeline_dir/universe.parquet","universe_id":"csi500","date_range":{"start":"2020-01-01","end":"2020-04-30"},"factor_ids":["alpha_002","alpha_001"],"output_dir":"$pipeline_dir/results","training":{"parameters":{"num_iterations":"100","seed":"17","min_data_in_leaf":"10"},"early_stopping_rounds":8}}
+{"factor_set":"gtja191","market_path":"$pipeline_dir/market.parquet","universe_path":"$pipeline_dir/universe.parquet","universe_id":"csi500","date_range":{"start":"2020-01-01","end":"2020-04-30"},"factor_ids":["alpha_002","alpha_001"],"output_dir":"$pipeline_dir/results","training":{"parameters":{"num_iterations":"100","seed":"17","min_data_in_leaf":"10"},"early_stopping_rounds":8}}
 JSON
 run_cli factors run --request "$check_root/pipeline-request.json" > "$check_root/pipeline-submission.json"
 pipeline_id="$(plutil -extract task_id raw -o - "$check_root/pipeline-submission.json")"
@@ -86,9 +86,8 @@ run_cli jobs results "$research_id" > "$check_root/offline-results.json"
 cmp "$check_root/online-results.json" "$check_root/offline-results.json"
 [ "$(plutil -extract record.status raw -o - "$check_root/research.json")" = succeeded ]
 [ "$(plutil -extract ok raw -o - "$check_root/native.json")" = true ]
-echo "Packaged CLI research and offline results verified: $check_root"
 
-run_cli research train --template "$check_root/recipe.json" --market "$market" --actions "$actions" > "$check_root/train-submit.json"
+run_cli research train --template "$recipe" --market "$market" --actions "$actions" > "$check_root/train-submit.json"
 training_id="$(plutil -extract task_id raw -o - "$check_root/train-submit.json")"
 run_cli jobs wait "$training_id" --timeout 60 > "$check_root/train-wait.json"
 run_cli jobs results "$training_id" > "$check_root/train-results.json"
@@ -96,4 +95,35 @@ run_cli jobs results "$training_id" > "$check_root/train-results.json"
 run_cli research backtest --training "$training_id" --actions "$actions" > "$check_root/backtest-submit.json"
 backtest_id="$(plutil -extract task_id raw -o - "$check_root/backtest-submit.json")"
 run_cli jobs wait "$backtest_id" --timeout 60 > "$check_root/backtest-wait.json"
-[ "$(plutil -extract results.schema_version raw -o - "$check_root/backtest-wait.json")" = 11 ]
+[ "$(plutil -extract results.schema_version raw -o - "$check_root/backtest-wait.json")" = 12 ]
+
+# A provider profile is explicit and supported only by a frozen original Qlib source.
+run_cli research demo > "$check_root/qlib-demo-submit.json"
+qlib_demo_id="$(plutil -extract task_id raw -o - "$check_root/qlib-demo-submit.json")"
+run_cli jobs wait "$qlib_demo_id" --timeout 30 > "$check_root/qlib-demo-wait.json"
+run_cli jobs results "$qlib_demo_id" > "$check_root/qlib-demo.json"
+qlib_market="$(plutil -extract data.id raw -o - "$check_root/qlib-demo.json")"
+qlib_recipe="$(plutil -extract details.demo_template_path raw -o - "$check_root/qlib-demo.json")"
+for family in gtja191 alpha158; do
+  # Keep the synthetic acceptance feature subset meaningful; full catalogues have separate golden tests.
+  "$app/Contents/Resources/python/bin/python3" -I -B - "$check_root/qlib-demo.json" "$check_root/$family-profile.json" "$family" <<'PYPROFILE'
+import json,sys
+r=json.load(open(sys.argv[1]))["details"]["demo_template"]
+family=sys.argv[3]
+profile={"schema_version":1,"factor_set":family,"price_basis":"provider","formula_version":r["formula_version"] if family=="gtja191" else "qlib-alpha158-b87a2c2+jfquant-units-v1","factor_ids":["alpha_002"] if family=="gtja191" else ["alpha158_001_KMID","alpha158_014_ROC5"]}
+json.dump(profile,open(sys.argv[2],"w"))
+PYPROFILE
+  run_cli research train --template "$qlib_recipe" --market "$qlib_market" --factor-profile "$check_root/$family-profile.json" > "$check_root/$family-provider-submit.json"
+  provider_id="$(plutil -extract task_id raw -o - "$check_root/$family-provider-submit.json")"
+  run_cli jobs wait "$provider_id" --timeout 60 > "$check_root/$family-provider.json"
+  run_cli jobs results "$provider_id" > "$check_root/$family-model.json"
+  [ "$(plutil -extract price_basis raw -o - "$check_root/$family-model.json")" = provider ]
+  [ "$(plutil -extract factor_set raw -o - "$check_root/$family-model.json")" = "$family" ]
+  [ "$(plutil -extract schema_version raw -o - "$check_root/$family-model.json")" = 2 ]
+done
+
+# Deterministic HTTP/response fixtures execute against the installed Python modules, not repo imports.
+repo_root="$(cd "$(dirname "$0")/../../.." && pwd)"
+"$app/Contents/Resources/python/bin/python3" -I -B -m unittest discover -s "$repo_root/crates/storage/collectors/tests" > "$check_root/collector-fixtures.log" 2>&1
+[ -s "$app/Contents/Resources/Licenses/Qlib-Alpha158.txt" ]
+echo "Packaged CLI research, two factor families, collector fixtures and offline results verified: $check_root"

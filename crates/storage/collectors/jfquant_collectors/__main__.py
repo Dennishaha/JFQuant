@@ -1,4 +1,4 @@
-"""One supervised task per process. stdout is exclusively JSON Lines protocol v6."""
+"""One supervised task per process. stdout is exclusively JSON Lines protocol v7."""
 
 import contextlib
 import hashlib
@@ -13,7 +13,7 @@ from pathlib import Path
 from . import PROTOCOL_VERSION
 from .announcements import collect as announcements
 from .evidence import EvidenceCapture
-from .providers import corporate_actions, market
+from .providers import coefficients, corporate_actions, market
 
 
 def main():
@@ -40,7 +40,7 @@ def main():
                     "kind": "completion_sources",
                     "http_receipts": capture.receipts[:],
                 }
-        if capture is not None and event in ("shard", "action_shard"):
+        if capture is not None and event in ("shard", "action_shard", "adjustment_shard"):
             value["evidence"]["http_receipts"] = capture.receipts[:]
             capture.receipts.clear()
         protocol.write(
@@ -58,8 +58,10 @@ def main():
         request = json.loads(sys.stdin.readline())
         if request["version"] != PROTOCOL_VERSION or request["operation"] not in (
             "market",
+            "quotes",
             "actions",
             "announcements",
+            "coefficients",
         ):
             raise ValueError("unsupported collector request")
         signature = "sha256:" + code_hash.hexdigest()
@@ -87,6 +89,8 @@ def main():
             operation = request["operation"]
             execute = {
                 "market": market,
+                "quotes": market,
+                "coefficients": coefficients,
                 "actions": corporate_actions,
                 "announcements": announcements,
             }[operation]

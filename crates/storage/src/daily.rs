@@ -77,6 +77,7 @@ pub struct DailyDataset {
     kind: DailyKind,
     source_map: analytics_core::source_map::SourceMap,
     read_range: Option<DateRange>,
+    view: Option<crate::market_view::MarketView>,
     field_cache: std::cell::RefCell<BTreeMap<(String, String), DailyField>>,
     bar_cache: std::cell::RefCell<BTreeMap<String, Arc<Vec<DailyBar>>>>,
     adjustment_cache: std::cell::RefCell<BTreeMap<String, AdjustmentRecord>>,
@@ -174,19 +175,50 @@ impl DailyDataset {
     fn qlib_field(&self, q: &QlibDataset, id: &str, name: &str) -> io::Result<DailyField> {
         let key = (id.to_owned(), name.to_owned());
         if let Some(f) = self.field_cache.borrow().get(&key) {
+            self.validate_qlib_values(f, id, name)?;
             return Ok(f.clone());
         }
         let f = q.field(id, name)?;
+        self.validate_qlib_values(&f, id, name)?;
         #[cfg(test)]
         self.physical_reads.set(self.physical_reads.get() + 1);
         self.field_cache.borrow_mut().insert(key, f.clone());
         Ok(f)
     }
+    fn validate_qlib_values(&self, field: &DailyField, id: &str, name: &str) -> io::Result<()> {
+        if field
+            .values
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| {
+                self.read_range.as_ref().is_none_or(|r| {
+                    self.calendar
+                        .get(field.start + *i)
+                        .is_some_and(|d| r.contains(*d))
+                })
+            })
+            .filter_map(|(_, v)| v.as_ref())
+            .any(|value| match name {
+                "open" | "high" | "low" | "close" | "vwap" | "factor" => *value <= 0.,
+                "volume" | "amount" => *value < 0.,
+                _ => false,
+            })
+        {
+            return Err(invalid(format!(
+                "{id} {name}: invalid nonpositive price/coefficient or negative volume/amount"
+            )));
+        }
+        Ok(())
+    }
     fn unbound(&self) -> io::Result<Self> {
         Ok(Self {
             root: self.root.clone(),
             calendar: self.calendar.clone(),
-            kind: DailyKind::Qlib(QlibDataset::open(&self.root)?),
+            kind: DailyKind::Qlib(QlibDataset::open(match &self.kind {
+                DailyKind::Qlib(q) => &q.root,
+                _ => &self.root,
+            })?),
+            view: self.view.clone(),
             source_map: Default::default(),
             read_range: self.read_range.clone(),
             field_cache: Default::default(),
@@ -232,6 +264,13 @@ impl DailyDataset {
     /// Open the current canonical format or the supported Qlib binary format.
     pub fn open(root: impl AsRef<Path>) -> io::Result<Self> {
         let root = root.as_ref().canonicalize()?;
+        if root.join("market_view.json").is_file() {
+            let (view, base) = crate::market_view::MarketView::read(&root)?;
+            let mut dataset = Self::open(&base)?;
+            dataset.root = root;
+            dataset.view = Some(view);
+            return Ok(dataset);
+        }
         let mapping = root.join("source_map.json");
         let source_map: analytics_core::source_map::SourceMap = if mapping.exists() {
             serde_json::from_slice(&fs::read(mapping)?).map_err(invalid)?
@@ -274,6 +313,7 @@ impl DailyDataset {
                 root,
                 source_map: source_map.clone(),
                 read_range: None,
+                view: None,
                 field_cache: Default::default(),
                 bar_cache: Default::default(),
                 adjustment_cache: Default::default(),
@@ -288,6 +328,7 @@ impl DailyDataset {
                 root,
                 source_map: source_map.clone(),
                 read_range: None,
+                view: None,
                 field_cache: Default::default(),
                 bar_cache: Default::default(),
                 adjustment_cache: Default::default(),
@@ -297,6 +338,10 @@ impl DailyDataset {
                 kind: DailyKind::Qlib(q),
             })
         }
+    }
+    /// Only an unmodified Qlib contract can be explicitly trusted as supplier training input.
+    pub fn supports_provider_training(&self) -> bool {
+        self.view.is_none() && matches!(self.kind, DailyKind::Qlib(_))
     }
     /// Whether the format provides verified raw execution prices.
     pub fn has_raw_prices(&self) -> bool {
@@ -411,6 +456,28 @@ impl DailyDataset {
             return Ok(());
         }
         self.validate_read_key(id)?;
+        if let Some(view) = &self.view {
+            let record = self.adjustment_record(id)?;
+            let anchor = view
+                .anchors
+                .get(id)
+                .ok_or_else(|| invalid("view anchor missing"))?;
+            if record.anchor(anchor.trade_date)? != *anchor {
+                return Err(invalid("view anchor mismatch"));
+            }
+            let raw_close = self.raw_field(id, "close")?;
+            for date in &self.calendar {
+                if self.read_range.as_ref().is_none_or(|r| r.contains(*date))
+                    && raw_close
+                        .get(self.calendar.binary_search(date).unwrap())
+                        .is_some()
+                    && record.on(*date)?.is_none()
+                {
+                    return Err(invalid("explicit coefficient coverage missing"));
+                }
+            }
+            return Ok(());
+        }
         if let DailyKind::Qlib(q) = &self.kind {
             let values = self.qlib_field(q, id, "factor")?;
             if values
@@ -438,7 +505,7 @@ impl DailyDataset {
     }
     /// True when coefficients come from a separate dated record rather than float32 Qlib fields.
     pub fn has_independent_coefficients(&self) -> bool {
-        matches!(self.kind, DailyKind::Parquet(_))
+        self.view.is_some() || matches!(self.kind, DailyKind::Parquet(_))
     }
     /// Prevent a real snapshot from being labelled with synthetic coefficient provenance,
     /// or a fixture from silently acquiring public coefficients.
@@ -451,7 +518,7 @@ impl DailyDataset {
             return Ok(());
         }
         self.validate_read_key(id)?;
-        if matches!(self.kind, DailyKind::Qlib(_)) {
+        if self.view.is_none() && matches!(self.kind, DailyKind::Qlib(_)) {
             return Ok(());
         }
         let record = self.adjustment_record(id)?;
@@ -486,6 +553,17 @@ impl DailyDataset {
             return Ok(dates);
         }
         self.validate_read_key(id)?;
+        if self.view.is_some() {
+            let record = self.adjustment_record(id)?;
+            if let AdjustmentBasis::Explicit { points, .. } = record.basis {
+                return Ok(points
+                    .windows(2)
+                    .filter(|w| coefficient(&w[0].factor).ok() != coefficient(&w[1].factor).ok())
+                    .map(|w| w[1].effective_date)
+                    .collect());
+            }
+            return Ok(vec![]);
+        }
         match &self.kind {
             DailyKind::Qlib(_) => Ok(Vec::new()),
             DailyKind::Parquet(_) => match self.adjustment_record(id)?.basis {
@@ -513,6 +591,17 @@ impl DailyDataset {
             return self.bound_field(id, "__factors");
         }
         self.validate_read_key(id)?;
+        if self.view.is_some() {
+            let record = self.adjustment_record(id)?;
+            return Ok(DailyField {
+                start: 0,
+                values: self
+                    .calendar
+                    .iter()
+                    .map(|d| record.on(*d))
+                    .collect::<io::Result<_>>()?,
+            });
+        }
         match &self.kind {
             DailyKind::Qlib(q) => self.qlib_field(q, id, "factor"),
             DailyKind::Parquet(_) => {
@@ -585,6 +674,20 @@ impl DailyDataset {
     pub fn price_inputs(&self, ids: &BTreeSet<String>) -> io::Result<serde_json::Value> {
         use sha2::{Digest, Sha256};
         let mut securities = BTreeMap::new();
+        if let Some(view) = &self.view {
+            for id in ids {
+                let record = self.adjustment_record(id)?;
+                let mut basis = serde_json::to_value(&record.basis).map_err(invalid)?;
+                if let Some(points) = basis.as_object_mut().and_then(|o| o.remove("points")) {
+                    basis["point_count"] = serde_json::json!(points.as_array().map_or(0, Vec::len));
+                    basis["history_start"] = points[0]["effective_date"].clone();
+                }
+                securities.insert(id,serde_json::json!({"basis":basis,"source_symbol":record.source_symbol,"anchor":view.anchors.get(id),"sha256":view.records.get(id)}));
+            }
+            return Ok(
+                serde_json::json!({"normalization":NORMALIZATION,"recovered_raw_source":view,"securities":securities}),
+            );
+        }
         for id in ids {
             analytics_core::task::TaskContext::current().check()?;
             self.validate_read_key(id)?;
@@ -751,31 +854,78 @@ impl DailyDataset {
             return self.bound_field(id, name);
         }
         self.validate_read_key(id)?;
-        if let DailyKind::Qlib(q) = &self.kind {
-            let field = self.qlib_field(q, id, name)?;
-            if field
-                .values
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| {
-                    self.read_range.as_ref().is_none_or(|r| {
-                        self.calendar
-                            .get(field.start + *i)
-                            .is_some_and(|d| r.contains(*d))
+        if let Some(view) = &self.view {
+            let factors = self.adjustment_factors(id)?;
+            let anchor = crate::adjustment::coefficient(
+                &view
+                    .anchors
+                    .get(id)
+                    .ok_or_else(|| invalid("view anchor missing"))?
+                    .factor,
+            )?;
+            let base = match &self.kind {
+                DailyKind::Qlib(q) => q,
+                _ => return Err(invalid("view base must be Qlib")),
+            };
+            let input = match name {
+                "factor" => factors.clone(),
+                "volume" => self.raw_volume(id)?,
+                "amount" => self.qlib_field(base, id, "amount")?,
+                "vwap" => self.raw_volume(id)?,
+                _ => self.raw_field(id, name)?,
+            };
+            let amount = if name == "vwap" {
+                Some(self.qlib_field(base, id, "amount")?)
+            } else {
+                None
+            };
+            let anchor_date = view.anchors[id].trade_date;
+            return Ok(DailyField {
+                start: 0,
+                values: (0..self.calendar.len())
+                    .map(|i| -> io::Result<Option<f64>> {
+                        if self.calendar[i] < anchor_date {
+                            return Ok(None);
+                        }
+                        let Some((value, f)) = input.get(i).zip(factors.get(i)) else {
+                            return Ok(None);
+                        };
+                        let scale = f / anchor;
+                        if !scale.is_finite() || scale <= 0. {
+                            return Err(invalid("view normalization scale cannot be represented"));
+                        }
+                        let v = match name {
+                            "factor" => scale,
+                            "volume" => value / scale / 100.,
+                            "amount" => value,
+                            "vwap" => {
+                                if value == 0. {
+                                    return Ok(None);
+                                }
+                                let Some(a) = amount.as_ref().and_then(|a| a.get(i)) else {
+                                    return Ok(None);
+                                };
+                                a * 1000. / value * scale
+                            }
+                            _ => value * scale,
+                        };
+                        if !v.is_finite()
+                            || (matches!(
+                                name,
+                                "open" | "high" | "low" | "close" | "vwap" | "factor"
+                            ) && v <= 0.)
+                        {
+                            return Err(invalid(
+                                "view normalized price/volume/VWAP cannot be represented",
+                            ));
+                        }
+                        Ok(Some(v))
                     })
-                })
-                .filter_map(|(_, v)| v.as_ref())
-                .any(|value| match name {
-                    "open" | "high" | "low" | "close" | "vwap" | "factor" => *value <= 0.,
-                    "volume" | "amount" => *value < 0.,
-                    _ => false,
-                })
-            {
-                return Err(invalid(format!(
-                    "{id} {name}: invalid nonpositive price/coefficient or negative volume/amount"
-                )));
-            }
-            return Ok(field);
+                    .collect::<io::Result<_>>()?,
+            });
+        }
+        if let DailyKind::Qlib(q) = &self.kind {
+            return self.qlib_field(q, id, name);
         }
         let inputs = self.canonical_inputs(id)?;
         let base = coefficient(&inputs.anchor.factor)?;

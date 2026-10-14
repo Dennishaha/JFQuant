@@ -35,11 +35,24 @@ pub(crate) fn controls(ui: &mut egui::Ui, policy: &mut ResearchQualityPolicy) {
 }
 
 pub(crate) fn reasons(ui: &mut egui::Ui, value: &Value) {
+    let basis = if value["price_basis"].is_string() {
+        &value["price_basis"]
+    } else {
+        &value["execution"]["price_basis"]
+    };
+    if let Ok(basis) =
+        serde_json::from_value::<analytics_core::research_quality::PriceBasis>(basis.clone())
+    {
+        ui.label(format!("训练价格口径：{}", basis.label()));
+    }
+
     let policy = &value["admission"]["policy"];
     let policy = if policy.is_object() {
         policy
-    } else {
+    } else if value["execution"]["quality_policy"].is_object() {
         &value["execution"]["quality_policy"]
+    } else {
+        &value["request"]["quality_policy"]
     };
     if let Ok(policy) = serde_json::from_value::<ResearchQualityPolicy>(policy.clone()) {
         ui.label(format!("检查方式：{}", policy.strictness.label()));
@@ -95,6 +108,10 @@ pub(crate) fn reasons(ui: &mut egui::Ui, value: &Value) {
     if let Some(decisions) = admission["decisions"].as_array() {
         rows.extend(decisions.iter());
     }
+    if let Some(warnings) = value["source_warnings"].as_array() {
+        rows.extend(warnings.iter());
+    }
+
     if rows.is_empty() {
         return;
     }
@@ -116,6 +133,7 @@ pub(crate) fn reasons(ui: &mut egui::Ui, value: &Value) {
                             "keep_null",
                             "exclude_sample",
                             "exclude_security",
+                            "warn",
                             "passed",
                             "not_run",
                         ] {
@@ -201,6 +219,7 @@ fn handling_label(value: &str) -> &str {
         "keep_null" => "保留为空值",
         "exclude_sample" => "排除样本",
         "exclude_security" => "排除股票",
+        "warn" => "告警保留",
         "passed" => "已通过",
         "not_run" => "未执行",
         _ => "全部",

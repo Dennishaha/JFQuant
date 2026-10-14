@@ -305,6 +305,7 @@ pub(super) struct YearInputs<'a> {
     pub dataset: &'a DailyDataset,
     pub members: &'a BTreeMap<String, Vec<Membership>>,
     pub benchmark: &'a str,
+    pub universe_id: &'a str,
     pub pool_start: Date,
     pub allow_missing: bool,
 }
@@ -320,6 +321,7 @@ pub(super) fn prepare_year(
         dataset,
         members,
         benchmark,
+        universe_id,
         pool_start,
         allow_missing,
     } = inputs;
@@ -487,7 +489,7 @@ pub(super) fn prepare_year(
             start: dataset.calendar[warmup],
             end: dataset.calendar[end - 1],
         },
-        universe_id: "csi500".into(),
+        universe_id: universe_id.into(),
         factor_ids: ids.to_vec(),
         formula_version: registry.all().next().unwrap().version.clone(),
     };

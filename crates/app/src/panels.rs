@@ -421,13 +421,28 @@ fn factor_panel(
     state: &mut AppState,
     worker: &WorkerHandle,
     cancel_slot: &mut Option<Cancellation>,
-    registry: &FactorRegistry,
+    _registry: &FactorRegistry,
 ) {
     theme::section_heading(
         ui,
-        "Alpha191 因子流水线",
+        "因子流水线",
         "行情 × 股票池 as-of 连接 → 因子计算 → 70/15/15 拆分 → LightGBM 训练与预测。",
     );
+    let previous = state.factor.factor_set;
+    egui::ComboBox::from_id_salt("pipeline_factor_set")
+        .selected_text(previous.label())
+        .show_ui(ui, |ui| {
+            for family in [
+                analytics_core::research_quality::FactorSet::Gtja191,
+                analytics_core::research_quality::FactorSet::Alpha158,
+            ] {
+                ui.selectable_value(&mut state.factor.factor_set, family, format!("{family:?}"));
+            }
+        });
+    if previous != state.factor.factor_set {
+        state.factor.selected.clear();
+    }
+    let registry = FactorRegistry::for_set(state.factor.factor_set);
     ui.add_space(8.0);
     egui::Grid::new("factor_form")
         .num_columns(2)
@@ -591,6 +606,7 @@ fn run_pipeline_request(
         return Err("请至少选择一个因子".into());
     }
     Ok(analytics_ml::pipeline::PipelineRequest {
+        factor_set: factor.factor_set,
         market_path: PathBuf::from(factor.market_path.trim()),
         universe_path: PathBuf::from(factor.universe_path.trim()),
         universe_id: factor.universe_id.trim().to_string(),

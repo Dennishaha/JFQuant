@@ -118,7 +118,7 @@ fn quality_flags_match_public_api_freezing_and_reject_invalid_thresholds() {
         let request = WorkflowRequest::Research {
             template: Box::new(template),
             market: m.id.clone(),
-            actions: a.id.clone(),
+            actions: Some(a.id.clone()),
             audit_only: false,
         };
         let id = Uuid::new_v4();
@@ -270,11 +270,10 @@ fn cli_native_research_templates_results_and_incomplete_actions_share_strict_che
     let mut t = demo["details"]["demo_template"].clone();
     t["initial_cash_cny"] = json!(1005.0);
     t["market_rules"]["commission"]["minimum_cny"] = json!(5.0);
-    std::fs::write(
-        s.client.root.join("recipe.json"),
-        serde_json::to_vec(&t).unwrap(),
-    )
-    .unwrap();
+    serde_json::from_value::<analytics_workflow::ResearchTemplate>(t)
+        .unwrap()
+        .write(&s.client.root.join("recipe.json"))
+        .unwrap();
     assert_eq!(
         s.json(&["templates", "validate", "recipe.json"])["valid"],
         true
@@ -608,7 +607,7 @@ fn current_research_cli_and_api_share_results_and_reject_old_imports_without_mod
         request: Box::new(WorkflowRequest::Research {
             template: Box::new(template),
             market: m.id.clone(),
-            actions: a.id.clone(),
+            actions: Some(a.id.clone()),
             audit_only: false,
         }),
     });
@@ -626,7 +625,7 @@ fn current_research_cli_and_api_share_results_and_reject_old_imports_without_mod
     let cli_id = value["task_id"].as_str().unwrap().parse().unwrap();
     let actual = s.client.wait(cli_id, Some(15)).unwrap();
     assert_eq!(actual["results"], expected);
-    assert_eq!(expected["schema_version"], 11);
+    assert_eq!(expected["schema_version"], 12);
     assert!(
         expected["aggregate"]
             .get("terminal_valuation_fees_cny")
@@ -835,6 +834,7 @@ fn standard_pipeline_json_preserves_feature_order_and_persistent_artifacts() {
         "universe.parquet",
     ]);
     let request = analytics_ml::pipeline::PipelineRequest {
+        factor_set: Default::default(),
         market_path: "market.parquet".into(),
         universe_path: "universe.parquet".into(),
         universe_id: "csi500".into(),
@@ -902,11 +902,10 @@ fn cli_pools_and_canonical_research_share_public_backend_and_schema() {
     assert_eq!(preview["instruments"].as_array().unwrap().len(), 2);
     let mut template = demo["details"]["demo_template"].clone();
     template["pool_version"] = json!(pool_id);
-    std::fs::write(
-        s.client.root.join("recipe.json"),
-        serde_json::to_vec(&template).unwrap(),
-    )
-    .unwrap();
+    serde_json::from_value::<analytics_workflow::ResearchTemplate>(template)
+        .unwrap()
+        .write(&s.client.root.join("recipe.json"))
+        .unwrap();
     let run = s.json(&[
         "research",
         "run",
@@ -920,7 +919,7 @@ fn cli_pools_and_canonical_research_share_public_backend_and_schema() {
     let id = run["task_id"].as_str().unwrap();
     s.json(&["jobs", "wait", id, "--timeout", "30"]);
     let result = s.json(&["jobs", "results", id]);
-    assert_eq!(result["schema_version"], 11);
+    assert_eq!(result["schema_version"], 12);
     assert_eq!(
         result["execution"]["benchmark"],
         analytics_workflow::demo::fixture_security_id("SH000905")
@@ -1002,7 +1001,7 @@ fn date_overrides_preview_and_no_validation_run_share_the_public_schedule() {
         "--timeout",
         "30",
     ]);
-    assert_eq!(done["results"]["schema_version"], 11);
+    assert_eq!(done["results"]["schema_version"], 12);
     assert_eq!(done["results"]["fold_reports"][0]["validation_rows"], 0);
     let invalid = s.cli(&[
         "research",
@@ -1027,7 +1026,7 @@ fn stopping_idle_service_then_immediately_reconnecting_does_not_parse_empty_json
     s.json(&["service", "stop"]);
     let after = s.json(&["service", "status"]);
     assert!(after["active"].is_null());
-    assert_eq!(after["protocol_version"], 9);
+    assert_eq!(after["protocol_version"], 10);
 }
 
 #[test]
@@ -1057,5 +1056,83 @@ fn removed_identity_cli_is_rejected_and_research_stages_are_explicit() {
     let accepted = s.json(&["research", "backtest", "--training", id, "--actions", &a.id]);
     let id = accepted["task_id"].as_str().unwrap();
     assert!(s.cli(&["jobs", "wait", id]).status.success());
-    assert_eq!(s.json(&["jobs", "results", id])["schema_version"], 11);
+    assert_eq!(s.json(&["jobs", "results", id])["schema_version"], 12);
+}
+
+#[test]
+fn split_template_profiles_and_price_basis_flags_share_native_training() {
+    let s = Sandbox::new();
+    let demo = s.json(&["research", "demo"]);
+    let id = demo["task_id"].as_str().unwrap();
+    s.json(&["jobs", "wait", id, "--timeout", "30"]);
+    let demo = s.json(&["jobs", "results", id]);
+    let mut t: analytics_workflow::ResearchTemplate =
+        serde_json::from_value(demo["details"]["demo_template"].clone()).unwrap();
+    t.write(&s.client.root.join("workflow.json")).unwrap();
+    s.json(&[
+        "templates",
+        "factors",
+        "--template",
+        "workflow.json",
+        "--output",
+        "features.json",
+    ]);
+    s.json(&[
+        "templates",
+        "target",
+        "--template",
+        "workflow.json",
+        "--output",
+        "universe.json",
+    ]);
+    s.json(&[
+        "templates",
+        "compose",
+        "--workflow",
+        "workflow.json",
+        "--factors",
+        "features.json",
+        "--target",
+        "universe.json",
+        "--output",
+        "composed.json",
+    ]);
+    assert_eq!(
+        analytics_workflow::signature(&t).unwrap(),
+        analytics_workflow::signature(
+            &analytics_workflow::ResearchTemplate::read(&s.client.root.join("composed.json"))
+                .unwrap()
+        )
+        .unwrap()
+    );
+    t.select_factor_set(analytics_core::research_quality::FactorSet::Alpha158);
+    t.config.factor_ids = vec!["alpha158_001_KMID".into(), "alpha158_014_ROC5".into()];
+    analytics_workflow::profiles::FactorProfile::from_template(&t)
+        .write(&s.client.root.join("alpha.json"))
+        .unwrap();
+    let submitted = s.json(&[
+        "research",
+        "train",
+        "--template",
+        "composed.json",
+        "--market",
+        demo["data"]["id"].as_str().unwrap(),
+        "--factor-profile",
+        "alpha.json",
+        "--price-basis",
+        "provider",
+    ]);
+    let id = submitted["task_id"].as_str().unwrap();
+    s.json(&["jobs", "wait", id, "--timeout", "30"]);
+    let artifact = s.json(&["jobs", "results", id]);
+    assert_eq!(artifact["factor_set"], "alpha158");
+    assert_eq!(artifact["price_basis"], "provider");
+    assert!(
+        artifact["source_warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["code"] == "provider_adjustment_unreconciled")
+    );
+    assert_eq!(artifact["feature_order"], json!(t.config.factor_ids));
 }

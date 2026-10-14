@@ -10,14 +10,14 @@
 |---|---|
 | Workspace::open / resolve / lease | 显式根目录；打开后不依赖cwd；绝对输入支持，元数据和注册版本使用工作区相对路径；独占文件锁由服务持有，防止多个后台写入；多个客户端共用服务 |
 | Workspace::register / datasets | 登记JFQuant验证过的行情文件内容、来源说明或公司行动及证据哈希；数据完整性不等同采集成功；不读取JFQlib缓存 |
-| ResearchTemplate::builtin / validate / read / write | source-controlled JSON模板，schema_version=6；参数默认及校验；保存和导入不执行脚本 |
+| ResearchTemplate::builtin / validate / read / write | 工作流8引用独立因子/标的profile1；解析、校验与原子保存，不执行脚本 |
 | snapshot / signature | 冻结请求、数据版本及签名、软件与公式版本；有序特征列表改变会改变签名 |
 | Workspace::begin / progress / finish / runs / recover | UUID输出目录、原子任务状态、追加日志；重启把未结束任务标为Interrupted；迟到进度不恢复终态 |
 | execute | 同步在worker调用storage/ml；TaskContext提供取消及进度，返回plain-data WorkflowOutcome |
-| Workspace::import_run / results | 当前schema 11严格研究结果只读登记，先校验再创建记录，不改原目录；查看年度结果、工作台产物或执行准入检查 |
+| Workspace::import_run / results | 当前schema 12严格研究结果只读登记，先校验再创建记录，不改原目录；查看年度结果、工作台产物或执行准入检查 |
 | self_check | 在worker执行真实DuckDB查询、LightGBM小模型训练和预测；供自包含安装包验收 |
 
-首版内置GTJA191／中证500年度流程，支持数据更新、公司行动补充、准入检查和年度研究；不包含任意脚本、调度或通用DAG编辑器。模板默认5年训练、1年验证、次年测试，前50、每5交易日调仓、100万元、最新A股费率及178个v4研究因子。缺少真实MKT/SMB/HML的030和12条隔离公式不能选入模板。
+内置GTJA191及Alpha158，可分别选择沪深300或中证500，支持数据更新、公司行动补充、准入检查和年度研究；不包含任意脚本、调度或通用DAG编辑器。模板默认5年训练、1年验证、次年测试，前50、每5交易日调仓、100万元、最新A股费率及178个v4研究因子。缺少真实MKT/SMB/HML的030和12条隔离公式不能选入模板。
 
 ## 文件格式与数据流
 
@@ -26,7 +26,9 @@ WORKSPACE/
   data/                          行情版本、公司行动及下载证据
   .jfquant/workspace.json         schema_version=1；工作区身份
   .jfquant/catalog/*.json         DataVersion：ID、kind、相对路径、签名、实际起止及来源/缺项摘要
-  .jfquant/templates/*.json       ResearchTemplate：用户参数；可以导入/导出
+  .jfquant/templates/*.json       WorkflowDocument8：流程参数及相对引用
+  .jfquant/templates/factors/*.json FactorProfile1：有序特征、公式和训练口径
+  .jfquant/templates/targets/*.json TargetProfile1：池版本、基准和退出策略
   .jfquant/staging/UUID/          行情owner.json及未完成压缩包
   .jfquant/staging/actions-UUID/  公司行动owner.json、原始响应、按证券哈希检查点
   .jfquant/runs/UUID/run.json     RunRecord：状态、参数/版本快照、签名、阶段、错误、相对输出目录
@@ -37,7 +39,7 @@ WORKSPACE/
   .jfquant/runs/UUID/artifacts.json 流水线/重训指标、重要性、预览与相对产物路径
 ```
 
-运行和数据版本记录JSON使用schema_version=1，研究模板使用schema_version=6，股票池定义使用schema_version=3；JSON模板拒绝未知字段及不支持的公式版本。运行状态为running/succeeded/failed/blocked/cancelled/interrupted/imported。元数据用新临时文件、sync及rename发布；记录ID与目录相互校验，不能通过记录中的路径覆盖工作区外文件。数据引用在执行前复核签名；行情details.content_sha256按排序后的相对文件名、长度和实际字节计算，执行时在后台重新哈希，增删、改名或修改行情均拒绝。旧目录记录没有内容哈希时需重新登记，不自动沿用旧身份。公司行动原始证据哈希也在后台复核；更改已登记输入需登记为新版本。提交时只读取版本元数据，较长的字节校验保留取消检查且不阻塞控制请求。目录整体迁移后，相对版本和运行路径仍可读取；导入的当前研究保留原路径引用，其来源目录需继续可访问。
+运行和数据版本记录JSON使用schema_version=1，研究模板使用schema_version=8，股票池定义使用schema_version=3；JSON模板拒绝未知字段及不支持的公式版本。运行状态为running/succeeded/failed/blocked/cancelled/interrupted/imported。元数据用新临时文件、sync及rename发布；记录ID与目录相互校验，不能通过记录中的路径覆盖工作区外文件。数据引用在执行前复核签名；行情details.content_sha256按排序后的相对文件名、长度和实际字节计算，执行时在后台重新哈希，增删、改名或修改行情均拒绝。旧目录记录没有内容哈希时需重新登记，不自动沿用旧身份。公司行动原始证据哈希也在后台复核；更改已登记输入需登记为新版本。提交时只读取版本元数据，较长的字节校验保留取消检查且不阻塞控制请求。目录整体迁移后，相对版本和运行路径仍可读取；导入的当前研究保留原路径引用，其来源目录需继续可访问。
 
 ```mermaid
 flowchart TD
@@ -101,28 +103,28 @@ CLI与App均调用TaskRequest。研究JSON示例外层为{"operation":"workflow"
 
 App与jfquant仅使用标准TaskRequest/WorkflowRequest；不保留旧命令、路径参数适配、输出目录别名或旧请求JSON回退。研究适配器属于正常workflow，按冻结模板和登记版本构造ResearchRequest；所有执行仍在同一worker。
 
-研究summary.json使用schema_version=11，仅raw_integer_shares模式。报告生成、Workspace::results和import_run共用ml::backtest::validate_result：校验版本、执行模式、来源/公式/签名、费用及研究参数、年度报告和汇总必需字段。旧格式或不完整结果返回unsupported_result_format；RPC错误包含可用的task_id。任务状态和日志仍可查看，单条结果不可读取不会阻止其他记录加载。旧文件不删除、不迁移、不转换，也不能作为新任务执行。
+研究summary.json使用schema_version=12，仅raw_integer_shares模式。报告生成、Workspace::results和import_run共用ml::backtest::validate_result：校验版本、执行模式、来源/公式/签名、费用及研究参数、年度报告和汇总必需字段。旧格式或不完整结果返回unsupported_result_format；RPC错误包含可用的task_id。任务状态和日志仍可查看，单条结果不可读取不会阻止其他记录加载。旧文件不删除、不迁移、不转换，也不能作为新任务执行。
 
-工作区、数据版本和任务元数据继续使用schema1，模板使用schema6；研究结果schema11与因子公式v4是不同版本。下载恢复只使用标准请求中的resume UUID和受验证的owner/收据检查点；研究以新UUID重新计算。服务程序定位在service组件，显式JFQUANT_CLI_BIN无效时直接报cli_missing；不会调用Cargo寻找程序。协议不匹配返回protocol_mismatch，不启动替代服务或自动降级；更新前先让任务结束并用原版本jfquant service stop停止空闲服务，再启动新版本。
+工作区、数据版本和任务元数据继续使用schema1，模板使用schema8；研究结果schema12与因子公式v4是不同版本。下载恢复只使用标准请求中的resume UUID和受验证的owner/收据检查点；研究以新UUID重新计算。服务程序定位在service组件，显式JFQUANT_CLI_BIN无效时直接报cli_missing；不会调用Cargo寻找程序。协议不匹配返回protocol_mismatch，不启动替代服务或自动降级；更新前先让任务结束并用原版本jfquant service stop停止空闲服务，再启动新版本。
 
 验收覆盖正式命令与公共API的结果/冻结参数/特征顺序/跨年账本/费用一致、标准下载恢复、忙碌拒绝、证据修复去重、旧请求拒绝、当前结果只读导入以及旧结果拒绝且文件不变。前台Ctrl+C不影响已提交后台任务的真实信号测试继续保留。另一台Apple Silicon/macOS 14实机验收仍待完成。
 
 ## 动态股票池与 Python 采集接口
 
-当前模板schema 6、研究结果schema11、服务协议9；公式仍为v4。模板增加 `pool_version`、`benchmark` 和 `pool_exit_policy`；默认 `builtin:csi500` / `SH000905`，沪深300模板使用 `builtin:csi300` / `SH000300`。自选和集合组合引用不可变pool版本，冻结成员区间、人工日期调整及输入哈希；模型manifest和缓存签名包含这些研究输入。原schema结果明确拒绝，历史状态和日志仍可查看，不转换旧文件。
+当前模板schema 8、研究结果schema12、服务协议10；公式仍为v4。解析后配置包含 `pool_version`、`benchmark` 和 `pool_exit_policy`（磁盘保存于TargetProfile）；默认 `builtin:csi500` / `SH000905`，沪深300模板使用 `builtin:csi300` / `SH000300`。自选和集合组合引用不可变pool版本，冻结成员区间、人工日期调整及输入哈希；模型manifest和缓存签名包含这些研究输入。原schema结果明确拒绝，历史状态和日志仍可查看，不转换旧文件。
 
 ```mermaid
 flowchart LR
-  CLIENT["App / jfquant"] --> SERVICE["协议9公共服务"]
+  CLIENT["App / jfquant"] --> SERVICE["协议10公共服务"]
   SERVICE --> POOL["保存/预览不可变股票池"]
   SERVICE --> COLLECT["Rust监督内置Python双源采集"]
   COLLECT --> SNAPSHOT["验证后的Parquet版本与公司行动候选"]
-  POOL --> FREEZE["模板6：池、基准、退出策略、签名"]
+  POOL --> FREEZE["模板8：池、基准、退出策略、签名"]
   SNAPSHOT --> READY["原价、历史覆盖、公司行动准入"]
   QLIB["现有Qlib读取器"] --> READY
   FREEZE --> READY
   READY --> RESEARCH["统一日行情、年度模型、持续整数股账户"]
-  RESEARCH --> RESULT["结果11：成员变化、退出/阻碍、账本、费用"]
+  RESEARCH --> RESULT["结果12：成员变化、退出/阻碍、账本、费用"]
 ```
 
 `pools create/validate/import/export/list/versions/preview` 使用公共定义及解析器；`data collect --provider akshare|yfinance --kind market|actions` 提交后台任务，使用 jobs wait 显式等待。`run --request` 可提交完整公共请求。App提供来源、采集日期/证券、股票池JSON编辑、日期预览、退出策略及失败采集恢复按钮。包内Python和依赖只用于采集，不需要外部Python；日常操作不调用Cargo。
@@ -143,7 +145,7 @@ jfquant research demo-parquet
 
 ## 独立系数的公共流程
 
-采集请求必需adjustment_source：AKShare=sina_hfq、yfinance=none；App/CLI有一致合法默认值，完整JSON请求需明确提供。规范行情5、采集协议6、服务9、报告11；模板6、股票池3、工作区/版本/记录1保持。旧规范行情、检查点及结果不转换，保留文件与日志。合成Parquet演示生成独立系数与锚点，Qlib演示保持当前读取，通过同一后台比较账本、费用和特征顺序。
+采集请求必需adjustment_source：AKShare=sina_hfq、yfinance=none；App/CLI有一致合法默认值，完整JSON请求需明确提供。规范行情5、采集协议7、服务10、报告11；模板8、股票池3、工作区/版本/记录1保持。旧规范行情、检查点及结果不转换，保留文件与日志。合成Parquet演示生成独立系数与锚点，Qlib演示保持当前读取，通过同一后台比较账本、费用和特征顺序。
 
 ## 日期调度、需求预览与实施公告修订
 
@@ -153,7 +155,7 @@ InspectActions按证券返回原事件、original_sha256、来源错误与公告
 
 ```mermaid
 flowchart TD
-  T[模板6 任意日期] --> D[公共日历解析/样本预览]
+  T[模板8 任意日期] --> D[公共日历解析/样本预览]
   D --> Q[需要的证券、预热及权益区间]
   Q --> C[现有采集/实施公告候选]
   C --> I[App或CLI查看原值与证据]
@@ -165,7 +167,7 @@ flowchart TD
   G -->|缺项| E[数据未就绪及明确未执行检查]
 ```
 
-CLI使用research preview/prepare-data/check/run，复杂日程通过--schedule FILE或run --request提交。任务默认返回ID，jobs wait等待；同一工作区仍只有一个计算任务，不增加任务队列。workspace/data/run元数据仍为1，股票池3，公式v4；服务9、规范行情5、采集6、公司行动4、结果11。旧文件与历史日志保留，不迁移。
+CLI使用research preview/prepare-data/check/run，复杂日程通过--schedule FILE或run --request提交。任务默认返回ID，jobs wait等待；同一工作区仍只有一个计算任务，不增加任务队列。workspace/data/run元数据仍为1，股票池3，公式v4；服务10、规范行情5、采集7、公司行动4、结果12。旧文件与历史日志保留，不迁移。
 
 ## 为什么需要本组件
 
@@ -182,7 +184,7 @@ CLI使用research preview/prepare-data/check/run，复杂日程通过--schedule 
 
 ResearchTemplate当前schema6，增加quality_policy：{"strictness":"strict","min_valid_feature_ratio":0.0,"min_labeled_rows":1}。PreviewResearch、Research及补采需求使用同一模板；App/CLI覆盖参数后冻结实际值。preview返回quality和样本候选数量；真实因子有效数量须在私有暂存计算后才能确定，预览不冒充完整准入。
 
-执行结果schema11、服务协议9、准入格式4；股票池3、动作4、行情5、系数3、采集6及任务记录1保持不变。旧模板/结果/协议明确拒绝，旧文件不自动转换。临时分片、日志和运行记录继续位于工作区，不提交Git。筛选不是数据更新的自动修复；执行错误时仍提供未通过及未执行明细。
+执行结果schema12、服务协议10、准入格式5；股票池3、动作4、行情5、系数3、采集7及任务记录1保持不变。旧模板/结果/协议明确拒绝，旧文件不自动转换。临时分片、日志和运行记录继续位于工作区，不提交Git。筛选不是数据更新的自动修复；执行错误时仍提供未通过及未执行明细。
 
 ```mermaid
 flowchart LR
@@ -199,7 +201,7 @@ flowchart LR
 
 为什么调整：普通市场代码无需先登记身份；独立目录、审核和权威名录下载增加了研究前置负担。特殊历史代码仍需在快照内明确区间，不能将旧证券行情或权益接到另一证券。训练使用价量和标签，到账／交付资料只在实际账户执行时检查。
 
-当前格式：模板6、需求3、准入4、股票池3、公司行动4、规范行情5、系数3、采集6、服务9、研究结果11；快照内来源映射1、训练产物1。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
+当前格式：模板8、需求3、准入5、股票池3、公司行动4、规范行情5、系数3、采集7、服务10、研究结果12；快照内来源映射1、训练产物2。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
 
 App与jfquant共用后台。research train产出training.json及逐折model.txt/manifest.json；research backtest引用训练任务，不重新训练；research run先训练再回测。补齐支付日不改变训练价量依据，系数或除权参考改变须重训。check只证明训练就绪，账户提示保持not_run；回测失败仍可读取模型及部分账户记录。
 
@@ -226,3 +228,22 @@ flowchart LR
 2026-10-14使用本项目Qlib快照重新登记为market-190561c63c90f90a，没有修改原二进制或复用其他项目缓存。2010起训、年度5+1共11折：首折训练2010-01-04—2014-12-31、验证2015-01-05—2015-12-31、测试2016-01-04—2016-12-30；756交易日预热从2006-11-28开始，末折测试至2026-10-12。
 
 只新采集SH600018公司行动，当前动作版本不代表全池覆盖。严格/允许缺失模式保留895个历史来源证券，发现887个证券的系数/事件问题；仅合格股票模式保留894个，仍有886个证券的问题。SHT00018缺旧行情，没有映射到新上港集团。三档均在训练缓存和训练器调用前停止；回测因没有完成的训练产物而拒绝，没有真实收益报告。检查约72/52/63秒（含数据字节核验），仅用于本机参考，不是性能承诺。完整原因、计时及命令输出位于忽略的.jfquant/experiments/csi300-split-stages-20261014。
+
+## 分离配置与明确来源口径
+
+为什么拆分：因子组合和股票池是独立研究变量，把它们嵌在每个流程文件会制造“组合数×标的数”重复配置，修改因子顺序容易漏改。当前磁盘工作流格式8只存流程参数和相对profile引用；FactorProfile1保存组合/顺序/公式/训练口径，TargetProfile1保存池版本/基准/退出策略。`profiles::{WorkflowDocument,FactorProfile,TargetProfile}`共用校验，App、CLI共同调用。运行中的ResearchTemplate是解析后的冻结对象，**不是磁盘工作流文件格式**；不接受旧平铺JSON回退。
+
+`ResearchTemplate::write`先以内容签名命名写入factors/targets，再原子发布工作流引用。相同配置复用同一文件；导出时须携带这两个子目录，整体移动后可读取。单独加载标的不会修改因子顺序。显式参数覆盖后冻结完整值；修改profile不回写历史任务。
+
+价格口径、缺失策略与因子组合各自选择。CollectQuotes、CollectCoefficients、ComposeMarket复用工作区单worker及标准任务生命周期。系数来源失败不拖垮其他采集任务，候选下载不等于研究准入。格式：工作流/解析模板8、profile各1、准入5、训练产物2、结果12、服务10、采集7；系数bundle/组合视图1，其余未变格式保持。
+
+```mermaid
+flowchart TD
+  W[工作流8 日期/模型/账户参数] --> R[解析引用]
+  F[因子配置1 顺序/公式/价格口径] --> R
+  U[标的配置1 池/基准/退出] --> R
+  R --> T[共同校验和完整冻结请求]
+  D[行情/独立系数/事件版本] --> T
+  T --> S[公共服务及持久任务]
+  S --> O[独立模型与执行结果]
+```

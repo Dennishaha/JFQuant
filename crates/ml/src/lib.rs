@@ -758,7 +758,8 @@ mod native {
                 features,
                 objective: format!("{:?}", request.objective),
                 training_schema_hash: schema_hash,
-                formula_version: Some(analytics_factor::FORMULA_VERSION.into()),
+                // Low-level matrices do not prove a formula family; orchestration supplies provenance.
+                formula_version: None,
                 universe_id: Some(request.universe_id.clone()),
                 date_range: Some(request.date_range.clone()),
                 input_snapshot_hash: None,

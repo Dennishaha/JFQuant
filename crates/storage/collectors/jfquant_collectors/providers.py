@@ -200,7 +200,17 @@ def market(request, report):
             }
         else:
             raise ValueError("unsupported provider")
-        if request["provider"] == "akshare":
+        if request.get("operation") == "quotes":
+            adjustment = {
+                "schema_version": 3,
+                "instrument_id": symbol,
+                "source_symbol": symbol,
+                "basis": {
+                    "kind": "unavailable",
+                    "reason": "quotes-only acquisition; compose with independently acquired coefficients before verified research",
+                },
+            }
+        elif request["provider"] == "akshare":
             if symbol in indices:
                 adjustment = {
                     "schema_version": 3,
@@ -348,3 +358,27 @@ def corporate_actions(request, report):
             "python": __import__("platform").python_version(),
         },
     )
+
+
+def coefficients(request, report):
+    """Fetch independent dated factors without any quote or dividend dependency."""
+    if request["provider"] != "akshare" or request["adjustment_source"] != "sina_hfq":
+        raise ValueError("independent coefficient acquisition requires sina_hfq")
+    for symbol in request["instruments"]:
+        identity(symbol)
+        if symbol in request["benchmarks"]:
+            adjustment = {
+                "schema_version": 3,
+                "instrument_id": symbol,
+                "source_symbol": symbol,
+                "basis": {"kind": "price_index", "source": "akshare.index_zh_a_hist"},
+            }
+        else:
+            adjustment = fetch_adjustment(symbol, request["end"], report, request_call)
+        report(
+            "adjustment_shard",
+            instrument=symbol,
+            adjustment=adjustment,
+            evidence={"kind": "independent_coefficient_response", "source": "sina_hfq"},
+        )
+    report("complete")

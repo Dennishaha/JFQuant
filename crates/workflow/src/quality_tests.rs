@@ -12,7 +12,7 @@ fn execute_quality(
     let request = WorkflowRequest::Research {
         template: Box::new(t.clone()),
         market: m.id.clone(),
-        actions: a.id.clone(),
+        actions: Some(a.id.clone()),
         audit_only: audit,
     };
     let context = TaskContext::default();
@@ -48,7 +48,7 @@ fn three_policies_distinguish_missing_input_null_propagation_and_security_exclus
     t.quality_policy.strictness = ResearchStrictness::AllowMissing;
     let (_, result) = execute_quality(&w, &m, &a, &t, false);
     let relaxed = result.unwrap().details;
-    assert_eq!(relaxed["admission"]["schema_version"], 4);
+    assert_eq!(relaxed["admission"]["schema_version"], 5);
     assert!(
         relaxed["admission"]["checks"]
             .as_array()
@@ -337,7 +337,7 @@ fn missing_later_source_alias_does_not_erase_earlier_qualified_history() {
     assert_eq!(&before[..33], &after[..33]);
     assert_eq!(after[33]["retained"], 1);
     let (_, result) = execute_quality(&w, &m, &a, &t, false);
-    assert_eq!(result.unwrap().details["schema_version"], 11);
+    assert_eq!(result.unwrap().details["schema_version"], 12);
     let mut dataset = analytics_storage::daily::DailyDataset::open(&root).unwrap();
     dataset.bind_source_map(directory).unwrap();
     dataset
@@ -347,4 +347,182 @@ fn missing_later_source_alias_does_not_erase_earlier_qualified_history() {
         })
         .unwrap();
     assert!(dataset.field(&id, "amount").is_ok());
+}
+
+#[test]
+fn provider_training_without_events_keeps_warning_and_model_and_verified_input_stops() {
+    use analytics_core::research_quality::PriceBasis;
+    let temp = tempfile::tempdir().unwrap();
+    let w = Workspace::open(temp.path()).unwrap();
+    let (m, _, mut t) = demo::create(&w).unwrap();
+    let request = WorkflowRequest::TrainResearch {
+        template: Box::new(t.clone()),
+        market: m.id.clone(),
+        actions: None,
+    };
+    let id = Uuid::new_v4();
+    let run = w
+        .begin(id, "verified", snapshot(&w, &request).unwrap())
+        .unwrap();
+    assert!(execute(&w, &request, &run, &TaskContext::default()).is_err());
+    assert!(!w.resolve(&run.output).join("training.json").exists());
+    t.price_basis = PriceBasis::Provider;
+    let request = WorkflowRequest::TrainResearch {
+        template: Box::new(t),
+        market: m.id.clone(),
+        actions: None,
+    };
+    let run = w
+        .begin(Uuid::new_v4(), "provider", snapshot(&w, &request).unwrap())
+        .unwrap();
+    execute(&w, &request, &run, &TaskContext::default()).unwrap();
+    let artifact: Value =
+        serde_json::from_slice(&fs::read(w.resolve(&run.output).join("training.json")).unwrap())
+            .unwrap();
+    analytics_ml::backtest::validate_training_artifact(&artifact).unwrap();
+    assert_eq!(artifact["schema_version"], 2);
+    assert_eq!(artifact["price_basis"], "provider");
+    assert!(
+        artifact["source_warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["category"] == "historical_events" && c["status"] == "not_run")
+    );
+    assert!(
+        artifact["source_warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["code"] == "account_path_not_run")
+    );
+    let admission: Value =
+        serde_json::from_slice(&fs::read(w.resolve(&run.output).join("admission.json")).unwrap())
+            .unwrap();
+    assert!(
+        admission["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["category"] == "historical_events"
+                && c["status"] == "not_run"
+                && c["disposition"] == "warn")
+    );
+    let report: analytics_core::admission::AdmissionReport =
+        serde_json::from_value(admission).unwrap();
+    assert!(report.ready());
+    assert!(!w.resolve(&run.output).join("summary.json").exists());
+}
+
+#[test]
+fn alpha158_template_family_order_and_native_training_are_independent_from_gtja() {
+    use analytics_core::research_quality::{FactorSet, PriceBasis};
+    let temp = tempfile::tempdir().unwrap();
+    let w = Workspace::open(temp.path()).unwrap();
+    let (m, _, mut t) = demo::create(&w).unwrap();
+    let gtja = ResearchTemplate::builtin().unwrap();
+    t.select_factor_set(FactorSet::Alpha158);
+    assert_eq!(t.config.factor_ids.len(), 158);
+    assert_eq!(gtja.config.factor_ids.len(), 178);
+    t.price_basis = PriceBasis::Provider;
+    t.config.factor_ids = vec!["alpha158_001_KMID".into(), "alpha158_014_ROC5".into()];
+    t.validate().unwrap();
+    let request = WorkflowRequest::TrainResearch {
+        template: Box::new(t.clone()),
+        market: m.id,
+        actions: None,
+    };
+    let run = w
+        .begin(Uuid::new_v4(), "alpha158", snapshot(&w, &request).unwrap())
+        .unwrap();
+    execute(&w, &request, &run, &TaskContext::default()).unwrap();
+    let artifact: Value =
+        serde_json::from_slice(&fs::read(w.resolve(&run.output).join("training.json")).unwrap())
+            .unwrap();
+    analytics_ml::backtest::validate_training_artifact(&artifact).unwrap();
+    assert_eq!(artifact["feature_order"], json!(t.config.factor_ids));
+    assert_eq!(artifact["factor_set"], "alpha158");
+    assert_eq!(
+        artifact["formula_version"],
+        analytics_factor::alpha158::FORMULA_VERSION
+    );
+    t.config.factor_ids.push("alpha_001".into());
+    assert!(t.validate().is_err());
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("templates/factors/alpha158.json");
+    assert_eq!(
+        profiles::FactorProfile::read(&path)
+            .unwrap()
+            .factor_ids
+            .len(),
+        158
+    );
+}
+
+#[test]
+fn split_profiles_are_reusable_portable_and_reject_flat_or_conflicting_templates() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("one");
+    let mut t = ResearchTemplate::builtin_csi300().unwrap();
+    t.write(&root.join("workflow.json")).unwrap();
+    let d: Value = serde_json::from_slice(&fs::read(root.join("workflow.json")).unwrap()).unwrap();
+    assert_eq!(d["schema_version"], 8);
+    for k in [
+        "config",
+        "factor_ids",
+        "factor_set",
+        "pool_version",
+        "benchmark",
+    ] {
+        assert!(d.get(k).is_none());
+    }
+    let fpath = root.join(d["factors"].as_str().unwrap());
+    let upath = root.join(d["target"].as_str().unwrap());
+    let before = fs::read(&fpath).unwrap();
+    let mut target = profiles::TargetProfile::read(&upath).unwrap();
+    target.pool_version = "builtin:csi500".into();
+    target.benchmark = "SH000905".into();
+    target.apply(&mut t).unwrap();
+    t.write(&root.join("other.json")).unwrap();
+    let other: Value = serde_json::from_slice(&fs::read(root.join("other.json")).unwrap()).unwrap();
+    assert_eq!(other["factors"], d["factors"]);
+    assert_ne!(other["target"], d["target"]);
+    assert_eq!(before, fs::read(&fpath).unwrap());
+    fs::rename(&root, tmp.path().join("moved")).unwrap();
+    assert_eq!(
+        signature(&t).unwrap(),
+        signature(&ResearchTemplate::read(&tmp.path().join("moved/other.json")).unwrap()).unwrap()
+    );
+    fs::write(
+        tmp.path().join("flat.json"),
+        serde_json::to_vec(&t).unwrap(),
+    )
+    .unwrap();
+    assert!(ResearchTemplate::read(&tmp.path().join("flat.json")).is_err());
+    let mut factor = profiles::FactorProfile::from_template(&t);
+    factor.formula_version = "unreviewed".into();
+    let unchanged = signature(&t).unwrap();
+    assert!(factor.apply(&mut t).is_err());
+    assert_eq!(unchanged, signature(&t).unwrap());
+}
+
+#[test]
+fn alpha158_verified_qlib_and_parquet_keep_features_fees_and_accounts_equal() {
+    let temp = tempfile::tempdir().unwrap();
+    let w = Workspace::open(temp.path()).unwrap();
+    let (qm, qa, mut qt) = demo::create(&w).unwrap();
+    let (pm, pa, mut pt) = demo::create_canonical(&w).unwrap();
+    for t in [&mut qt, &mut pt] {
+        t.select_factor_set(analytics_core::research_quality::FactorSet::Alpha158);
+        t.config.factor_ids = vec!["alpha158_001_KMID".into(), "alpha158_014_ROC5".into()];
+    }
+    let (_, q) = execute_quality(&w, &qm, &qa, &qt, false);
+    let (_, p) = execute_quality(&w, &pm, &pa, &pt, false);
+    let q = q.unwrap().details;
+    let p = p.unwrap().details;
+    assert_eq!(q["aggregate"], p["aggregate"]);
+    assert_eq!(q["sample_selection"], p["sample_selection"]);
+    assert_eq!(
+        q["execution"]["resolved_folds"],
+        p["execution"]["resolved_folds"]
+    );
 }

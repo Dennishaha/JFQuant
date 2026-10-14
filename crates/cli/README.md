@@ -115,25 +115,25 @@ packaging/verify-cli.sh清空开发环境执行帮助、原生自检、标准完
 
 服务自动启动时使用独立进程组；首次前台等待被Ctrl+C中断不会把SIGINT送到后台。该行为已用真实前台进程组发送信号并验证已提交任务继续成功的测试覆盖。
 
-研究结果只接受schema11及raw_integer_shares；不提供旧口径执行、重新计费或旧报告格式转换。jobs import先验证当前格式，失败不创建记录；旧文件保留。run --request只接受带operation的TaskRequest，例如{"operation":"workflow","request":{"operation":"create_demo"}}。不接受裸WorkflowRequest或未知参数。unsupported_result_format退出码为1，stdout为错误JSON，诊断写stderr。
+研究结果只接受schema12及raw_integer_shares；不提供旧口径执行、重新计费或旧报告格式转换。jobs import先验证当前格式，失败不创建记录；旧文件保留。run --request只接受带operation的TaskRequest，例如{"operation":"workflow","request":{"operation":"create_demo"}}。不接受裸WorkflowRequest或未知参数。unsupported_result_format退出码为1，stdout为错误JSON，诊断写stderr。
 
 
 ## 动态股票池与 Python 采集接口
 
-当前模板schema 6、研究结果schema11、服务协议9；公式仍为v4。模板增加 `pool_version`、`benchmark` 和 `pool_exit_policy`；默认 `builtin:csi500` / `SH000905`，沪深300模板使用 `builtin:csi300` / `SH000300`。自选和集合组合引用不可变pool版本，冻结成员区间、人工日期调整及输入哈希；模型manifest和缓存签名包含这些研究输入。原schema结果明确拒绝，历史状态和日志仍可查看，不转换旧文件。
+当前模板schema 8、研究结果schema12、服务协议10；公式仍为v4。解析后配置包含 `pool_version`、`benchmark` 和 `pool_exit_policy`（磁盘保存于TargetProfile）；默认 `builtin:csi500` / `SH000905`，沪深300模板使用 `builtin:csi300` / `SH000300`。自选和集合组合引用不可变pool版本，冻结成员区间、人工日期调整及输入哈希；模型manifest和缓存签名包含这些研究输入。原schema结果明确拒绝，历史状态和日志仍可查看，不转换旧文件。
 
 ```mermaid
 flowchart LR
-  CLIENT["App / jfquant"] --> SERVICE["协议9公共服务"]
+  CLIENT["App / jfquant"] --> SERVICE["协议10公共服务"]
   SERVICE --> POOL["保存/预览不可变股票池"]
   SERVICE --> COLLECT["Rust监督内置Python双源采集"]
   COLLECT --> SNAPSHOT["验证后的Parquet版本与公司行动候选"]
-  POOL --> FREEZE["模板6：池、基准、退出策略、签名"]
+  POOL --> FREEZE["模板8：池、基准、退出策略、签名"]
   SNAPSHOT --> READY["原价、历史覆盖、公司行动准入"]
   QLIB["现有Qlib读取器"] --> READY
   FREEZE --> READY
   READY --> RESEARCH["统一日行情、年度模型、持续整数股账户"]
-  RESEARCH --> RESULT["结果11：成员变化、退出/阻碍、账本、费用"]
+  RESEARCH --> RESULT["结果12：成员变化、退出/阻碍、账本、费用"]
 ```
 
 `pools create/validate/import/export/list/versions/preview` 使用公共定义及解析器；`data collect --provider akshare|yfinance --kind market|actions` 提交后台任务，使用 jobs wait 显式等待。`run --request` 可提交完整公共请求。App提供来源、采集日期/证券、股票池JSON编辑、日期预览、退出策略及失败采集恢复按钮。包内Python和依赖只用于采集，不需要外部Python；日常操作不调用Cargo。
@@ -154,7 +154,7 @@ jfquant research demo-parquet
 
 ## 显式系数采集
 
-jfquant data collect --provider akshare --adjustment-source sina-hfq --start 2004-01-01 --end 2026-10-13 --instruments SH600000,SH000300 --benchmarks SH000300 提交原价、供应商证据和独立新浪系数。省略选项时AKShare选择sina-hfq，yfinance选择none。未知组合、股票被声明为指数或已知指数未声明角色均失败，不换源。run --request的完整CollectionRequest须含adjustment_source。当前服务9、采集6、规范4、报告10；公式v4和默认178项不变。
+jfquant data collect --provider akshare --adjustment-source sina-hfq --start 2004-01-01 --end 2026-10-13 --instruments SH600000,SH000300 --benchmarks SH000300 提交原价、供应商证据和独立新浪系数。省略选项时AKShare选择sina-hfq，yfinance选择none。未知组合、股票被声明为指数或已知指数未声明角色均失败，不换源。run --request的完整CollectionRequest须含adjustment_source。当前服务10、采集7、规范4、报告10；公式v4和默认178项不变。
 
 ## 任意日期与数据修订命令
 
@@ -216,7 +216,7 @@ flowchart LR
 
 为什么调整：普通市场代码无需先登记身份；独立目录、审核和权威名录下载增加了研究前置负担。特殊历史代码仍需在快照内明确区间，不能将旧证券行情或权益接到另一证券。训练使用价量和标签，到账／交付资料只在实际账户执行时检查。
 
-当前格式：模板6、需求3、准入4、股票池3、公司行动4、规范行情5、系数3、采集6、服务9、研究结果11；快照内来源映射1、训练产物1。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
+当前格式：模板8、需求3、准入5、股票池3、公司行动4、规范行情5、系数3、采集7、服务10、研究结果12；快照内来源映射1、训练产物2。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
 
 ```bash
 jfquant --workspace "$JFQUANT_WORKSPACE" research train --template recipe.json --market MARKET_ID --actions HISTORY_ACTIONS_ID
@@ -235,3 +235,24 @@ flowchart LR
 ```
 
 验收：nextest覆盖来源日期边界、三档掩码、训练／回测分离及模型保留；Clippy、Rustdoc、格式、组件文档和包内CLI共同检查。生成数据、模型、运行记录和安装包不提交。另一台Apple Silicon/macOS14实机验收继续待完成。
+
+## 独立保存流程、因子和标的
+
+日常无需Cargo。模板默认导出工作流8及相邻factors/targets内容签名文件，整体携带即可复制给其他工作区；stdout返回解析后的完整请求方便AI，但这个冻结对象不能冒充磁盘模板。显式profile替换先应用，`--factor-set`再重置为该组合完整顺序，`--price-basis`最后覆盖口径。
+
+```bash
+jfquant templates default --universe csi300 --output research/workflow.json
+jfquant templates factors --template research/workflow.json --output research/factors.json
+jfquant templates target --template research/workflow.json --output research/target.json
+jfquant templates compose --workflow research/workflow.json --factors research/factors.json --target research/target.json --output research/combined.json
+jfquant research train --template research/combined.json --market MARKET_ID --price-basis provider --strictness qualified_only
+jfquant research train --template research/combined.json --market MARKET_ID --factor-set alpha158 --price-basis provider
+jfquant research check --template research/combined.json --market MARKET_ID --factor-profile research/factors.json --target-profile research/target.json
+jfquant factors list --factor-set alpha158
+jfquant data collect --kind coefficients --provider akshare --start 2006-01-01 --end 2026-10-12 --instruments SH600018 --adjustment-source sina-hfq
+jfquant data collect --kind quotes --provider akshare --start 2006-01-01 --end 2026-10-12 --instruments SH600018
+jfquant data compose --market QLIB_VERSION --coefficients COEFFICIENT_VERSION
+jfquant research backtest --training TRAINING_JOB_ID --actions ACTION_VERSION
+```
+
+provider不要求train/check/preview携带actions，仍保存未对账告警；verified没有必要复权依据就失败。run与backtest要求actions，不能通过供应商训练模式跳过账户权益检查。默认仍GTJA191/verified/strict；Alpha158必须明确选择。JSON stdout、退出码、后台存活和单任务互斥规则保持。

@@ -9,9 +9,12 @@ pub mod demo;
 pub mod pools;
 /// Independently validated acquisition checkpoints.
 pub mod preparation;
+/// Independently saved workflow, factor and target configuration.
+pub mod profiles;
 /// Local service, task requests and transport client.
 #[cfg(unix)]
 pub mod service;
+
 use analytics_core::{market_rules::MarketRulesPreset, task::TaskContext};
 use analytics_ml::backtest::{ResearchConfig, ResearchRequest};
 use analytics_storage::{corporate_actions::ActionBundle, daily::DailyDataset};
@@ -19,9 +22,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
-    io::{self, Read, Write},
+    io::{self, Write},
     path::{Path, PathBuf},
 };
 use uuid::Uuid;
@@ -44,45 +47,7 @@ pub fn signature(value: &impl Serialize) -> Result<String> {
 // Hash actual extracted bytes as well as provenance. Paths and lengths frame
 // each file so renaming, adding, truncating or editing a feature changes identity.
 fn market_content_hash(root: &Path) -> Result<String> {
-    fn files(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-        TaskContext::current().check()?;
-        for entry in fs::read_dir(root)? {
-            let entry = entry?;
-            let kind = entry.file_type()?;
-            if kind.is_dir() {
-                files(&entry.path(), out)?;
-            } else if kind.is_file() {
-                out.push(entry.path());
-            } else {
-                return Err("market versions cannot contain links or special files".into());
-            }
-        }
-        Ok(())
-    }
-    let mut paths = vec![];
-    files(root, &mut paths)?;
-    paths.sort();
-    let mut hash = Sha256::new();
-    let mut block = vec![0u8; 1024 * 1024];
-    for path in paths {
-        let relative = path
-            .strip_prefix(root)?
-            .to_str()
-            .ok_or("non-UTF8 market path")?;
-        hash.update((relative.len() as u64).to_le_bytes());
-        hash.update(relative.as_bytes());
-        let mut file = fs::File::open(path)?;
-        hash.update(file.metadata()?.len().to_le_bytes());
-        loop {
-            TaskContext::current().check()?;
-            let n = file.read(&mut block)?;
-            if n == 0 {
-                break;
-            }
-            hash.update(&block[..n]);
-        }
-    }
-    Ok(format!("sha256:{:x}", hash.finalize()))
+    Ok(analytics_storage::market_view::tree_hash(root)?)
 }
 
 fn verify_action_evidence(path: &Path, book: &ActionBundle) -> Result<()> {
@@ -122,7 +87,11 @@ fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ResearchTemplate {
-    /// Template schema, currently 6; absence is unsupported.
+    /// Independently versioned feature family.
+    pub factor_set: analytics_core::research_quality::FactorSet,
+    /// Training source trust, separate from sample completeness.
+    pub price_basis: analytics_core::research_quality::PriceBasis,
+    /// Resolved template schema, currently 8; absence is unsupported.
     #[serde(default = "missing_template_version")]
     pub schema_version: u32,
     /// Immutable pool version, or builtin:csi300/builtin:csi500 bound to the selected market.
@@ -169,7 +138,9 @@ impl Default for ResearchTemplate {
             ..ResearchConfig::default()
         };
         Self {
-            schema_version: 6,
+            schema_version: 8,
+            factor_set: Default::default(),
+            price_basis: Default::default(),
             pool_version: "builtin:csi500".into(),
             benchmark: "SH000905".into(),
             pool_exit_policy: Default::default(),
@@ -187,23 +158,49 @@ impl Default for ResearchTemplate {
     }
 }
 impl ResearchTemplate {
+    /// Select a single family and reset its canonical feature order.
+    pub fn select_factor_set(&mut self, set: analytics_core::research_quality::FactorSet) {
+        self.factor_set = set;
+        self.formula_version = analytics_factor::alpha158::version(set).into();
+        self.config.factor_ids = analytics_factor::FactorRegistry::for_set(set)
+            .all()
+            .filter(|s| {
+                !matches!(
+                    s.expression,
+                    analytics_factor::FactorExpr::Unsupported { .. }
+                ) && s.id != "alpha_030"
+            })
+            .map(|s| s.id.clone())
+            .collect();
+    }
     /// Load the source-controlled built-in recipe.
     pub fn builtin() -> Result<Self> {
-        let t: Self = serde_json::from_str(include_str!("../templates/gtja191-csi500.json"))?;
-        t.validate()?;
-        Ok(t)
+        Self::builtin_target(false)
     }
     /// Load the CSI300 builtin recipe.
     pub fn builtin_csi300() -> Result<Self> {
-        let t: Self = serde_json::from_str(include_str!("../templates/gtja191-csi300.json"))?;
-        t.validate()?;
-        Ok(t)
+        Self::builtin_target(true)
+    }
+    fn builtin_target(csi300: bool) -> Result<Self> {
+        let d: profiles::WorkflowDocument = serde_json::from_str(if csi300 {
+            include_str!("../templates/csi300-annual.json")
+        } else {
+            include_str!("../templates/annual-rolling.json")
+        })?;
+        d.resolve(
+            serde_json::from_str(include_str!("../templates/factors/gtja191.json"))?,
+            serde_json::from_str(if csi300 {
+                include_str!("../templates/targets/csi300.json")
+            } else {
+                include_str!("../templates/targets/csi500.json")
+            })?,
+        )
     }
     /// Validate before saving or starting a task.
     pub fn validate(&self) -> Result<()> {
-        if self.schema_version != 6
+        if self.schema_version != 8
             || self.id.trim().is_empty()
-            || self.formula_version != analytics_factor::FORMULA_VERSION
+            || self.formula_version != analytics_factor::alpha158::version(self.factor_set)
             || self.name.trim().is_empty()
         {
             return Err("unsupported recipe identity/version".into());
@@ -229,7 +226,7 @@ impl ResearchTemplate {
         self.config.validate()?;
         self.quality_policy.validate()?;
         self.market_rules.validate()?;
-        let registry = analytics_factor::FactorRegistry::default();
+        let registry = analytics_factor::FactorRegistry::for_set(self.factor_set);
         let mut seen = BTreeSet::new();
         if self.config.factor_ids.is_empty() {
             return Err("select at least one factor".into());
@@ -247,14 +244,11 @@ impl ResearchTemplate {
     }
     /// Read an explicit user-selected JSON file; never executes code.
     pub fn read(path: &Path) -> Result<Self> {
-        let t: Self = serde_json::from_slice(&fs::read(path)?)?;
-        t.validate()?;
-        Ok(t)
+        profiles::WorkflowDocument::read(path)
     }
     /// Save a validated recipe atomically.
     pub fn write(&self, path: &Path) -> Result<()> {
-        self.validate()?;
-        atomic_json(path, self)
+        profiles::WorkflowDocument::write(self, path)
     }
 }
 /// A verified local input version. Corporate action readiness is separate from download success.
@@ -420,6 +414,14 @@ impl Workspace {
                 source,
                 dataset.calendar.first().map(ToString::to_string),
                 dataset.calendar.last().map(ToString::to_string),
+            )
+        } else if path.file_name().is_some_and(|n| n == "coefficients.json") {
+            let bundle = analytics_storage::collector::CoefficientBundle::read(path)?;
+            (
+                "coefficients",
+                serde_json::to_value(&bundle)?,
+                Some(bundle.request.start.to_string()),
+                Some(bundle.request.end.to_string()),
             )
         } else {
             let book = ActionBundle::read(path)?;
@@ -651,6 +653,21 @@ impl Workspace {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkflowRequest {
+    /// Collect independent coefficients without requiring quote acquisition.
+    CollectCoefficients {
+        /// Frozen source and securities.
+        request: analytics_storage::collector::CollectionRequest,
+        /// Matching resumable task.
+        resume: Option<Uuid>,
+    },
+    /// Explicitly compose original Qlib raw recovery with a frozen independent coefficient version.
+    ComposeMarket {
+        /// Original registered Qlib snapshot.
+        market: String,
+        /// Independent registered coefficient version.
+        coefficients: String,
+    },
+
     /// Save an immutable composed pool through the shared backend.
     SavePool {
         /// Validated composition and dated overrides.
@@ -717,6 +734,13 @@ pub enum WorkflowRequest {
         resume: Option<Uuid>,
     },
     /// Collect daily data using the packaged Python provider.
+    CollectQuotes {
+        /// Frozen quote source and range; independent of coefficients.
+        request: analytics_storage::collector::CollectionRequest,
+        /// Resume only complete hash-verified securities.
+        resume: Option<Uuid>,
+    },
+    /// Collect quotations together with their selected adjustment source.
     CollectMarket {
         /// Explicit provider and range.
         request: analytics_storage::collector::CollectionRequest,
@@ -764,7 +788,7 @@ pub enum WorkflowRequest {
         /// Market snapshot.
         market: String,
         /// Historical adjustment/event source.
-        actions: String,
+        actions: Option<String>,
     },
     /// Execute previously trained models without calling the trainer.
     BacktestResearch {
@@ -780,7 +804,7 @@ pub enum WorkflowRequest {
         /// Market version ID.
         market: String,
         /// Action version ID.
-        actions: String,
+        actions: Option<String>,
         /// Only perform input audit.
         audit_only: bool,
     },
@@ -802,6 +826,9 @@ impl WorkflowRequest {
             Self::CheckUpdates {} => "检查行情更新".into(),
             Self::DownloadMarket { tag, .. } => format!("下载行情快照 {tag}"),
             Self::CollectActions { .. } => "Python公司行动采集".into(),
+            Self::CollectCoefficients { .. } => "独立复权系数采集".into(),
+            Self::ComposeMarket { .. } => "组合研究行情版本".into(),
+            Self::CollectQuotes { .. } => "独立行情采集".into(),
             Self::CollectMarket { .. } => "Python双源行情采集".into(),
             Self::RegisterData { .. } => "核验登记数据版本".into(),
             Self::DownloadActions { .. } => "下载公司行动历史".into(),
@@ -854,6 +881,10 @@ fn version_metadata(workspace: &Workspace, id: &str, kind: &str) -> Result<DataV
             .cloned()
             .ok_or("market source map missing; register it again")?;
         source
+    } else if kind == "coefficients" {
+        serde_json::to_value(analytics_storage::collector::CoefficientBundle::read(
+            &path,
+        )?)?
     } else {
         serde_json::to_value(ActionBundle::read(&path)?)?
     };
@@ -886,6 +917,11 @@ fn version(workspace: &Workspace, id: &str, kind: &str) -> Result<DataVersion> {
         if data.details["content_sha256"] != market_content_hash(&path)? {
             return Err("registered market bytes changed; register it as a new version".into());
         }
+        if path.join("market_view.json").is_file() {
+            DailyDataset::open(&path)?;
+        }
+    } else if kind == "coefficients" {
+        analytics_storage::collector::CoefficientBundle::read(&path)?;
     } else {
         verify_action_evidence(&path, &ActionBundle::read(&path)?)?;
     }
@@ -1002,13 +1038,19 @@ fn execute_scoped(
         }
         WorkflowRequest::CreateCanonicalDemo {} => {
             let (m, a, t) = demo::create_canonical(w)?;
-            details = json!({"demo_actions":a.id,"demo_template":t});
+            let template_path = run.output.join("workflow.json");
+            t.write(&w.resolve(&template_path))?;
+            details =
+                json!({"demo_actions":a.id,"demo_template":t,"demo_template_path":template_path});
             data = Some(m);
         }
         WorkflowRequest::CreateDemo {} => {
             context.report("创建合成演示输入（不是真实行情）")?;
             let (m, a, t) = demo::create(w)?;
-            details = json!({"demo_actions":a.id,"demo_template":t});
+            let template_path = run.output.join("workflow.json");
+            t.write(&w.resolve(&template_path))?;
+            details =
+                json!({"demo_actions":a.id,"demo_template":t,"demo_template_path":template_path});
             data = Some(m);
         }
         WorkflowRequest::CheckUpdates {} => {
@@ -1036,6 +1078,84 @@ fn execute_scoped(
             analytics_storage::acquisition::fetch_release_resumable(tag, &staging, &output)?;
             data = Some(w.register(&output.join("qlib_bin"))?);
         }
+        WorkflowRequest::CollectCoefficients { request, resume } => {
+            let owner = resume.unwrap_or(run.id);
+            let staging = w
+                .root
+                .join(format!(".jfquant/staging/python-coefficients-{owner}"));
+            let manifest =
+                analytics_storage::collector::collect_coefficients(request, &staging, context)?;
+            let relative = manifest.strip_prefix(&staging)?.to_owned();
+            let output = w.root.join(format!("data/python-coefficients-{}", run.id));
+            fs::rename(&staging, &output)?;
+            data = Some(w.register(&output.join(relative))?);
+        }
+        WorkflowRequest::ComposeMarket {
+            market,
+            coefficients,
+        } => {
+            let base = version(w, market, "market")?;
+            let c = version(w, coefficients, "coefficients")?;
+            let d = DailyDataset::open(w.resolve(&base.path))?;
+            if !d.supports_provider_training() {
+                return Err("composition requires an original Qlib snapshot".into());
+            }
+            let bundle =
+                analytics_storage::collector::CoefficientBundle::read(&w.resolve(&c.path))?;
+            let staging = w
+                .root
+                .join(format!(".jfquant/staging/market-view-{}", run.id));
+            let root = staging.join("market");
+            fs::create_dir_all(root.join("adjustments"))?;
+            let mut anchors = BTreeMap::new();
+            for id in bundle.records.keys() {
+                context.check()?;
+                let close = d.raw_field(id, "close")?;
+                let first = (0..d.calendar.len())
+                    .find(|i| close.get(*i).is_some())
+                    .ok_or("raw close anchor missing")?;
+                let record = analytics_storage::adjustment::AdjustmentRecord::read(
+                    &w.resolve(&c.path)
+                        .parent()
+                        .ok_or("coefficient parent")?
+                        .join("market"),
+                    id,
+                )?;
+                anchors.insert(id.clone(), record.anchor(d.calendar[first])?);
+                fs::copy(
+                    w.resolve(&c.path)
+                        .parent()
+                        .unwrap()
+                        .join("market/adjustments")
+                        .join(format!("{id}.json")),
+                    root.join("adjustments").join(format!("{id}.json")),
+                )?;
+            }
+            let view = analytics_storage::market_view::MarketView {
+                schema_version: 1,
+                base_path: base.path.clone(),
+                base_sha256: base.details["content_sha256"]
+                    .as_str()
+                    .ok_or("base digest missing")?
+                    .into(),
+                coefficients_path: c.path.clone(),
+                coefficients_sha256: analytics_storage::market_view::file_hash(
+                    &w.resolve(&c.path),
+                )?,
+                recovery: "qlib-normalized-price-over-original-factor;cent-tick;shares-v1".into(),
+                records: bundle.records,
+                anchors,
+            };
+            atomic_json(&root.join("market_view.json"), &view)?;
+            atomic_json(
+                &staging.join("jfquant_source.json"),
+                &json!({"downloader":"JFQuant analytics-storage","snapshot_verified":true,"independent_download":true,"derived_view":true,"raw_source":"Qlib reconstructed raw quotations","base_version":base,"coefficient_version":c,"normalization":analytics_storage::adjustment::NORMALIZATION}),
+            )?;
+            DailyDataset::open(&root)?;
+            let output = w.root.join(format!("data/market-view-{}", run.id));
+            fs::rename(&staging, &output)?;
+            data = Some(w.register(&output.join("market"))?);
+        }
         WorkflowRequest::CollectActions { request, resume } => {
             let owner = resume.unwrap_or(run.id);
             let staging = w
@@ -1045,6 +1165,16 @@ fn execute_scoped(
             let output = w.root.join(format!("data/python-actions-{}", run.id));
             fs::rename(staging, &output)?;
             data = Some(w.register(&output.join("actions.json"))?);
+        }
+        WorkflowRequest::CollectQuotes { request, resume } => {
+            let owner = resume.unwrap_or(run.id);
+            let staging = w
+                .root
+                .join(format!(".jfquant/staging/python-quotes-{owner}"));
+            analytics_storage::collector::collect_quotes(request, &staging, context)?;
+            let output = w.root.join(format!("data/python-quotes-{}", run.id));
+            fs::rename(staging, &output)?;
+            data = Some(w.register(&output.join("market"))?);
         }
         WorkflowRequest::CollectMarket { request, resume } => {
             let owner = resume.unwrap_or(run.id);
@@ -1125,8 +1255,11 @@ fn execute_scoped(
             actions,
         } => {
             let m = version(w, market, "market")?;
-            let a = version(w, actions, "actions")?;
-            let mut r = research_request(w, run, template, &m, &a, false)?;
+            let a = actions
+                .as_deref()
+                .map(|a| version(w, a, "actions"))
+                .transpose()?;
+            let mut r = research_request(w, run, template, &m, a.as_ref(), false)?;
             r.train_only = true;
             context.report("批量检查训练输入")?;
             analytics_ml::backtest::run_with_context(&r, context)?;
@@ -1182,8 +1315,14 @@ fn execute_scoped(
         } => {
             template.validate()?;
             let m = version(w, market, "market")?;
-            let a = version(w, actions, "actions")?;
-            details = research(w, run, context, template, &m, &a, *audit_only)?;
+            let a = actions
+                .as_deref()
+                .map(|a| version(w, a, "actions"))
+                .transpose()?;
+            if !audit_only && a.is_none() {
+                return Err("execution_actions_required".into());
+            }
+            details = research(w, run, context, template, &m, a.as_ref(), *audit_only)?;
         }
     }
     context.check()?;
@@ -1192,8 +1331,10 @@ fn execute_scoped(
 /// Snapshot selected input versions when creating a run, rather than resolving them later.
 pub fn snapshot(workspace: &Workspace, request: &WorkflowRequest) -> Result<Value> {
     match request {
-        WorkflowRequest::CollectMarket { request, .. }
-        | WorkflowRequest::CollectActions { request, .. } => request.validate()?,
+        WorkflowRequest::CollectQuotes { request, .. }
+        | WorkflowRequest::CollectMarket { request, .. }
+        | WorkflowRequest::CollectActions { request, .. }
+        | WorkflowRequest::CollectCoefficients { request, .. } => request.validate()?,
         WorkflowRequest::TrainResearch { template, .. }
         | WorkflowRequest::Research { template, .. }
         | WorkflowRequest::PreviewResearch { template, .. }
@@ -1202,15 +1343,25 @@ pub fn snapshot(workspace: &Workspace, request: &WorkflowRequest) -> Result<Valu
         _ => {}
     };
     let versions = match request {
+        WorkflowRequest::ComposeMarket {
+            market,
+            coefficients,
+        } => vec![
+            version_metadata(workspace, market, "market")?,
+            version_metadata(workspace, coefficients, "coefficients")?,
+        ],
         WorkflowRequest::TrainResearch {
             market, actions, ..
         }
         | WorkflowRequest::Research {
             market, actions, ..
-        } => vec![
-            version_metadata(workspace, market, "market")?,
-            version_metadata(workspace, actions, "actions")?,
-        ],
+        } => {
+            let mut inputs = vec![version_metadata(workspace, market, "market")?];
+            if let Some(a) = actions {
+                inputs.push(version_metadata(workspace, a, "actions")?);
+            }
+            inputs
+        }
         WorkflowRequest::DownloadActions { market, .. }
         | WorkflowRequest::PreviewResearch { market, .. }
         | WorkflowRequest::PrepareResearchData { market, .. } => {
@@ -1224,7 +1375,16 @@ pub fn snapshot(workspace: &Workspace, request: &WorkflowRequest) -> Result<Valu
         }
         _ => Vec::new(),
     };
-    let mut frozen = json!({"request":request,"inputs":versions,"app_version":env!("CARGO_PKG_VERSION"),"formula_version":analytics_factor::FORMULA_VERSION,"pool_definition": match request { WorkflowRequest::Research{template,..}|WorkflowRequest::TrainResearch{template,..} if !template.pool_version.starts_with("builtin:") => Some(workspace.pool(&template.pool_version)?), _ => None }});
+    let formula_version = match request {
+        WorkflowRequest::Research { template, .. }
+        | WorkflowRequest::TrainResearch { template, .. }
+        | WorkflowRequest::PreviewResearch { template, .. }
+        | WorkflowRequest::PrepareResearchData { template, .. } => {
+            template.formula_version.as_str()
+        }
+        _ => analytics_factor::FORMULA_VERSION,
+    };
+    let mut frozen = json!({"request":request,"inputs":versions,"app_version":env!("CARGO_PKG_VERSION"),"formula_version":formula_version,"pool_definition": match request { WorkflowRequest::Research{template,..}|WorkflowRequest::TrainResearch{template,..} if !template.pool_version.starts_with("builtin:") => Some(workspace.pool(&template.pool_version)?), _ => None }});
     if let WorkflowRequest::BacktestResearch { training, .. } = request {
         let record = workspace
             .runs()?
@@ -1342,19 +1502,21 @@ fn research_request(
     run: &RunRecord,
     template: &ResearchTemplate,
     market: &DataVersion,
-    actions: &DataVersion,
+    actions: Option<&DataVersion>,
     audit_only: bool,
 ) -> Result<ResearchRequest> {
     template.validate()?;
     let mut r = ResearchRequest::new(w.resolve(&market.path), w.resolve(&run.output));
     r.config = template.config.clone();
+    r.price_basis = template.price_basis;
+    r.factor_set = template.factor_set;
     r.quality_policy = template.quality_policy.clone();
     r.schedule = template.schedule.clone();
     r.action_policy = template.action_policy.clone();
     r.market_rules = template.market_rules.clone();
     r.initial_cash_cny = template.initial_cash_cny;
     r.dividend_withholding_rate = template.dividend_withholding_rate;
-    r.corporate_actions = Some(w.resolve(&actions.path));
+    r.corporate_actions = actions.map(|a| w.resolve(&a.path));
     r.audit_only = audit_only;
     r.benchmark = template.benchmark.clone();
     r.pool_exit_policy = template.pool_exit_policy;
@@ -1371,7 +1533,7 @@ pub(crate) fn research(
     context: &TaskContext,
     template: &ResearchTemplate,
     market: &DataVersion,
-    actions: &DataVersion,
+    actions: Option<&DataVersion>,
     audit_only: bool,
 ) -> Result<Value> {
     let r = research_request(w, run, template, market, actions, audit_only)?;
@@ -1395,7 +1557,9 @@ pub fn research_requirements_with_actions(
     let selected_market = version(w, market, "market")?;
     let mut dataset =
         analytics_storage::daily::DailyDataset::open(w.resolve(selected_market.path))?;
-    let folds = t.schedule.resolve(&dataset.calendar)?;
+    let folds = t
+        .schedule
+        .resolve_with_warmup(&dataset.calendar, t.factor_set.warmup_sessions())?;
     let (pool, frozen) = w.resolve_pool(&t.pool_version, market)?;
     let lo = folds
         .iter()

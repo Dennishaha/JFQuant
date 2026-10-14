@@ -4,18 +4,18 @@
 
 ## 职责与公共接口
 
-注册国泰君安191个canonical ID，解析公式并在单个worker的内存面板上执行，输出保留缺失值的因子宽表。当前版本 `gtja191-paper-2017+jfquant-audit-v4`；版本变化必须重算缓存、重训模型，不能复用v3模型/预测冒充v4。
+注册国泰君安191个canonical ID及独立Alpha158组合；按组合解析公式并在单个worker的内存面板执行，输出保留缺失值的因子宽表。当前版本 `gtja191-paper-2017+jfquant-audit-v4`；版本变化必须重算缓存、重训模型，不能复用v3模型/预测冒充v4。
 
 | 接口 | 契约 |
 |---|---|
-| FactorRegistry / FactorSpec | 191项ID、原始目录公式、AST、输入列、版本；lookback由AST组合，requires_recursive_state说明递归历史 |
+| FactorRegistry::for_set / FactorSpec | GTJA191或Alpha158的ID、原始目录公式、AST、输入列、版本；lookback由AST组合，requires_recursive_state说明递归历史 |
 | unsupported_ids / audit::entries | 12项隔离原因；全部191项的原报告页码、执行状态和验证范围 |
 | InMemoryFactorExecutor::compute / compute_streaming | 验证panel、保持请求特征顺序，核对请求公式版本、重复ID，检查取消并以错误停止，不产出部分成功；发送进度；streaming共享分组索引并逐因子回调 |
 | Panel::validate | instrument/date/各数值列等长，instrument内按日期计算，重复instrument/date拒绝 |
 | next_return_labels | 每证券下一条close收益，尾行null |
 | FactorRunArtifact::write_parquet_with_labels | nullable因子、labels、feature order与manifest |
 
-## 审计结论与执行约定
+## GTJA191审计结论与执行约定
 
 完整逐项记录见 [FACTOR_AUDIT.md](FACTOR_AUDIT.md)。191项注册不代表191项严格等价或可用：12项因公式/初值歧义隔离，179项可执行；真实研究还缺Alpha030的MKT/SMB/HML，当前选择178项。原始报告、DolphinDB注释目录和DolphinDB函数体之间本身有差异，不能互当数值真值。
 
@@ -67,7 +67,7 @@ python crates/factor/testdata/reference_ops.py .jfquant/audit-catalog.json .jfqu
 
 为什么调整：普通市场代码无需先登记身份；独立目录、审核和权威名录下载增加了研究前置负担。特殊历史代码仍需在快照内明确区间，不能将旧证券行情或权益接到另一证券。训练使用价量和标签，到账／交付资料只在实际账户执行时检查。
 
-当前格式：模板6、需求3、准入4、股票池3、公司行动4、规范行情5、系数3、采集6、服务9、研究结果11；快照内来源映射1、训练产物1。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
+当前格式：模板8、需求3、准入5、股票池3、公司行动4、规范行情5、系数3、采集7、服务10、研究结果12；快照内来源映射1、训练产物2。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
 
 ```mermaid
 flowchart LR
@@ -79,3 +79,21 @@ flowchart LR
 ```
 
 验收：nextest覆盖来源日期边界、三档掩码、训练／回测分离及模型保留；Clippy、Rustdoc、格式、组件文档和包内CLI共同检查。生成数据、模型、运行记录和安装包不提交。另一台Apple Silicon/macOS14实机验收继续待完成。
+
+## Alpha158为什么使用独立实现
+
+GTJA191的完整窗口、排名及空值语义不能直接替代Qlib Alpha158。`FactorRegistry::for_set`选择一个组合，`alpha158.rs`实现其独立AST及算子，不修改GTJA191 v4及默认178项。Alpha158锁定Qlib提交b87a2c294d364a33fb739359886acffe8ec907d1，158项按原loader顺序编号，公式版本`qlib-alpha158-b87a2c2+jfquant-units-v1`。JFQuant输入明确使用股/元；同一公式中的1e-12常数不因换供应商而改写。
+
+定义依据：[固定loader](https://github.com/microsoft/qlib/blob/b87a2c294d364a33fb739359886acffe8ec907d1/qlib/contrib/data/loader.py)、同提交data/ops.py及data/_libs/rolling.pyx。滚动min_periods=1、样本标准差、线性分位数、平均并列排名、极值首位置、OLS及近零方差保护单独实现。零量、缺失、短窗口、常量与并列在全158列golden中覆盖。golden是独立Pandas/NumPy参考实现，不能称为直接运行Qlib所得；运行时不引入Qlib。
+
+```mermaid
+flowchart LR
+  P[固定Qlib定义与顺序] --> A[Alpha158专用AST和算子]
+  G[GTJA191 v4] --> R[按组合选择Registry]
+  A --> R
+  R --> F[nullable输出与独立公式版本]
+  O[独立参考golden] --> V[158列逐值核验]
+  F --> V
+```
+
+Alpha158派生定义保留[固定Qlib MIT许可](QLIB_LICENSE.txt)，打包时随App的Resources/Licenses分发；公式源提交及哈希见testdata/alpha158_formulas.json。

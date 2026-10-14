@@ -6,7 +6,7 @@
 
 ## 请求与生命周期
 
-采集协议6是JSON Lines：`ready / progress / shard / action_shard / complete / error`。`adjustment_source`是必需字段；AKShare使用`sina_hfq`，yfinance使用`none`。GUI/CLI有合法默认值，`run --request`必须提供完整当前请求，旧请求不转换。
+采集协议7是JSON Lines：`ready / progress / shard / action_shard / complete / error`。`adjustment_source`是必需字段；AKShare使用`sina_hfq`，yfinance使用`none`。GUI/CLI有合法默认值，`run --request`必须提供完整当前请求，旧请求不转换。
 
 父服务保持控制管道；客户端退出不取消任务，服务断开、取消或超时回收进程。stdout只承载协议，诊断写stderr并落盘。Rust先核对代码、SDK、解释器身份再接受分片，完成时复核；每个证券分片包含原价/供应商报价及独立`adjustment`记录。owner冻结协议、转换版本、源码、依赖锁和解释器锁；恢复前重验证券、系数、结构化证据及每份HTTP响应体，不兼容旧检查点。
 
@@ -18,7 +18,7 @@ sequenceDiagram
   participant A as AKShare行情
   participant S as 新浪显式系数
   C->>W: 公共任务请求，冻结来源
-  W->>P: 协议6，工作区缓存与控制管道
+  W->>P: 协议7，工作区缓存与控制管道
   P-->>W: ready身份与版本
   W->>W: 验证后接受分片
   P->>A: 原价与供应商后复权表
@@ -68,7 +68,7 @@ uvx ruff format --check crates/storage/collectors
 
 ## 实施公告采集
 
-announcements.py是第六个受签名白名单模块，依赖新增锁定pypdf5.9.0（共35项）。协议6的announcements操作接受同样证券和日期，固定CNINFO证券目录、搜索/PDF地址。先从官方目录核对代码、A股类别、交易所和唯一orgId，再以代码与机构ID联合查询，并核对返回身份；缺失或重复身份不猜。拒绝跨证券、重复ID、变化/截断分页、重定向、超大或加密附件。输出announcements.json及raw内PDF/文本/HTTP收据；每证券完整检查点可恢复，最终重验所有哈希。空文本、预案、风险提示和存在多候选日期保持待复核。
+announcements.py是第六个受签名白名单模块，依赖新增锁定pypdf5.9.0（共35项）。协议7的announcements操作接受同样证券和日期，固定CNINFO证券目录、搜索/PDF地址。先从官方目录核对代码、A股类别、交易所和唯一orgId，再以代码与机构ID联合查询，并核对返回身份；缺失或重复身份不猜。拒绝跨证券、重复ID、变化/截断分页、重定向、超大或加密附件。输出announcements.json及raw内PDF/文本/HTTP收据；每证券完整检查点可恢复，最终重验所有哈希。空文本、预案、风险提示和存在多候选日期保持待复核。
 
 公告元数据保存来源映射、公布日、源地址、解析版本、原始单位/金额引用和每字段候选，候选不会自动覆盖正式动作。Python配股表也只留证；申购期、费用、获配/退款/上市条款由实施证据补齐后通过公共修订进入账本。
 
@@ -85,7 +85,7 @@ announcements.py是第六个受签名白名单模块，依赖新增锁定pypdf5.
 
 为什么调整：普通市场代码无需先登记身份；独立目录、审核和权威名录下载增加了研究前置负担。特殊历史代码仍需在快照内明确区间，不能将旧证券行情或权益接到另一证券。训练使用价量和标签，到账／交付资料只在实际账户执行时检查。
 
-当前格式：模板6、需求3、准入4、股票池3、公司行动4、规范行情5、系数3、采集6、服务9、研究结果11；快照内来源映射1、训练产物1。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
+当前格式：模板8、需求3、准入5、股票池3、公司行动4、规范行情5、系数3、采集7、服务10、研究结果12；快照内来源映射1、训练产物2。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
 
 来源映射位于快照source_map.json，普通证券可用空exceptions。每个例外含市场代码、资产类别、适用区间及provider/symbol/coverage定位。冲突拒绝；SHT00018只能读取自身旧文件，不自动绑定SH600018。原Qlib文件不改写；显式重新登记冻结文件内容和映射。worker内缓存字段，取消检查以证券和固定批次执行。
 
@@ -99,3 +99,7 @@ flowchart LR
 ```
 
 验收：nextest覆盖来源日期边界、三档掩码、训练／回测分离及模型保留；Clippy、Rustdoc、格式、组件文档和包内CLI共同检查。生成数据、模型、运行记录和安装包不提交。另一台Apple Silicon/macOS14实机验收继续待完成。
+
+## 报价、系数和事件为何拆开
+
+协议7新增quotes及adjustment_shard。quotes跳过系数HTTP依赖，缺依据快照不能自动训练；coefficients独立获取完整Sina历史。Rust恢复时重新核验HTTP/结构化收据与解析记录，不混用旧协议检查点。 完整接口、why、边界和验收见[组件契约](../README.md)。

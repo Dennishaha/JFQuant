@@ -30,6 +30,7 @@ use std::{
 };
 use thiserror::Error;
 
+pub mod alpha158;
 pub mod audit;
 mod formulas;
 mod parser;
@@ -41,6 +42,8 @@ pub const FORMULA_VERSION: &str = "gtja191-paper-2017+jfquant-audit-v4";
 /// panel executor. Window lengths are in observations (per instrument).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FactorExpr {
+    /// Independently pinned Qlib expression with its own rolling/null semantics.
+    Alpha158(alpha158::Expr),
     /// Panel input column (`close`, `volume`, ...).
     Column(String),
     /// Numeric literal.
@@ -149,6 +152,7 @@ impl FactorExpr {
         use FactorExpr::*;
         let merge = |a: (u32, bool), b: (u32, bool)| (a.0.max(b.0), a.1 || b.1);
         match self {
+            Alpha158(expr) => (expr.lookback() as u32, false),
             Column(_) | Const(_) | Sequence(_) => (1, false),
             Unsupported { .. } => (0, false),
             Neg(a) | Abs(a) | Log(a) | Sign(a) | Pow(a, _) | Rank(a) | ZScore(a) | Scale(a) => {
@@ -463,6 +467,13 @@ impl Default for FactorRegistry {
 }
 
 impl FactorRegistry {
+    /// Construct exactly one family; GTJA defaults and operators remain unchanged.
+    pub fn for_set(set: analytics_core::research_quality::FactorSet) -> Self {
+        match set {
+            analytics_core::research_quality::FactorSet::Gtja191 => Self::new(),
+            analytics_core::research_quality::FactorSet::Alpha158 => alpha158::registry(),
+        }
+    }
     /// Builds the 191-entry registry from the pinned formula catalog.
     pub fn new() -> Self {
         let mut specs = BTreeMap::new();
@@ -750,6 +761,7 @@ fn evaluate(expr: &FactorExpr, panel: &EvaluationPanel<'_>) -> Result<Vec<Option
                 .collect()
         };
     match expr {
+        FactorExpr::Alpha158(expr) => alpha158::evaluate(expr, panel),
         FactorExpr::Column(name) => panel
             .columns
             .get(name)

@@ -46,7 +46,7 @@ pub enum Command {
     #[command(subcommand)]
     Model(ModelCommand),
     #[command(subcommand)]
-    Research(ResearchCommand),
+    Research(Box<ResearchCommand>),
     #[command(subcommand)]
     Templates(TemplateCommand),
     #[command(subcommand)]
@@ -71,6 +71,12 @@ pub enum WorkspaceCommand {
 }
 #[derive(Debug, Subcommand)]
 pub enum DataCommand {
+    Compose {
+        #[arg(long)]
+        market: String,
+        #[arg(long)]
+        coefficients: String,
+    },
     Scan {
         path: PathBuf,
     },
@@ -150,6 +156,10 @@ pub enum DataCommand {
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum CollectionKind {
+    /// Quotations only; independent coefficient availability is checked separately.
+    Quotes,
+    /// Independent source factors, without quote downloads.
+    Coefficients,
     Market,
     Actions,
 }
@@ -269,7 +279,10 @@ pub enum FileFormat {
 }
 #[derive(Debug, Subcommand)]
 pub enum FactorCommand {
-    List,
+    List {
+        #[arg(long, value_enum, default_value = "gtja191")]
+        factor_set: FactorSetValue,
+    },
     Run {
         #[arg(long)]
         request: PathBuf,
@@ -326,12 +339,34 @@ pub enum DateUnit {
 /// CLI-only overrides; business validation belongs to the common policy.
 #[derive(Debug, Default, Args)]
 pub struct QualityOptions {
+    /// Replace only the independently saved factor profile.
+    #[arg(long)]
+    pub factor_profile: Option<PathBuf>,
+    /// Replace only the independently saved universe/benchmark selection.
+    #[arg(long)]
+    pub target_profile: Option<PathBuf>,
+    #[arg(long, value_enum)]
+    pub price_basis: Option<PriceBasisValue>,
+    #[arg(long, value_enum)]
+    pub factor_set: Option<FactorSetValue>,
     #[arg(long, value_enum)]
     pub strictness: Option<StrictnessValue>,
     #[arg(long)]
     pub min_valid_feature_ratio: Option<f64>,
     #[arg(long)]
     pub min_labeled_rows: Option<usize>,
+}
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum PriceBasisValue {
+    Verified,
+    Provider,
+}
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum FactorSetValue {
+    #[value(name = "gtja191")]
+    Gtja191,
+    #[value(name = "alpha158")]
+    Alpha158,
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum StrictnessValue {
@@ -344,7 +379,19 @@ pub enum StrictnessValue {
 }
 impl QualityOptions {
     fn apply(&self, t: &mut ResearchTemplate) -> std::result::Result<(), ServiceError> {
-        use analytics_core::research_quality::ResearchStrictness;
+        use analytics_core::research_quality::{FactorSet, PriceBasis, ResearchStrictness};
+        if let Some(basis) = self.price_basis {
+            t.price_basis = match basis {
+                PriceBasisValue::Verified => PriceBasis::Verified,
+                PriceBasisValue::Provider => PriceBasis::Provider,
+            };
+        }
+        if let Some(set) = self.factor_set {
+            t.select_factor_set(match set {
+                FactorSetValue::Gtja191 => FactorSet::Gtja191,
+                FactorSetValue::Alpha158 => FactorSet::Alpha158,
+            });
+        }
         if let Some(mode) = self.strictness {
             t.quality_policy.strictness = match mode {
                 StrictnessValue::Strict => ResearchStrictness::Strict,
@@ -411,7 +458,7 @@ pub enum ResearchCommand {
         #[arg(long)]
         market: String,
         #[arg(long)]
-        actions: String,
+        actions: Option<String>,
     },
     Train {
         #[arg(long)]
@@ -425,7 +472,7 @@ pub enum ResearchCommand {
         #[arg(long)]
         market: String,
         #[arg(long)]
-        actions: String,
+        actions: Option<String>,
     },
     Backtest {
         #[arg(long)]
@@ -450,8 +497,35 @@ pub enum ResearchCommand {
 }
 #[derive(Debug, Subcommand)]
 pub enum TemplateCommand {
+    /// Export the feature selection independently from a workflow.
+    Factors {
+        #[arg(long)]
+        template: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Export the pool/benchmark selection independently from a workflow.
+    Target {
+        #[arg(long)]
+        template: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Combine reusable workflow parameters with separately selected profiles.
+    Compose {
+        #[arg(long)]
+        workflow: PathBuf,
+        #[arg(long)]
+        factors: PathBuf,
+        #[arg(long)]
+        target: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
     List,
     Default {
+        #[arg(long, value_enum, default_value = "gtja191")]
+        factor_set: FactorSetValue,
         #[arg(long)]
         output: Option<PathBuf>,
         #[arg(long, default_value="csi500", value_parser=["csi300","csi500"])]
@@ -541,9 +615,14 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
         let w = Workspace::open(path).map_err(invalid)?;
         return Ok(json!({"workspace":w.root()}));
     }
-    if let Command::Factors(FactorCommand::List) = &cli.command {
+    if let Command::Factors(FactorCommand::List { factor_set }) = &cli.command {
+        let set = match factor_set {
+            FactorSetValue::Gtja191 => analytics_core::research_quality::FactorSet::Gtja191,
+            FactorSetValue::Alpha158 => analytics_core::research_quality::FactorSet::Alpha158,
+        };
+        let registry = analytics_factor::FactorRegistry::for_set(set);
         return Ok(
-            json!({"formula_version":analytics_factor::FORMULA_VERSION,"factors":analytics_factor::audit::entries()}),
+            json!({"factor_set":set,"formula_version":analytics_factor::alpha158::version(set),"factors":registry.all().collect::<Vec<_>>(),"audit":if matches!(set,analytics_core::research_quality::FactorSet::Gtja191){serde_json::to_value(analytics_factor::audit::entries()).map_err(invalid)?}else{json!([])}}),
         );
     }
     if let Command::SelfCheck { output } = &cli.command {
@@ -569,6 +648,13 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
         Command::Service(ServiceCommand::Stop) => return client.call(Rpc::Stop),
         Command::Service(ServiceCommand::Restart) => return client.call(Rpc::Restart),
         Command::Data(command) => match command {
+            DataCommand::Compose {
+                market,
+                coefficients,
+            } => workflow(WorkflowRequest::ComposeMarket {
+                market,
+                coefficients,
+            }),
             DataCommand::InspectActions {
                 actions,
                 instrument,
@@ -633,6 +719,10 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
 
                 request.validate().map_err(invalid)?;
                 workflow(match kind {
+                    CollectionKind::Coefficients => {
+                        WorkflowRequest::CollectCoefficients { request, resume }
+                    }
+                    CollectionKind::Quotes => WorkflowRequest::CollectQuotes { request, resume },
                     CollectionKind::Market => WorkflowRequest::CollectMarket { request, resume },
                     CollectionKind::Actions => WorkflowRequest::CollectActions { request, resume },
                 })
@@ -775,7 +865,7 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
                 .unwrap_or_default(),
         },
         Command::Model(ModelCommand::Artifacts { id }) => return client.call(Rpc::Results { id }),
-        Command::Research(command) => match command {
+        Command::Research(command) => match *command {
             ResearchCommand::Preview {
                 actions,
                 template,
@@ -874,20 +964,72 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
                     &quality,
                 )?),
                 market,
-                actions,
+                actions: Some(actions),
                 audit_only: false,
             }),
         },
         Command::Templates(command) => {
             return match command {
                 TemplateCommand::List => client.call(Rpc::Templates),
-                TemplateCommand::Default { output, universe } => {
-                    let t = if universe == "csi300" {
+                TemplateCommand::Factors { template, output } => {
+                    let t = ResearchTemplate::read(&resolve(&client.root, &template))
+                        .map_err(invalid)?;
+                    analytics_workflow::profiles::FactorProfile::from_template(&t)
+                        .write(&resolve(&client.root, &output))
+                        .map_err(invalid)?;
+                    Ok(json!({"output":output,"kind":"factor_profile"}))
+                }
+                TemplateCommand::Target { template, output } => {
+                    let t = ResearchTemplate::read(&resolve(&client.root, &template))
+                        .map_err(invalid)?;
+                    analytics_workflow::profiles::TargetProfile::from_template(&t)
+                        .write(&resolve(&client.root, &output))
+                        .map_err(invalid)?;
+                    Ok(json!({"output":output,"kind":"target_profile"}))
+                }
+                TemplateCommand::Compose {
+                    workflow,
+                    factors,
+                    target,
+                    output,
+                } => {
+                    let d: analytics_workflow::profiles::WorkflowDocument =
+                        read(&client.root, &workflow)?;
+                    let f = analytics_workflow::profiles::FactorProfile::read(&resolve(
+                        &client.root,
+                        &factors,
+                    ))
+                    .map_err(invalid)?;
+                    let u = analytics_workflow::profiles::TargetProfile::read(&resolve(
+                        &client.root,
+                        &target,
+                    ))
+                    .map_err(invalid)?;
+                    let t = d.resolve(f, u).map_err(invalid)?;
+                    t.write(&resolve(&client.root, &output)).map_err(invalid)?;
+                    Ok(
+                        json!({"output":output,"signature":analytics_workflow::signature(&t).map_err(invalid)?}),
+                    )
+                }
+                TemplateCommand::Default {
+                    output,
+                    universe,
+                    factor_set,
+                } => {
+                    let mut t = if universe == "csi300" {
                         ResearchTemplate::builtin_csi300()
                     } else {
                         ResearchTemplate::builtin()
                     }
                     .map_err(invalid)?;
+                    t.select_factor_set(match factor_set {
+                        FactorSetValue::Gtja191 => {
+                            analytics_core::research_quality::FactorSet::Gtja191
+                        }
+                        FactorSetValue::Alpha158 => {
+                            analytics_core::research_quality::FactorSet::Alpha158
+                        }
+                    });
                     if let Some(p) = output {
                         t.write(&resolve(&client.root, &p)).map_err(invalid)?;
                     }
@@ -954,6 +1096,18 @@ fn research_template(
     quality: &QualityOptions,
 ) -> std::result::Result<ResearchTemplate, ServiceError> {
     let mut t = ResearchTemplate::read(&resolve(root, path)).map_err(invalid)?;
+    if let Some(p) = &quality.factor_profile {
+        analytics_workflow::profiles::FactorProfile::read(&resolve(root, p))
+            .map_err(invalid)?
+            .apply(&mut t)
+            .map_err(invalid)?;
+    }
+    if let Some(p) = &quality.target_profile {
+        analytics_workflow::profiles::TargetProfile::read(&resolve(root, p))
+            .map_err(invalid)?
+            .apply(&mut t)
+            .map_err(invalid)?;
+    }
     quality.apply(&mut t)?;
     if let Some(path) = schedule {
         t.schedule = read(root, path)?;

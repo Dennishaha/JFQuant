@@ -268,6 +268,28 @@ pub fn collect_actions(
 ) -> io::Result<PathBuf> {
     collect_operation(request, staging, context, "actions")
 }
+/// Independently collect quotations without depending on a coefficient HTTP endpoint.
+/// Raw candidate snapshots are not automatically eligible for research.
+pub fn collect_quotes(
+    request: &CollectionRequest,
+    staging: &Path,
+    context: &TaskContext,
+) -> io::Result<PathBuf> {
+    collect_operation(request, staging, context, "quotes")
+}
+/// Independent coefficient task, sharing supervision, evidence and cancellation.
+pub fn collect_coefficients(
+    request: &CollectionRequest,
+    staging: &Path,
+    context: &TaskContext,
+) -> io::Result<PathBuf> {
+    if request.provider != Provider::Akshare
+        || request.adjustment_source != AdjustmentSource::SinaHfq
+    {
+        return Err(invalid("unsupported independent coefficient source"));
+    }
+    collect_operation(request, staging, context, "coefficients")
+}
 fn collect_operation(
     request: &CollectionRequest,
     staging: &Path,
@@ -318,7 +340,7 @@ fn collect_with_command(
     fs::create_dir_all(staging.join("market/adjustments"))?;
     fs::create_dir_all(staging.join("raw"))?;
     let owner = staging.join("owner.json");
-    let owner_value = json!({"operation":operation,"request":request,"collector_protocol":6,"normalization":NORMALIZATION,
+    let owner_value = json!({"operation":operation,"request":request,"collector_protocol":7,"normalization":NORMALIZATION,
         "collector_signature":collector_signature(),"dependencies_sha256":dependencies_signature(),
         "python_runtime_sha256":format!("sha256:{:x}",Sha256::digest(include_bytes!("../collectors/python-runtime.lock.json")))});
     if owner.exists() {
@@ -340,7 +362,7 @@ fn collect_with_command(
         if !request.instruments.contains(id) {
             return Err(invalid("checkpoint contains an unrequested security"));
         }
-        let path = if operation == "market" {
+        let path = if matches!(operation, "market" | "quotes") {
             staging.join("market/bars").join(format!("{id}.parquet"))
         } else {
             staging
@@ -350,7 +372,7 @@ fn collect_with_command(
         if hash(&path)? != *expected {
             return Err(invalid("checkpoint hash mismatch"));
         }
-        if operation == "market" {
+        if matches!(operation, "market" | "quotes") {
             read_bars(&path)?;
             let adjustment = staging
                 .join("market/adjustments")
@@ -449,7 +471,7 @@ fn collect_with_command(
         log.sync_all()
     });
     let mut payload = serde_json::to_value(request).map_err(invalid)?;
-    payload["version"] = json!(6);
+    payload["version"] = json!(7);
     payload["expected_collector_signature"] = json!(collector_signature());
     payload["operation"] = json!(operation);
     let native: BTreeMap<String, String> = pending
@@ -535,7 +557,7 @@ fn collect_with_command(
                             }
                         }
                     }
-                    if msg["version"] != 6 {
+                    if msg["version"] != 7 {
                         return Err(invalid("collector_protocol_mismatch"));
                     }
                     if completed.is_some() {
@@ -551,6 +573,56 @@ fn collect_with_command(
                         }
                         Some("progress") => {
                             context.report(msg["message"].as_str().unwrap_or("采集进度"))?
+                        }
+                        Some("adjustment_shard") if operation == "coefficients" => {
+                            if !identified {
+                                return Err(invalid(
+                                    "collector identity required before checkpoints",
+                                ));
+                            }
+                            let id = msg["instrument"]
+                                .as_str()
+                                .ok_or_else(|| invalid("missing coefficient security"))?;
+                            if !pending.contains(id) || receipts.contains_key(id) {
+                                return Err(invalid("unexpected coefficient security"));
+                            }
+                            verify_http_receipts(staging, &msg["evidence"])?;
+                            let record: AdjustmentRecord =
+                                serde_json::from_value(msg["adjustment"].clone())
+                                    .map_err(invalid)?;
+                            record.validate()?;
+                            if record.instrument_id != id
+                                || record.source_symbol
+                                    != *request.source_bindings.get(id).unwrap_or(&id.to_string())
+                                || record.on(request.start)?.is_none()
+                                || record.on(request.end)?.is_none()
+                            {
+                                return Err(invalid("coefficient security/coverage mismatch"));
+                            }
+                            if !matches!(
+                                (&record.basis, request.benchmarks.contains(id)),
+                                (
+                                    AdjustmentBasis::Explicit {
+                                        source: FactorSource::SinaHfq,
+                                        ..
+                                    },
+                                    false
+                                ) | (AdjustmentBasis::PriceIndex { .. }, true)
+                            ) {
+                                return Err(invalid("coefficient source mismatch"));
+                            }
+                            save(
+                                &staging
+                                    .join("market/adjustments")
+                                    .join(format!("{id}.json")),
+                                &record,
+                            )?;
+                            let path = staging
+                                .join("raw")
+                                .join(format!("{id}-actions-structured.json"));
+                            save(&path, &msg)?;
+                            receipts.insert(id.into(), hash(&path)?);
+                            save(&receipt_path, &receipts)?;
                         }
                         Some("action_shard")
                             if operation == "actions" || operation == "announcements" =>
@@ -574,7 +646,7 @@ fn collect_with_command(
                             receipts.insert(id.into(), hash(&path)?);
                             save(&receipt_path, &receipts)?;
                         }
-                        Some("shard") if operation == "market" => {
+                        Some("shard") if matches!(operation, "market" | "quotes") => {
                             if !identified {
                                 return Err(invalid(
                                     "collector identity required before checkpoints",
@@ -620,6 +692,11 @@ fn collect_with_command(
                                     Provider::Akshare,
                                     true,
                                 ) => source == "akshare.index_zh_a_hist",
+                                (AdjustmentBasis::Unavailable { .. }, _, _)
+                                    if operation == "quotes" =>
+                                {
+                                    true
+                                }
                                 (AdjustmentBasis::Unavailable { .. }, Provider::Yfinance, _) => {
                                     true
                                 }
@@ -739,6 +816,50 @@ fn collect_with_command(
 
     if receipts.keys().cloned().collect::<BTreeSet<_>>() != request.instruments {
         return Err(invalid("incomplete collection"));
+    }
+    if operation == "coefficients" {
+        let mut records = BTreeMap::new();
+        let mut evidence = completion_receipts;
+        for id in receipts.keys() {
+            let record = AdjustmentRecord::read(&staging.join("market"), id)?;
+            let msg: Value = serde_json::from_slice(&fs::read(
+                staging
+                    .join("raw")
+                    .join(format!("{id}-actions-structured.json")),
+            )?)
+            .map_err(invalid)?;
+            if serde_json::to_value(&record).map_err(invalid)? != msg["adjustment"] {
+                return Err(invalid("coefficient checkpoint mismatch"));
+            }
+            evidence.extend(verify_http_receipts(staging, &msg["evidence"])?);
+            evidence.insert(
+                format!("{id}-actions-structured.json"),
+                receipts[id].clone(),
+            );
+            records.insert(
+                id.clone(),
+                hash(
+                    &staging
+                        .join("market/adjustments")
+                        .join(format!("{id}.json")),
+                )?,
+            );
+        }
+        evidence.insert(
+            "complete-sources-structured.json".into(),
+            hash(&staging.join("raw/complete-sources-structured.json"))?,
+        );
+        let bundle = CoefficientBundle {
+            schema_version: 1,
+            request: request.clone(),
+            records,
+            evidence,
+            collector: complete,
+        };
+        let path = staging.join("coefficients.json");
+        save(&path, &bundle)?;
+        CoefficientBundle::read(&path)?;
+        return Ok(path);
     }
     if operation == "announcements" {
         let mut documents = Vec::new();
@@ -960,7 +1081,7 @@ fn collect_with_command(
     }
     save(
         &staging.join("jfquant_source.json"),
-        &json!({"downloader":"JFQuant analytics-storage","independent_download":true,"snapshot_verified":true,"exception_bindings":!request.source_bindings.is_empty(),"provider":request.provider,"request":request,"evidence_sha256":evidence_hashes,"collector_protocol":6,"versions":complete["versions"],"collector_signature":complete["collector_signature"],"python_runtime":serde_json::from_slice::<Value>(include_bytes!("../collectors/python-runtime.lock.json")).map_err(invalid)?,"calendar_source":"akshare.tool_trade_date_hist_sina","dependencies_sha256":format!("sha256:{:x}",Sha256::digest(include_bytes!("../collectors/requirements.lock"))),"price_basis":manifest.price_basis,"normalization":manifest.normalization,"adjustment_source":request.adjustment_source,"adjustment_anchors":manifest.adjustment_anchors}),
+        &json!({"downloader":"JFQuant analytics-storage","independent_download":true,"snapshot_verified":true,"exception_bindings":!request.source_bindings.is_empty(),"provider":request.provider,"request":request,"evidence_sha256":evidence_hashes,"collector_protocol":7,"versions":complete["versions"],"collector_signature":complete["collector_signature"],"python_runtime":serde_json::from_slice::<Value>(include_bytes!("../collectors/python-runtime.lock.json")).map_err(invalid)?,"calendar_source":"akshare.tool_trade_date_hist_sina","dependencies_sha256":format!("sha256:{:x}",Sha256::digest(include_bytes!("../collectors/requirements.lock"))),"price_basis":manifest.price_basis,"normalization":manifest.normalization,"adjustment_source":request.adjustment_source,"adjustment_anchors":manifest.adjustment_anchors}),
     )?;
     Ok(staging.join("market"))
 }
@@ -1030,8 +1151,8 @@ r=json.loads(sys.stdin.readline());mode=sys.argv[1]
 open('collector.pid','w').write(str(os.getpid()))
 versions={'akshare':'1.19.1','yfinance':'1.7.0','python':'3.12.15'}
 identity=r['expected_collector_signature'] if mode!='bad_identity' else 'wrong code'
-if mode!='missing_identity': print(json.dumps({'version':6,'event':'ready','collector_signature':identity,'versions':versions}),flush=True)
-print(json.dumps({'version':6,'event':'progress','message':'ready'}),flush=True)
+if mode!='missing_identity': print(json.dumps({'version':7,'event':'ready','collector_signature':identity,'versions':versions}),flush=True)
+print(json.dumps({'version':7,'event':'progress','message':'ready'}),flush=True)
 if mode=='timeout': time.sleep(30)
 if mode=='crash': sys.exit(1)
 if mode=='bad_protocol': print(json.dumps({'version':0,'event':'complete'}),flush=True);sys.exit(0)
@@ -1040,17 +1161,136 @@ if 'SH600000' in r['instruments']:
  open('raw/http-fixture.body','wb').write(body)
  evidence={'kind':'structured_library_response','http_receipts':[{'filename':'http-fixture.body','sha256':'sha256:'+hashlib.sha256(body).hexdigest(),'url':'https://example.test/history'}]}
  if r['operation']=='actions':
-  print(json.dumps({'version':6,'event':'action_shard','instrument':'SH600000','history_verified':True,'records':[],'evidence':evidence}),flush=True)
+  print(json.dumps({'version':7,'event':'action_shard','instrument':'SH600000','history_verified':True,'records':[],'evidence':evidence}),flush=True)
  b={'instrument_id':'SH600000','trade_date':'2020-01-02','open':10.,'high':11.,'low':9.,'close':10.,'adj_open':10.,'adj_high':11.,'adj_low':9.,'adj_close':10.,'volume':1000.,'amount':10000.}
  adjustment={'schema_version':3,'instrument_id':'SH600000','source_symbol':'SH600000','basis':{'kind':'explicit','source':'sina_hfq','source_url':'https://finance.sina.com.cn/realstock/company/sh600000/hfq.js','verified_through':r['end'],'points':[{'effective_date':'1900-01-01','factor':'2'}]}}
- if r['operation']=='market': print(json.dumps({'version':6,'event':'shard','instrument':'SH600000','bars':[b],'adjustment':adjustment,'evidence':evidence}),flush=True)
+ if r['operation']=='coefficients': adjustment['basis']['points'].append({'effective_date':'2020-01-03','factor':'4'})
+ if r['operation']=='coefficients': print(json.dumps({'version':7,'event':'adjustment_shard','instrument':'SH600000','adjustment':adjustment,'evidence':evidence}),flush=True)
+ if r['operation']=='market': print(json.dumps({'version':7,'event':'shard','instrument':'SH600000','bars':[b],'adjustment':adjustment,'evidence':evidence}),flush=True)
 if mode=='partial': sys.exit(1)
-print(json.dumps({'version':6,'event':'complete','collector_signature':r['expected_collector_signature'],'calendar':['2020-01-02','2020-01-03'],'universes':{},'versions':versions}),flush=True)
-if mode=='after_complete': print(json.dumps({'version':6,'event':'progress','message':'late'}),flush=True)
+print(json.dumps({'version':7,'event':'complete','collector_signature':r['expected_collector_signature'],'calendar':['2020-01-02','2020-01-03'],'universes':{},'versions':versions}),flush=True)
+if mode=='after_complete': print(json.dumps({'version':7,'event':'progress','message':'late'}),flush=True)
 "#).unwrap();
         let mut c = Command::new(runtime().unwrap());
         c.args(["-I", "-B", "-u"]).arg(script).arg(mode);
         c
+    }
+    #[test]
+    fn independent_coefficients_resume_and_view_preserve_original_raw_scale() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = dir.path().join("coefficients");
+        let r = request();
+        assert!(
+            collect_with_command(
+                &r,
+                &stage,
+                &TaskContext::current(),
+                "coefficients",
+                command(dir.path(), "partial"),
+                Duration::from_secs(2)
+            )
+            .is_err()
+        );
+        assert!(!stage.join("coefficients.json").exists());
+        let path = collect_with_command(
+            &r,
+            &stage,
+            &TaskContext::current(),
+            "coefficients",
+            command(dir.path(), "ok"),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let bundle = CoefficientBundle::read(&path).unwrap();
+        fs::create_dir_all(dir.path().join(".jfquant")).unwrap();
+        fs::write(dir.path().join(".jfquant/workspace.json"), "{}").unwrap();
+        let base = dir.path().join("qlib_bin");
+        fs::create_dir_all(base.join("calendars")).unwrap();
+        fs::create_dir_all(base.join("features/sh600000")).unwrap();
+        fs::write(base.join("calendars/day.txt"), "2020-01-02\n2020-01-03").unwrap();
+        for (name, values) in [
+            ("close", vec![1., 1.]),
+            ("open", vec![1., 1.]),
+            ("factor", vec![0.1, 0.2]),
+            ("volume", vec![100., 100.]),
+            ("amount", vec![10., 10.]),
+        ] {
+            let bytes: Vec<_> = std::iter::once(0_f32)
+                .chain(values)
+                .flat_map(f32::to_le_bytes)
+                .collect();
+            fs::write(
+                base.join(format!("features/sh600000/{name}.day.bin")),
+                bytes,
+            )
+            .unwrap();
+        }
+        let root = dir.path().join("view");
+        fs::create_dir_all(root.join("adjustments")).unwrap();
+        fs::copy(
+            stage.join("market/adjustments/SH600000.json"),
+            root.join("adjustments/SH600000.json"),
+        )
+        .unwrap();
+        let record = AdjustmentRecord::read(&root, "SH600000").unwrap();
+        let mut view = crate::market_view::MarketView {
+            schema_version: 1,
+            base_path: "qlib_bin".into(),
+            base_sha256: crate::market_view::tree_hash(&base).unwrap(),
+            coefficients_path: "coefficients/coefficients.json".into(),
+            coefficients_sha256: hash(&path).unwrap(),
+            recovery: "qlib-normalized-price-over-original-factor;cent-tick;shares-v1".into(),
+            records: bundle.records.clone(),
+            anchors: BTreeMap::from([("SH600000".into(), record.anchor(r.start).unwrap())]),
+        };
+        save(&root.join("market_view.json"), &view).unwrap();
+        let data = crate::daily::DailyDataset::open(&root).unwrap();
+        assert_eq!(
+            data.raw_field("SH600000", "close").unwrap().get(0),
+            Some(10.)
+        );
+        assert_eq!(
+            data.raw_field("SH600000", "close").unwrap().get(1),
+            Some(5.)
+        );
+        assert_eq!(data.field("SH600000", "close").unwrap().get(1), Some(10.));
+        assert!((data.raw_volume("SH600000").unwrap().get(1).unwrap() - 2000.).abs() < 0.001);
+        assert!((data.field("SH600000", "volume").unwrap().get(1).unwrap() - 10.).abs() < 0.001);
+        assert!((data.field("SH600000", "vwap").unwrap().get(1).unwrap() - 10.).abs() < 0.001);
+        assert!(!data.supports_provider_training());
+        assert_eq!(data.field("SH600000", "factor").unwrap().get(0), Some(1.));
+        assert_eq!(data.field("SH600000", "factor").unwrap().get(1), Some(2.));
+        view.anchors.get_mut("SH600000").unwrap().factor = "99".into();
+        save(&root.join("market_view.json"), &view).unwrap();
+        assert!(crate::daily::DailyDataset::open(&root).is_err());
+        view.anchors.get_mut("SH600000").unwrap().factor = "2".into();
+        let original_volume = fs::read(base.join("features/sh600000/volume.day.bin")).unwrap();
+        fs::write(
+            base.join("features/sh600000/volume.day.bin"),
+            [0_f32, -10., 100.]
+                .into_iter()
+                .flat_map(f32::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let original_sha = view.base_sha256.clone();
+        view.base_sha256 = crate::market_view::tree_hash(&base).unwrap();
+        save(&root.join("market_view.json"), &view).unwrap();
+        let invalid = crate::daily::DailyDataset::open(&root).unwrap();
+        assert!(invalid.field("SH600000", "volume").is_err());
+        fs::write(
+            base.join("features/sh600000/volume.day.bin"),
+            original_volume,
+        )
+        .unwrap();
+        view.base_sha256 = original_sha;
+        fs::write(stage.join("raw/http-fixture.body"), "tampered").unwrap();
+        assert!(CoefficientBundle::read(&path).is_err());
+        // The composition never changes or replaces the original factor bytes.
+        assert_eq!(
+            crate::market_view::tree_hash(&base).unwrap(),
+            view.base_sha256
+        );
     }
     #[test]
     fn failed_collection_resumes_only_hash_verified_shards() {
@@ -1186,7 +1426,7 @@ if mode=='after_complete': print(json.dumps({'version':6,'event':'progress','mes
     }
     #[test]
     fn resumed_http_evidence_and_collector_identity_are_reverified() {
-        for operation in ["market", "actions"] {
+        for operation in ["market", "actions", "coefficients"] {
             let d = tempfile::tempdir().unwrap();
             let stage = d.path().join("stage");
             let r = request();
@@ -1360,5 +1600,94 @@ if mode=='after_complete': print(json.dumps({'version':6,'event':'progress','mes
             )
             .is_err()
         );
+    }
+}
+
+/// Independently acquired full coefficient request; a failed shard never completes it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoefficientBundle {
+    /// Current immutable bundle format.
+    pub schema_version: u32,
+    /// Frozen source, locator and date request.
+    pub request: CollectionRequest,
+    /// Exact parsed record hashes under market/adjustments.
+    pub records: BTreeMap<String, String>,
+    /// Exact raw responses and protocol evidence under raw.
+    pub evidence: BTreeMap<String, String>,
+    /// Verified bundled runtime and dependency receipt.
+    pub collector: Value,
+}
+impl CoefficientBundle {
+    /// Revalidate parsed records and raw evidence before registration, reuse or composition.
+    pub fn read(path: &Path) -> io::Result<Self> {
+        let b: Self = serde_json::from_slice(&fs::read(path)?).map_err(invalid)?;
+        b.request.validate()?;
+        if b.schema_version != 1
+            || b.request.provider != Provider::Akshare
+            || b.request.adjustment_source != AdjustmentSource::SinaHfq
+            || b.records.keys().cloned().collect::<BTreeSet<_>>() != b.request.instruments
+            || b.evidence.is_empty()
+        {
+            return Err(invalid("unsupported_data_format: coefficient version"));
+        }
+        verify_collector_identity(&b.collector)?;
+        if b.collector["version"] != 7 || b.collector["event"] != "complete" {
+            return Err(invalid("coefficient completion protocol mismatch"));
+        }
+        let root = path
+            .parent()
+            .ok_or_else(|| invalid("coefficient parent missing"))?;
+        for (name, sha) in &b.evidence {
+            if Path::new(name).components().count() != 1
+                || !Path::new(name)
+                    .components()
+                    .all(|c| matches!(c, std::path::Component::Normal(_)))
+                || hash(&root.join("raw").join(name))? != *sha
+            {
+                return Err(invalid("coefficient raw evidence damaged"));
+            }
+        }
+        for (id, sha) in &b.records {
+            let r = AdjustmentRecord::read(&root.join("market"), id)?;
+            let name = format!("{id}-actions-structured.json");
+            let msg: Value = serde_json::from_slice(&fs::read(root.join("raw").join(&name))?)
+                .map_err(invalid)?;
+            if b.evidence.get(&name) != Some(&hash(&root.join("raw").join(&name))?)
+                || msg["version"] != 7
+                || msg["event"] != "adjustment_shard"
+                || msg["instrument"] != *id
+                || msg["adjustment"] != serde_json::to_value(&r).map_err(invalid)?
+            {
+                return Err(invalid("coefficient parsed/raw binding mismatch"));
+            }
+            for (name, sha) in verify_http_receipts(root, &msg["evidence"])? {
+                if b.evidence.get(&name) != Some(&sha) {
+                    return Err(invalid("coefficient HTTP receipt binding mismatch"));
+                }
+            }
+
+            if r.source_symbol != *b.request.source_bindings.get(id).unwrap_or(id)
+                || !matches!(
+                    (&r.basis, b.request.benchmarks.contains(id)),
+                    (
+                        AdjustmentBasis::Explicit {
+                            source: FactorSource::SinaHfq,
+                            ..
+                        },
+                        false
+                    ) | (AdjustmentBasis::PriceIndex { .. }, true)
+                )
+            {
+                return Err(invalid("coefficient source binding mismatch"));
+            }
+            if hash(&root.join("market/adjustments").join(format!("{id}.json")))? != *sha
+                || r.on(b.request.start)?.is_none()
+                || r.on(b.request.end)?.is_none()
+            {
+                return Err(invalid("coefficient record damaged/coverage missing"));
+            }
+        }
+        Ok(b)
     }
 }

@@ -33,6 +33,7 @@ pub struct PlatformState {
     pub selected_run: Option<Uuid>,
     pub market: String,
     pub actions: String,
+    pub coefficients: String,
     pub release_tag: String,
     pub register_path: String,
     pub collection_provider: analytics_storage::collector::Provider,
@@ -77,6 +78,7 @@ impl Default for PlatformState {
             selected_run: None,
             market: String::new(),
             actions: String::new(),
+            coefficients: String::new(),
             release_tag: String::new(),
             register_path: String::new(),
             collection_provider: Default::default(),
@@ -330,6 +332,30 @@ pub fn data_panel(
         }
     });
     ui.collapsing("AKShare / yfinance 日线采集", |ui| {
+        ui.horizontal(|ui| {
+            ui.label("独立系数版本");
+            select_data(
+                ui,
+                "coefficient_version",
+                "coefficients",
+                &mut state.platform.coefficients,
+                &state.platform.datasets,
+            );
+            if ui
+                .add_enabled(
+                    enabled
+                        && !state.platform.market.is_empty()
+                        && !state.platform.coefficients.is_empty(),
+                    egui::Button::new("生成研究数据视图"),
+                )
+                .clicked()
+            {
+                request = Some(WorkflowRequest::ComposeMarket {
+                    market: state.platform.market.clone(),
+                    coefficients: state.platform.coefficients.clone(),
+                });
+            }
+        });
         ui.add_enabled_ui(enabled, |ui| {
             use analytics_storage::collector::{CollectionRequest, Provider};
             ui.horizontal(|ui| {
@@ -379,7 +405,10 @@ pub fn data_panel(
                 ui.label("结束");
                 ui.text_edit_singleline(&mut state.platform.end);
             });
-            if ui.button("采集日线并发布新版本").clicked() {
+            let collect_quotes = ui.button("仅采集行情（系数另采）").clicked();
+            let collect_coefficients = ui.button("仅采集独立复权系数").clicked();
+            if ui.button("采集日线并发布新版本").clicked() || collect_coefficients || collect_quotes
+            {
                 let parse = || -> Result<CollectionRequest, String> {
                     let ids = |v: &str| {
                         v.split([',', '，', ' ', '\n'])
@@ -409,9 +438,21 @@ pub fn data_panel(
                 };
                 match parse() {
                     Ok(r) => {
-                        request = Some(WorkflowRequest::CollectMarket {
-                            request: r,
-                            resume: None,
+                        request = Some(if collect_coefficients {
+                            WorkflowRequest::CollectCoefficients {
+                                request: r,
+                                resume: None,
+                            }
+                        } else if collect_quotes {
+                            WorkflowRequest::CollectQuotes {
+                                request: r,
+                                resume: None,
+                            }
+                        } else {
+                            WorkflowRequest::CollectMarket {
+                                request: r,
+                                resume: None,
+                            }
                         })
                     }
                     Err(e) => state.platform.error = Some(e),
@@ -606,7 +647,7 @@ pub fn research_panel(
     state: &mut AppState,
     worker: &WorkerHandle,
     cancel_slot: &mut Option<Cancellation>,
-    registry: &analytics_factor::FactorRegistry,
+    _registry: &analytics_factor::FactorRegistry,
 ) {
     ui.heading("研究流程");
     crate::quality_ui::reasons(ui, &state.platform.details);
@@ -619,6 +660,8 @@ pub fn research_panel(
     let mut load = false;
     let mut export = false;
     let mut import = false;
+    let (mut save_factors, mut load_factors, mut save_target, mut load_target) =
+        (false, false, false, false);
     ui.horizontal(|ui| {
         ui.label("模板名称");
         ui.text_edit_singleline(&mut state.platform.template.name);
@@ -635,8 +678,52 @@ pub fn research_panel(
             .add_enabled(enabled, egui::Button::new("导入模板"))
             .clicked();
     });
+    ui.horizontal(|ui| {
+        ui.label("独立配置");
+        save_factors = ui
+            .add_enabled(enabled, egui::Button::new("保存因子配置"))
+            .clicked();
+        load_factors = ui
+            .add_enabled(enabled, egui::Button::new("载入因子配置"))
+            .clicked();
+        save_target = ui
+            .add_enabled(enabled, egui::Button::new("保存标的配置"))
+            .clicked();
+        load_target = ui
+            .add_enabled(enabled, egui::Button::new("载入标的配置"))
+            .clicked();
+    });
     let w = state.platform.workspace.as_ref().unwrap().clone();
     let result = (|| -> analytics_workflow::Result<()> {
+        use analytics_workflow::profiles::{FactorProfile, TargetProfile};
+        if save_factors
+            && let Some(p) = rfd::FileDialog::new()
+                .set_file_name("factors.json")
+                .save_file()
+        {
+            FactorProfile::from_template(&state.platform.template).write(&p)?;
+        }
+        if load_factors
+            && let Some(p) = rfd::FileDialog::new()
+                .add_filter("JSON", &["json"])
+                .pick_file()
+        {
+            FactorProfile::read(&p)?.apply(&mut state.platform.template)?;
+        }
+        if save_target
+            && let Some(p) = rfd::FileDialog::new()
+                .set_file_name("target.json")
+                .save_file()
+        {
+            TargetProfile::from_template(&state.platform.template).write(&p)?;
+        }
+        if load_target
+            && let Some(p) = rfd::FileDialog::new()
+                .add_filter("JSON", &["json"])
+                .pick_file()
+        {
+            TargetProfile::read(&p)?.apply(&mut state.platform.template)?;
+        }
         if save {
             if !state.platform.date_editor_valid {
                 return Err("请修正日期输入后再保存".into());
@@ -738,6 +825,18 @@ pub fn research_panel(
             ui.horizontal(|ui|{ui.label("证券");ui.text_edit_singleline(&mut state.platform.action_review_instrument);ui.label("公告manifest");ui.text_edit_singleline(&mut state.platform.action_evidence_manifest);});
             if ui.button("加载原事件、哈希与公告候选").clicked(){submit(state,worker,cancel_slot,WorkflowRequest::InspectActions{actions:state.platform.actions.clone(),instrument:state.platform.action_review_instrument.clone(),evidence_manifest:if state.platform.action_evidence_manifest.trim().is_empty(){None}else{Some(PathBuf::from(state.platform.action_evidence_manifest.trim()))}});}
         let t = &mut state.platform.template;
+        ui.horizontal(|ui| {
+            ui.label("训练价格口径");
+            egui::ComboBox::from_id_salt("training_price_basis").selected_text(t.price_basis.label()).show_ui(ui,|ui| {
+                for basis in [analytics_core::research_quality::PriceBasis::Verified,analytics_core::research_quality::PriceBasis::Provider] {ui.selectable_value(&mut t.price_basis,basis,basis.label());}
+            });
+            let old=t.factor_set;
+            egui::ComboBox::from_id_salt("research_factor_set").selected_text(format!("{:?}",old)).show_ui(ui,|ui| {
+                ui.selectable_value(&mut t.factor_set,analytics_core::research_quality::FactorSet::Gtja191,"GTJA191");
+                ui.selectable_value(&mut t.factor_set,analytics_core::research_quality::FactorSet::Alpha158,"Alpha158");
+            });
+            if old!=t.factor_set {t.select_factor_set(t.factor_set);}
+        });
         crate::quality_ui::controls(ui, &mut t.quality_policy);
         ui.collapsing("日期调度：单次 / 滚动 / 手动多折", |ui| {
             let before=serde_json::to_string(&t.schedule).unwrap_or_default();
@@ -836,6 +935,9 @@ pub fn research_panel(
                 .id_salt("research_factors")
                 .max_height(240.0)
                 .show(ui, |ui| {
+                    let registry = analytics_factor::FactorRegistry::for_set(
+                        state.platform.template.factor_set,
+                    );
                     for s in registry
                         .all()
                         .filter(|s| s.id.contains(&state.platform.filter))
@@ -871,7 +973,8 @@ pub fn research_panel(
         },
     );
     ui.label("不复权成交、整数股、T+1、跨年持续账户；公司行动不完整时停止训练。");
-    let ready = enabled && !state.platform.market.is_empty() && !state.platform.actions.is_empty();
+    let ready = enabled && !state.platform.market.is_empty();
+    let execute_ready = ready && !state.platform.actions.is_empty();
     let mut run = None;
     ui.horizontal(|ui| {
         if ui
@@ -881,7 +984,7 @@ pub fn research_panel(
             run = Some(true);
         }
         if ui
-            .add_enabled(ready, egui::Button::new("执行年度研究"))
+            .add_enabled(execute_ready, egui::Button::new("执行年度研究"))
             .clicked()
         {
             run = Some(false);
@@ -896,7 +999,8 @@ pub fn research_panel(
                 WorkflowRequest::Research {
                     template: Box::new(state.platform.template.clone()),
                     market: state.platform.market.clone(),
-                    actions: state.platform.actions.clone(),
+                    actions: (!state.platform.actions.is_empty())
+                        .then(|| state.platform.actions.clone()),
                     audit_only,
                 },
             ),
@@ -915,7 +1019,8 @@ pub fn research_panel(
                 WorkflowRequest::TrainResearch {
                     template: Box::new(state.platform.template.clone()),
                     market: state.platform.market.clone(),
-                    actions: state.platform.actions.clone(),
+                    actions: (!state.platform.actions.is_empty())
+                        .then(|| state.platform.actions.clone()),
                 },
             );
         }

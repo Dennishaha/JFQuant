@@ -72,7 +72,7 @@ pub struct AdjustmentRecord {
     pub basis: AdjustmentBasis,
 }
 /// Frozen first valid raw closing observation and its independent coefficient.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AdjustmentAnchor {
     /// Earliest raw close date in the snapshot.
@@ -140,7 +140,9 @@ impl AdjustmentRecord {
                 if !matches!(self.source_symbol.as_str(), "SH000300" | "SH000905")
                     || !matches!(
                         source.as_str(),
-                        "akshare.index_zh_a_hist" | "JFQuant analytics-workflow synthetic-demo-v1"
+                        "akshare.index_zh_a_hist"
+                            | "JFQuant Qlib price-index recovery-v1"
+                            | "JFQuant analytics-workflow synthetic-demo-v1"
                     )
                 {
                     return Err(invalid("unverified price-index identity"));

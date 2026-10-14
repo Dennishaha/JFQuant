@@ -180,6 +180,14 @@ impl Schedule {
     }
     /// Resolve against a verified, complete exchange calendar; explicit ranges never clip.
     pub fn resolve(&self, calendar: &[Date]) -> Result<Vec<ResolvedFold>> {
+        self.resolve_with_warmup(calendar, 756)
+    }
+    /// Resolve dates with the selected family's explicit history requirement.
+    pub fn resolve_with_warmup(
+        &self,
+        calendar: &[Date],
+        warmup: usize,
+    ) -> Result<Vec<ResolvedFold>> {
         self.validate()?;
         if calendar.is_empty() || calendar.windows(2).any(|w| w[0] >= w[1]) {
             return Err("invalid trading calendar".into());
@@ -272,8 +280,8 @@ impl Schedule {
                 Ok(ResolvedFold {
                     requested: f,
                     actual,
-                    warmup_start: calendar[i.saturating_sub(756)],
-                    warmup_sessions: i.min(756),
+                    warmup_start: calendar[i.saturating_sub(warmup)],
+                    warmup_sessions: i.min(warmup),
                 })
             })
             .collect::<Result<_>>()?;

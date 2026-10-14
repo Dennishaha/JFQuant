@@ -2,6 +2,53 @@
 use crate::DateRange;
 use serde::{Deserialize, Serialize};
 
+/// Training price trust is independent of sample completeness and account execution.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PriceBasis {
+    /// Require dated coefficients and historical event reconciliation.
+    #[default]
+    Verified,
+    /// Explicitly trust registered Qlib research quotations, retaining reconciliation warnings.
+    Provider,
+}
+impl PriceBasis {
+    /// Plain-language source choice.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Verified => "核对复权依据后训练",
+            Self::Provider => "使用供应商复权行情训练",
+        }
+    }
+}
+
+/// One independently versioned feature family per run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FactorSet {
+    /// Audited GTJA191 v4, with the existing default 178 usable features.
+    #[default]
+    Gtja191,
+    /// Qlib's pinned default 158 definitions with JFQuant input units.
+    Alpha158,
+}
+impl FactorSet {
+    /// Human-readable family name shared by all clients.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Gtja191 => "GTJA191",
+            Self::Alpha158 => "Alpha158",
+        }
+    }
+    /// Required pre-training historical sessions.
+    pub fn warmup_sessions(self) -> usize {
+        match self {
+            Self::Gtja191 => 756,
+            Self::Alpha158 => 61,
+        }
+    }
+}
+
 /// The same three choices are used by GUI, CLI and the worker.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -106,6 +153,8 @@ pub enum ProblemDisposition {
     ExcludeSample,
     /// A dated candidate was omitted from the derived universe.
     ExcludeSecurity,
+    /// Fact remains unresolved but explicitly selected supplier training can proceed.
+    Warn,
 }
 impl ProblemDisposition {
     /// Plain-language handling shown beside each reason.
@@ -115,6 +164,7 @@ impl ProblemDisposition {
             Self::KeepNull => "保留为空值",
             Self::ExcludeSample => "排除样本",
             Self::ExcludeSecurity => "排除股票",
+            Self::Warn => "告警保留",
         }
     }
 }

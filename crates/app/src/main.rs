@@ -113,7 +113,7 @@ impl DesktopApp {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("JFQuant Analytics").strong().size(16.0));
                 ui.label(
-                    egui::RichText::new("本地 Parquet · DuckDB · Alpha191 · LightGBM")
+                    egui::RichText::new("本地 Parquet · DuckDB · GTJA191 / Alpha158 · LightGBM")
                         .small()
                         .weak(),
                 );

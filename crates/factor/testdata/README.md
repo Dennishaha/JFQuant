@@ -48,7 +48,7 @@ cargo nextest run -p analytics-factor
 
 为什么调整：普通市场代码无需先登记身份；独立目录、审核和权威名录下载增加了研究前置负担。特殊历史代码仍需在快照内明确区间，不能将旧证券行情或权益接到另一证券。训练使用价量和标签，到账／交付资料只在实际账户执行时检查。
 
-当前格式：模板6、需求3、准入4、股票池3、公司行动4、规范行情5、系数3、采集6、服务9、研究结果11；快照内来源映射1、训练产物1。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
+当前格式：模板8、需求3、准入5、股票池3、公司行动4、规范行情5、系数3、采集7、服务10、研究结果12；快照内来源映射1、训练产物2。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
 
 ```mermaid
 flowchart LR
@@ -60,3 +60,20 @@ flowchart LR
 ```
 
 验收：nextest覆盖来源日期边界、三档掩码、训练／回测分离及模型保留；Clippy、Rustdoc、格式、组件文档和包内CLI共同检查。生成数据、模型、运行记录和安装包不提交。另一台Apple Silicon/macOS14实机验收继续待完成。
+
+## Alpha158的独立全列参考
+
+为什么另建参考：GTJA的rolling/null语义不能替代固定Qlib定义。alpha158_formulas.json保存固定loader的来源URL/哈希、158项顺序及数据AST；alpha158_expected.json包含85日×3证券全部158列，覆盖短窗口、缺失、零量、常量和并列。reference_alpha158.py用独立Pandas/NumPy实现固定语义，**未直接调用Qlib**，不能把它标为Qlib实际执行输出。运行时不依赖这个脚本或Qlib。
+
+```mermaid
+flowchart LR
+  S[固定Qlib loader与算子文档] --> A[158项数据AST]
+  A --> P[独立Pandas/NumPy参考]
+  I[固定合成价量与边界] --> P
+  P --> G[全158列golden]
+  A --> R[Rust专用Alpha158算子]
+  G --> V[逐行值/null/顺序比较]
+  R --> V
+```
+
+开发重现：`target/collector-build/python/bin/python3 -I crates/factor/testdata/reference_alpha158.py target/alpha158-expected.json`，再`cmp crates/factor/testdata/alpha158_expected.json target/alpha158-expected.json`，最后`cargo nextest run -p analytics-factor`。输出不一致必须解释公式/算子或数值依赖变化，不能直接覆盖夹具让测试变绿。GTJA现有golden和公式v4保持。

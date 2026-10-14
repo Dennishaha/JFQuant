@@ -32,7 +32,7 @@ flowchart TD
   YEAR --> TRAIN
   TRAIN --> MODEL["有序manifest、模型与样本外预测"]
   MODEL --> TABLE["流水线预览与重训产物"]
-  MODEL --> LEDGER["年度原价股份账本与结果schema11"]
+  MODEL --> LEDGER["年度原价股份账本与结果schema12"]
 ```
 
 ## 构建与环境
@@ -97,7 +97,7 @@ v4隔离12条歧义公式，Alpha030另因真实MKT/SMB/HML缺失排除，当前
 
 涨跌停仍为最新常规板块比例减0.5个百分点缓冲，缺精确交易所限价、上市特例、逐笔流动性、冲击、退市清算；不是完整实盘撮合复现。年化252日，Sharpe无风险0，回撤包含初值1；IC/RankIC为至少30只股票的每日均值、并列平均，标签期限不同于5日组合期限。
 
-### 当前研究产物（schema_version=11）
+### 当前研究产物（schema_version=12）
 
 backtest::RESEARCH_SCHEMA_VERSION=9；validate_result返回可识别的UnsupportedResultFormat，报告生成、平台读取与只读导入共用校验。仅接受当前公式、raw_integer_shares、来源/双签名、完整执行配置、年度报告及汇总字段。旧结果不转换、不重新计费；保留磁盘文件，读取时返回unsupported_result_format。
 
@@ -111,7 +111,7 @@ backtest::RESEARCH_SCHEMA_VERSION=9；validate_result返回可识别的Unsupport
 | fold-NNNN/predictions.csv / metrics.json / feature_importance.json | 样本外预测、最佳轮指标及重要性 |
 | account-through-DATE/ledger.json | 折末持续现金、整数股、可售股、应收权益和日期状态；只作审计，不作为任意断点恢复接口 |
 | fold-NNNN/daily.json / report.json | 单预设日收益/费用/换手/持仓/受阻订单；费用仅来自实际模拟成交，不含估值平仓字段 |
-| annual_reports.json / summary.json | 年度与连续账户汇总，schema11及双签名 |
+| annual_reports.json / summary.json | 年度与连续账户汇总，schema12及双签名 |
 | report.md / nav.csv | 可读报告及日期、策略净值、价格指数净值 |
 
 特征签名覆盖数据、顺序、v4公式和价量适配约定；执行签名另含费用、初始资金、年份、模式、税率和完整公司行动文件哈希。改变金额/日期/来源会改变执行签名；已有不同签名输出拒绝覆盖。因子manifest的lookback由AST组合，requires_recursive_state单列说明，不能把递归历史表示成有限窗口。
@@ -156,20 +156,20 @@ nextest覆盖标准CLI与公共API/egui的冻结参数、特征顺序、双签�
 
 ## 动态股票池与 Python 采集接口
 
-当前模板schema 6、研究结果schema11、服务协议9；公式仍为v4。模板增加 `pool_version`、`benchmark` 和 `pool_exit_policy`；默认 `builtin:csi500` / `SH000905`，沪深300模板使用 `builtin:csi300` / `SH000300`。自选和集合组合引用不可变pool版本，冻结成员区间、人工日期调整及输入哈希；模型manifest和缓存签名包含这些研究输入。原schema结果明确拒绝，历史状态和日志仍可查看，不转换旧文件。
+当前模板schema 8、研究结果schema12、服务协议10；公式仍为v4。解析后配置包含 `pool_version`、`benchmark` 和 `pool_exit_policy`（磁盘保存于TargetProfile）；默认 `builtin:csi500` / `SH000905`，沪深300模板使用 `builtin:csi300` / `SH000300`。自选和集合组合引用不可变pool版本，冻结成员区间、人工日期调整及输入哈希；模型manifest和缓存签名包含这些研究输入。原schema结果明确拒绝，历史状态和日志仍可查看，不转换旧文件。
 
 ```mermaid
 flowchart LR
-  CLIENT["App / jfquant"] --> SERVICE["协议9公共服务"]
+  CLIENT["App / jfquant"] --> SERVICE["协议10公共服务"]
   SERVICE --> POOL["保存/预览不可变股票池"]
   SERVICE --> COLLECT["Rust监督内置Python双源采集"]
   COLLECT --> SNAPSHOT["验证后的Parquet版本与公司行动候选"]
-  POOL --> FREEZE["模板6：池、基准、退出策略、签名"]
+  POOL --> FREEZE["模板8：池、基准、退出策略、签名"]
   SNAPSHOT --> READY["原价、历史覆盖、公司行动准入"]
   QLIB["现有Qlib读取器"] --> READY
   FREEZE --> READY
   READY --> RESEARCH["统一日行情、年度模型、持续整数股账户"]
-  RESEARCH --> RESULT["结果11：成员变化、退出/阻碍、账本、费用"]
+  RESEARCH --> RESULT["结果12：成员变化、退出/阻碍、账本、费用"]
 ```
 
 `pools create/validate/import/export/list/versions/preview` 使用公共定义及解析器；`data collect --provider akshare|yfinance --kind market|actions` 提交后台任务，使用 jobs wait 显式等待。`run --request` 可提交完整公共请求。App提供来源、采集日期/证券、股票池JSON编辑、日期预览、退出策略及失败采集恢复按钮。包内Python和依赖只用于采集，不需要外部Python；日常操作不调用Cargo。
@@ -190,11 +190,11 @@ jfquant research demo-parquet
 
 年度准入在因子缓存和训练之前核验统一行情的独立系数、锚点、历史事件与执行权益；错误按证券进入 `execution_readiness.json.factor_basis_issues / adjustment_issues` 并列出 `affected_factor_ids`。供应商后复权报价仅用于留证，不从报价比值猜系数。
 
-## 显式价量与schema11
+## 显式价量与schema12
 
 年度研究令k=F/F0：OHLC乘k，研究量除k，成交额保持元，VWAP由实际金额/真实股数乘k。公式v4、默认178项与特征顺序不变。历史对账覆盖训练、验证、756交易日预热及测试；每个事件须有跳变，每次跳变须有解释。理论参考价对独立系数保留0.2%阈值，不放宽；显式源无事件跳变采用1e-12数值阈值，Qlib float32噪声仍为2e-5。缺参考价、逆向系数、配股或未解释特殊分派停止训练。
 
-execution.price_inputs和price_input_sha256保存规则版本、系数文件哈希、来源、覆盖、锚点和精度，进入因子签名及每fold模型manifest。schema11读取、报告和只读导入共用校验：不仅要求哈希匹配，还要求合法来源、日期覆盖、正有限锚点和明确转换规则；重算哈希不能绕过缺字段校验。旧结果/缓存不转换。通用Parquet流水线按调用者提供的列计算，正式年度研究经DailyDataset生成价量，不能直接把供应商adj证据列当正式输入。
+execution.price_inputs和price_input_sha256保存规则版本、系数文件哈希、来源、覆盖、锚点和精度，进入因子签名及每fold模型manifest。schema12读取、报告和只读导入共用校验：不仅要求哈希匹配，还要求合法来源、日期覆盖、正有限锚点和明确转换规则；重算哈希不能绕过缺字段校验。旧结果/缓存不转换。通用Parquet流水线按调用者提供的列计算，正式年度研究经DailyDataset生成价量，不能直接把供应商adj证据列当正式输入。
 
 ## 任意日期研究（当前接口）
 
@@ -202,7 +202,7 @@ ResearchRequest.schedule替代首末年份；ResearchConfig只保存模型/组�
 
 账户从首折测试日至末折测试日持续推进。间隔日不产生新选股信号，继续估值、权益结算和所选股票池退出规则；连续折可执行上一日已冻结信号，空档不保留过期信号。因子缓存仍按年度分文件以复用计算，但样本选择、模型训练和执行边界均按日期。未知历史成员的截面mask为null，不等同空池，也不回填当前成分。
 
-结果schema11：fold_reports为每折实际测试日结果，annual_reports为自然年汇总（含折间账户日），daily.json/nav.csv为完整连续账户日；fold-NNNN/gap_daily.json单独保存空档。account-through-DATE/ledger.json冻结当期股数、现金和待交付权益。认购手续费独立列为corporate_action_cost_cny，普通买卖费用仍使用市场规则。日期调度、执行政策、公司行动、价量和来源映射签名进入缓存/模型/研究来源。
+结果schema12：fold_reports为每折实际测试日结果，annual_reports为自然年汇总（含折间账户日），daily.json/nav.csv为完整连续账户日；fold-NNNN/gap_daily.json单独保存空档。account-through-DATE/ledger.json冻结当期股数、现金和待交付权益。认购手续费独立列为corporate_action_cost_cny，普通买卖费用仍使用市场规则。日期调度、执行政策、公司行动、价量和来源映射签名进入缓存/模型/研究来源。
 
 准入同时列出来源/成员、系数、历史事件、账户结算、后继证券、基准及样本问题。历史参考完整而结算缺失的特殊事件可声明Historical；若它进入实际账户区间则拒绝。换股对价、差异化参考、配股和退市按类型执行，缺少申购/上市/资格/零碎股/估值证据继续停止，不能自动删除股票或改用旧近似口径。
 
@@ -221,7 +221,7 @@ ResearchRequest.schedule替代首末年份；ResearchConfig只保存模型/组�
 
 ResearchRequest.quality_policy使用公共策略。[quality.rs](src/backtest/quality.rs)生成quality.json：格式1、原成员、每日合格成员、日期压缩的处理记录及每日数量。因子计算前确定截面；训练/验证/预测的样本掩码随后生成，预测不要求未来标签。sample_masks/fold-NNNN-{train,validation,prediction}.json保存与因子缓存行序对应的bool掩码及仅含日期/数据代码的行序哈希；sample_selection.json保存数量、相对路径及内容签名。标签数值不进入行序标识，避免Qlib float32精度影响成员对照。
 
-临时计算仍在.admission-factor-staging。准入、最低标签样本及每列有效值检查通过后才发布factor-cache和调用训练器。缓存签名、模型manifest及schema11结果冻结策略、资格、掩码及其哈希，离线读取重新校验；第三档报告明确写“经数据筛选的研究股票池”。执行检查仅涉及实际订单、持仓和待结算权益；候选缺资料不买入，实际权益无法解释时停止回测，保留已完成模型，不读取未来缺项倒删过去候选。
+临时计算仍在.admission-factor-staging。准入、最低标签样本及每列有效值检查通过后才发布factor-cache和调用训练器。缓存签名、模型manifest及schema12结果冻结策略、资格、掩码及其哈希，离线读取重新校验；第三档报告明确写“经数据筛选的研究股票池”。执行检查仅涉及实际订单、持仓和待结算权益；候选缺资料不买入，实际权益无法解释时停止回测，保留已完成模型，不读取未来缺项倒删过去候选。
 
 验收：`cargo nextest run -p analytics-workflow quality_tests`，覆盖原价股份账本、同输入三档、未来缺项、整列无效和源格式对照。
 
@@ -240,7 +240,7 @@ flowchart LR
 
 为什么调整：普通市场代码无需先登记身份；独立目录、审核和权威名录下载增加了研究前置负担。特殊历史代码仍需在快照内明确区间，不能将旧证券行情或权益接到另一证券。训练使用价量和标签，到账／交付资料只在实际账户执行时检查。
 
-当前格式：模板6、需求3、准入4、股票池3、公司行动4、规范行情5、系数3、采集6、服务9、研究结果11；快照内来源映射1、训练产物1。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
+当前格式：模板8、需求3、准入5、股票池3、公司行动4、规范行情5、系数3、采集7、服务10、研究结果12；快照内来源映射1、训练产物2。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
 
 ```mermaid
 flowchart LR
@@ -258,3 +258,22 @@ flowchart LR
 training.json格式1冻结原请求、实际折、特征顺序、因子与训练签名，以及各折model.txt/manifest.json字节哈希；artifact_signature核对描述本身。独立回测先重新核验模型、行情版本与训练期间除权参考，再加载模型预测，绝不调用训练器。支付日修复不改变历史研究价量，允许引用新执行版本；修改系数、现金分红除权参考或训练来源必须重训。
 
 回测按实际订单检查资料，不扫描全部未来候选结算。拒单写order_events.jsonl；持仓或应收权益缺依据时保留partial_daily.json及account_checkpoint.json，summary.json仅在完整执行结束后生成。全程无成交时backtest_status=no_valid_trades，不能当作策略效果验收。
+
+## 为什么训练口径独立于账户执行
+
+供应商Qlib价量可能足以训练，但其归一化factor不能逐个变化当成已对账公司行动。`ResearchRequest.price_basis`默认verified；provider仅接受已登记且来源可核验的原Qlib快照，直接使用声明的研究价量，将未完成历史事件核验列为告警。损坏、冲突、无标签或整列因子无效仍失败，不自动减掉默认178项。训练/check允许没有action版本；组合run/backtest仍必须选择实际执行事件。
+
+`factor_set`选择GTJA191或Alpha158，分别756/61交易日预热、独立公式版本和有序列。训练产物2与研究结果12按实际组合校验，不能用GTJA版本解释Alpha158。provider训练签名不包含后来补齐的到账/上市日期；价量、映射、参数、特征或日期变化必须重训。verified同时冻结影响历史价量的事件依据。回测使用原模型口径预测，按原价整数股执行；无成交明确标注，持仓关键缺项保存部分记录和已完成模型。
+
+```mermaid
+flowchart TD
+  S[来源口径 + 样本模式 + 单一因子组合] --> C[批量读取与暂存因子]
+  C --> G[标签和整列有效性门禁]
+  G --> T[训练产物2及训练签名]
+  T --> P[相同口径的预测]
+  A[执行事件/费用/账户策略] --> E[原价整数股账户]
+  P --> E
+  E --> R[结果12 或保留模型的失败记录]
+```
+
+训练产物2中的source_warnings直接携带未对账及账户路径尚未执行的原因，App/CLI读取模型即可看到；admission_report相对引用保留完整准入文件，sample_selection保存逐折样本掩码清单。告警纳入产物哈希，不因训练成功变为passed。

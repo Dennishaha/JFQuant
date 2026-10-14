@@ -9,7 +9,7 @@
 | 文件 | 接口与职责 |
 |---|---|
 | [lib.rs](lib.rs) | `Workspace/ResearchTemplate/DataVersion/RunRecord/WorkflowRequest`；路径、签名、数据准入、原子元数据、同步worker执行及当前结果读取 |
-| [service.rs](service.rs) | `TaskRequest/Rpc/Client/ServiceError`、`serve/bridge`；Unix socket协议9、独占服务、提交互斥、控制读取、客户端适配 |
+| [service.rs](service.rs) | `TaskRequest/Rpc/Client/ServiceError`、`serve/bridge`；Unix socket协议10、独占服务、提交互斥、控制读取、客户端适配 |
 | [backend.rs](backend.rs) | `WorkerCommand/WorkerEvent/TaskKind/RunSummary/Wake`；SQL会话、任务执行/取消、原生模型、结果汇总与panic退役 |
 | [demo.rs](demo.rs) | `create`：生产与测试共用的完整合成输入、明确synthetic_fixture身份和手算模板 |
 | [testing.rs](testing.rs) | feature限定的`synthetic`便利包装；不随正式发行包启用 |
@@ -41,7 +41,7 @@ stateDiagram-v2
 
 ```mermaid
 flowchart TD
-  CLIENT["App / jfquant"] --> RPC["协议9 Unix socket：当前用户权限"]
+  CLIENT["App / jfquant"] --> RPC["协议10 Unix socket：当前用户权限"]
   RPC --> LOCK["服务独占工作区锁"]
   RPC --> CONTROL["状态、日志、模板、版本与记录读取"]
   LOCK --> WORKER["单个计算worker"]
@@ -57,7 +57,7 @@ SQL会话闲置十分钟释放并返回query_expired；控制请求不共享其�
 
 ## 文件与版本
 
-工作区、版本、运行记录schema1；模板schema6；服务协议9；研究结果schema11。workspace路径不依赖cwd，`snapshot/signature`冻结输入身份和内容签名，长字节/证据校验在worker执行前进行。用户修改已登记数据必须登记新版本。
+工作区、版本、运行记录schema1；模板schema8；服务协议10；研究结果schema12。workspace路径不依赖cwd，`snapshot/signature`冻结输入身份和内容签名，长字节/证据校验在worker执行前进行。用户修改已登记数据必须登记新版本。
 
 数据与运行目录用UUID及相对路径；工作区整体迁移保持当前记录可用。旧任务状态和日志仍能读取，但旧格式结果或旧请求不转换、不重新执行。只读导入用公共`validate_result`，失败不创建记录。实际下载恢复使用原任务UUID的受验证owner/页面收据；研究重新运行创建新记录，不宣称训练中途恢复。
 
@@ -76,20 +76,20 @@ cargo clippy -p analytics-workflow --all-targets -- -D warnings
 
 ## 动态股票池与 Python 采集接口
 
-当前模板schema 6、研究结果schema11、服务协议9；公式仍为v4。模板增加 `pool_version`、`benchmark` 和 `pool_exit_policy`；默认 `builtin:csi500` / `SH000905`，沪深300模板使用 `builtin:csi300` / `SH000300`。自选和集合组合引用不可变pool版本，冻结成员区间、人工日期调整及输入哈希；模型manifest和缓存签名包含这些研究输入。原schema结果明确拒绝，历史状态和日志仍可查看，不转换旧文件。
+当前模板schema 8、研究结果schema12、服务协议10；公式仍为v4。解析后配置包含 `pool_version`、`benchmark` 和 `pool_exit_policy`（磁盘保存于TargetProfile）；默认 `builtin:csi500` / `SH000905`，沪深300模板使用 `builtin:csi300` / `SH000300`。自选和集合组合引用不可变pool版本，冻结成员区间、人工日期调整及输入哈希；模型manifest和缓存签名包含这些研究输入。原schema结果明确拒绝，历史状态和日志仍可查看，不转换旧文件。
 
 ```mermaid
 flowchart LR
-  CLIENT["App / jfquant"] --> SERVICE["协议9公共服务"]
+  CLIENT["App / jfquant"] --> SERVICE["协议10公共服务"]
   SERVICE --> POOL["保存/预览不可变股票池"]
   SERVICE --> COLLECT["Rust监督内置Python双源采集"]
   COLLECT --> SNAPSHOT["验证后的Parquet版本与公司行动候选"]
-  POOL --> FREEZE["模板6：池、基准、退出策略、签名"]
+  POOL --> FREEZE["模板8：池、基准、退出策略、签名"]
   SNAPSHOT --> READY["原价、历史覆盖、公司行动准入"]
   QLIB["现有Qlib读取器"] --> READY
   FREEZE --> READY
   READY --> RESEARCH["统一日行情、年度模型、持续整数股账户"]
-  RESEARCH --> RESULT["结果11：成员变化、退出/阻碍、账本、费用"]
+  RESEARCH --> RESULT["结果12：成员变化、退出/阻碍、账本、费用"]
 ```
 
 `pools create/validate/import/export/list/versions/preview` 使用公共定义及解析器；`data collect --provider akshare|yfinance --kind market|actions` 提交后台任务，使用 jobs wait 显式等待。`run --request` 可提交完整公共请求。App提供来源、采集日期/证券、股票池JSON编辑、日期预览、退出策略及失败采集恢复按钮。包内Python和依赖只用于采集，不需要外部Python；日常操作不调用Cargo。
@@ -131,7 +131,7 @@ demo::create_canonical生成规范行情5、每证券独立系数及首个真实
 
 第二档保持原成员，纯缺失传播null；第三档派生每日合格成员，不改原始成员或证据。不能看到后来缺价而倒删早期股票。账户仍采用原价、整数股、T+1和连续权益；未裁定冲突、损坏、基准缺项及剩余必要依赖仍阻断。默认有效因子比例0表示至少一项有效，最低有标签样本1只表示可执行，不表示样本在统计上充分。所选因子整列无有效值不会被自动删除。
 
-[quality_tests.rs](quality_tests.rs)通过正式workflow入口验证三档差异、未来缺口、实际持仓缺价/支付日、空池和全无效样本；不通过测试专用旁路跳过门禁。lib.rs把模板quality_policy下沉ResearchRequest，需求预览复用backtest::quality::qualify，service.rs使用协议9。工作区/任务格式不变，客户端退出仍不取消后台任务。
+[quality_tests.rs](quality_tests.rs)通过正式workflow入口验证三档差异、未来缺口、实际持仓缺价/支付日、空池和全无效样本；不通过测试专用旁路跳过门禁。lib.rs把模板quality_policy下沉ResearchRequest，需求预览复用backtest::quality::qualify，service.rs使用协议10。工作区/任务格式不变，客户端退出仍不取消后台任务。
 
 ```mermaid
 flowchart LR
@@ -148,7 +148,7 @@ flowchart LR
 
 为什么调整：普通市场代码无需先登记身份；独立目录、审核和权威名录下载增加了研究前置负担。特殊历史代码仍需在快照内明确区间，不能将旧证券行情或权益接到另一证券。训练使用价量和标签，到账／交付资料只在实际账户执行时检查。
 
-当前格式：模板6、需求3、准入4、股票池3、公司行动4、规范行情5、系数3、采集6、服务9、研究结果11；快照内来源映射1、训练产物1。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
+当前格式：模板8、需求3、准入5、股票池3、公司行动4、规范行情5、系数3、采集7、服务10、研究结果12；快照内来源映射1、训练产物2。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
 
 App与jfquant共用后台。research train产出training.json及逐折model.txt/manifest.json；research backtest引用训练任务，不重新训练；research run先训练再回测。补齐支付日不改变训练价量依据，系数或除权参考改变须重训。check只证明训练就绪，账户提示保持not_run；回测失败仍可读取模型及部分账户记录。
 
@@ -169,3 +169,7 @@ flowchart LR
 ```
 
 验收：nextest覆盖来源日期边界、三档掩码、训练／回测分离及模型保留；Clippy、Rustdoc、格式、组件文档和包内CLI共同检查。生成数据、模型、运行记录和安装包不提交。另一台Apple Silicon/macOS14实机验收继续待完成。
+
+## profiles与公共任务
+
+profiles.rs分离工作流8、因子1和标的1；lib.rs执行CollectQuotes/CollectCoefficients/ComposeMarket以及可选actions的训练。service.rs协议10冻结同一请求，控制线程不创建原生句柄。 完整接口、why、边界和验收见[组件契约](../README.md)。

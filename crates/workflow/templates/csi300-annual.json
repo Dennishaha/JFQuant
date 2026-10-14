@@ -1,0 +1,136 @@
+{
+  "schedule": {
+    "expanding": false,
+    "first": {
+      "test": {
+        "end": "2012-12-31",
+        "start": "2012-01-01"
+      },
+      "train": {
+        "end": "2010-12-31",
+        "start": "2006-01-01"
+      },
+      "validation": {
+        "end": "2011-12-31",
+        "start": "2011-01-01"
+      }
+    },
+    "mode": "rolling",
+    "step": {
+      "count": 1,
+      "unit": "years"
+    },
+    "until": null
+  },
+  "action_policy": {
+    "exercise_optional_cash_choice": false,
+    "subscribe_with_available_cash": true
+  },
+  "quality_policy": {
+    "min_labeled_rows": 1,
+    "min_valid_feature_ratio": 0.0,
+    "strictness": "strict"
+  },
+  "market_rules": {
+    "boards": [
+      {
+        "board": "main",
+        "buy_increment_shares": 100,
+        "daily_limit": 0.1,
+        "minimum_buy_shares": 100,
+        "sell_delay_trading_days": 1,
+        "tick_cny": 0.01
+      },
+      {
+        "board": "star",
+        "buy_increment_shares": 1,
+        "daily_limit": 0.2,
+        "minimum_buy_shares": 200,
+        "sell_delay_trading_days": 1,
+        "tick_cny": 0.01
+      },
+      {
+        "board": "chinext",
+        "buy_increment_shares": 100,
+        "daily_limit": 0.2,
+        "minimum_buy_shares": 100,
+        "sell_delay_trading_days": 1,
+        "tick_cny": 0.01
+      },
+      {
+        "board": "beijing",
+        "buy_increment_shares": 1,
+        "daily_limit": 0.3,
+        "minimum_buy_shares": 100,
+        "sell_delay_trading_days": 1,
+        "tick_cny": 0.01
+      }
+    ],
+    "commission": {
+      "minimum_cny": 5.0,
+      "mode": "gross",
+      "rate": 0.00025
+    },
+    "exchanges": [
+      {
+        "exchange": "shanghai",
+        "handling_rate": 3.41e-05,
+        "regulatory_rate": 2e-05,
+        "sell_stamp_rate": 0.0005,
+        "transfer_rate": 1e-05
+      },
+      {
+        "exchange": "shenzhen",
+        "handling_rate": 3.41e-05,
+        "regulatory_rate": 2e-05,
+        "sell_stamp_rate": 0.0005,
+        "transfer_rate": 1e-05
+      },
+      {
+        "exchange": "beijing",
+        "handling_rate": 0.000125,
+        "regulatory_rate": 2e-05,
+        "sell_stamp_rate": 0.0005,
+        "transfer_rate": 1e-05
+      }
+    ],
+    "preset_id": "cn-a-share-latest",
+    "schema_version": 1,
+    "sources": [
+      "https://investor.szse.cn/marketServices/deal/payFees/index.html",
+      "https://one.sse.com.cn/onething/gptz/",
+      "https://www.csrc.gov.cn/csrc/c100028/c7426794/content.shtml",
+      "https://www.chinaclear.cn/zdjs/fbzyls/service_tlist.shtml",
+      "https://www.xcsc.com/main/a/20260730/1023018024.shtml",
+      "https://shanghai.chinatax.gov.cn/zcfw/zcfgk/yhs/202308/t468451.html",
+      "https://www.sse.com.cn/lawandrules/sselawsrules2025/stocks/exchange/c/c_20260424_10816482.shtml",
+      "https://investor.szse.cn/lawrules/rule/trade/t20260424_620190.html",
+      "https://www.bse.cn/important_news/200010675.html"
+    ],
+    "verified_on": "2026-10-13"
+  },
+  "initial_cash_cny": 1000000.0,
+  "dividend_withholding_rate": 0.0,
+  "schema_version": 8,
+  "id": "csi300-annual",
+  "name": "沪深300默认年度流程",
+  "factors": "factors/gtja191.json",
+  "target": "targets/csi300.json",
+  "top_n": 50,
+  "rebalance_days": 5,
+  "training": {
+    "early_stopping_rounds": 20,
+    "parameters": {
+      "deterministic": "true",
+      "feature_fraction": "0.8",
+      "force_col_wise": "true",
+      "lambda_l2": "10",
+      "learning_rate": "0.05",
+      "min_data_in_leaf": "200",
+      "num_iterations": "200",
+      "num_leaves": "31",
+      "num_threads": "4",
+      "seed": "17"
+    }
+  }
+}

@@ -43,7 +43,7 @@ const SUPPORTED_RESEARCH_INPUTS: [&str; 15] = [
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// Current strict integer-share research result format.
-pub const RESEARCH_SCHEMA_VERSION: u32 = 11;
+pub const RESEARCH_SCHEMA_VERSION: u32 = 12;
 
 /// A result cannot be interpreted using the current research contract.
 #[derive(Debug, thiserror::Error)]
@@ -138,7 +138,7 @@ pub fn validate_result(
                 Some("completed" | "no_valid_trades")
             )
         {
-            return Err("requires research schema 11 and raw_integer_shares execution".into());
+            return Err("requires research schema 12 and raw_integer_shares execution".into());
         }
         let hash = |value: &serde_json::Value| {
             value.as_str().is_some_and(|s| {
@@ -149,7 +149,10 @@ pub fn validate_result(
         if !hash(&value["signature"])
             || !hash(&value["factor_signature"])
             || !hash(&value["execution"]["corporate_action_sha256"])
-            || value["formula_version"] != analytics_factor::FORMULA_VERSION
+            || value["formula_version"]
+                != analytics_factor::alpha158::version(serde_json::from_value(
+                    value["execution"]["factor_set"].clone(),
+                )?)
             || !matches!(
                 value["input_kind"].as_str(),
                 Some("synthetic_fixture" | "public_market")
@@ -169,6 +172,11 @@ pub fn validate_result(
             serde_json::from_value(execution["quality"].clone())?;
         let admission: analytics_core::admission::AdmissionReport =
             serde_json::from_value(value["admission"].clone())?;
+        let price_basis: analytics_core::research_quality::PriceBasis =
+            serde_json::from_value(execution["price_basis"].clone())?;
+        if admission.price_basis != price_basis {
+            return Err("admission/price basis mismatch".into());
+        }
         if qualification.schema_version != 1
             || qualification.policy != policy
             || admission.policy != policy
@@ -514,6 +522,10 @@ impl ResearchConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResearchRequest {
+    /// Frozen feature family.
+    pub factor_set: analytics_core::research_quality::FactorSet,
+    /// Explicit training source trust policy.
+    pub price_basis: analytics_core::research_quality::PriceBasis,
     /// Frozen completeness and sample policy.
     pub quality_policy: ResearchQualityPolicy,
     /// Rolling/model/portfolio parameters.
@@ -556,6 +568,8 @@ impl ResearchRequest {
     pub fn new(data_root: PathBuf, output: PathBuf) -> Self {
         Self {
             quality_policy: ResearchQualityPolicy::default(),
+            factor_set: Default::default(),
+            price_basis: Default::default(),
             config: ResearchConfig::default(),
             train_only: false,
             reuse_training: None,
@@ -646,7 +660,7 @@ fn adjustment_basis_signature(
 }
 /// Validate current training descriptor on every read; unsupported files are never converted.
 pub fn validate_training_artifact(artifact: &serde_json::Value) -> Result<()> {
-    if artifact["schema_version"] != 1 || artifact["status"] != "trained" {
+    if artifact["schema_version"] != 2 || artifact["status"] != "trained" {
         return Err("unsupported_training_format".into());
     }
     let mut unsigned = artifact.clone();
@@ -663,13 +677,35 @@ pub fn validate_training_artifact(artifact: &serde_json::Value) -> Result<()> {
     {
         return Err("training_artifact_damaged".into());
     }
-    if artifact["formula_version"] != analytics_factor::FORMULA_VERSION
+    if artifact["formula_version"]
+        != analytics_factor::alpha158::version(serde_json::from_value(
+            artifact["factor_set"].clone(),
+        )?)
         || artifact["feature_order"]
             .as_array()
             .is_none_or(|ids| ids.is_empty() || ids.iter().any(|id| id.as_str().is_none()))
         || artifact["models"].as_array().is_none_or(Vec::is_empty)
     {
         return Err("training_artifact_damaged".into());
+    }
+    let request: ResearchRequest = serde_json::from_value(artifact["request"].clone())?;
+    let family = serde_json::from_value::<analytics_core::research_quality::FactorSet>(
+        artifact["factor_set"].clone(),
+    )?;
+    let basis = serde_json::from_value::<analytics_core::research_quality::PriceBasis>(
+        artifact["price_basis"].clone(),
+    )?;
+    let features: Vec<String> = serde_json::from_value(artifact["feature_order"].clone())?;
+    let registry = FactorRegistry::for_set(family);
+    let mut seen = BTreeSet::new();
+    if family != request.factor_set
+        || basis != request.price_basis
+        || features != request.config.factor_ids
+        || features
+            .iter()
+            .any(|id| !seen.insert(id) || registry.get(id).is_none())
+    {
+        return Err("training_artifact_family_or_order_mismatch".into());
     }
     Ok(())
 }
@@ -698,7 +734,9 @@ pub fn backtest_from_training_with_data(
         request.data_root = root.to_owned();
     }
     let dataset = DailyDataset::open(&request.data_root)?;
-    let folds = request.schedule.resolve(&dataset.calendar)?;
+    let folds = request
+        .schedule
+        .resolve_with_warmup(&dataset.calendar, request.factor_set.warmup_sessions())?;
     let models = artifact["models"]
         .as_array()
         .ok_or("missing trained models")?;
@@ -724,7 +762,10 @@ pub fn backtest_from_training_with_data(
         .max()
         .unwrap();
     let book = analytics_storage::corporate_actions::ActionBundle::read(actions)?;
-    if artifact["adjustment_basis_signature"] != adjustment_basis_signature(Some(&book), lo, hi)? {
+    if request.price_basis == analytics_core::research_quality::PriceBasis::Verified
+        && artifact["adjustment_basis_signature"]
+            != adjustment_basis_signature(Some(&book), lo, hi)?
+    {
         return Err("training_price_basis_changed: retraining required".into());
     }
     request.output = output.to_owned();
@@ -792,12 +833,22 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         return Err("cannot mix synthetic and public company actions/market data".into());
     }
     let mut dataset = DailyDataset::open(&request.data_root)?;
+    if request.price_basis == analytics_core::research_quality::PriceBasis::Provider
+        && !dataset.supports_provider_training()
+    {
+        return Err(
+            "unsupported_provider_price_basis: registered Qlib research quotations required".into(),
+        );
+    }
     let mut pool = match &request.pool {
         Some(p) => p.clone(),
         None => dataset.pool(&request.universe_id)?,
     };
     let last = dataset.calendar.last().copied().ok_or("empty calendar")?;
-    let folds = match request.schedule.resolve(&dataset.calendar) {
+    let folds = match request
+        .schedule
+        .resolve_with_warmup(&dataset.calendar, request.factor_set.warmup_sessions())
+    {
         Ok(f) => f,
         Err(e) => {
             save(
@@ -827,7 +878,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
     let history_index = dataset
         .calendar
         .partition_point(|d| *d < history_start)
-        .saturating_sub(756);
+        .saturating_sub(request.factor_set.warmup_sessions());
     let relevant_start = dataset.calendar[history_index];
     dataset.restrict_reads(DateRange {
         start: relevant_start,
@@ -837,7 +888,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         ranges.retain(|r| r.end >= relevant_start && r.start <= needed_end);
         !ranges.is_empty()
     });
-    let registry = FactorRegistry::default();
+    let registry = FactorRegistry::for_set(request.factor_set);
     let quality_snapshot = quality::qualify_with_registry(
         &dataset,
         &pool,
@@ -995,7 +1046,9 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
     {
         admission_issues.push("no eligible labeled training/validation rows".into());
     }
-    if !adjustment_issues.is_empty() {
+    if !adjustment_issues.is_empty()
+        && request.price_basis == analytics_core::research_quality::PriceBasis::Verified
+    {
         admission_issues
             .push("historical coefficient/company-action mismatch; see adjustment_issues".into());
     }
@@ -1005,7 +1058,8 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
     }
     use analytics_core::admission::{AdmissionCheck, AdmissionReport, CheckStatus};
     let mut admission = AdmissionReport {
-        schema_version: 4,
+        price_basis: request.price_basis,
+        schema_version: 5,
         policy: request.quality_policy.clone(),
         decisions: quality_snapshot.decisions.clone(),
         checks: Vec::new(),
@@ -1156,6 +1210,43 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
             }
         }
     }
+    for check in &mut admission.checks {
+        if matches!(
+            check.category.as_str(),
+            "settlement" | "successor" | "account_events"
+        ) {
+            check.status = CheckStatus::NotRun;
+            check.kind = analytics_core::research_quality::ProblemKind::ExecutionDependency;
+            check.disposition = analytics_core::research_quality::ProblemDisposition::Warn;
+            check.code = "account_path_not_run".into();
+            check.message =
+                "checked on actual orders, holdings and entitlements; not a training dependency"
+                    .into();
+        }
+    }
+    if request.price_basis == analytics_core::research_quality::PriceBasis::Provider {
+        for check in &mut admission.checks {
+            if check.category == "historical_events" && check.status != CheckStatus::Passed {
+                check.disposition = analytics_core::research_quality::ProblemDisposition::Warn;
+                check.code = "provider_adjustment_unreconciled".into();
+            }
+        }
+    }
+    admission.checks.push(AdmissionCheck {
+        kind: ProblemKind::ExecutionDependency,
+        disposition: ProblemDisposition::Warn,
+        category: "account_events".into(),
+        security: None,
+        coverage: Some(DateRange {
+            start: folds.first().unwrap().actual.test.start,
+            end: folds.last().unwrap().actual.test.end,
+        }),
+        status: CheckStatus::NotRun,
+        code: "account_path_not_run".into(),
+        message: "尚未检查实际账户路径；订单、持仓和权益资料在回测执行时核验".into(),
+        evidence: vec![],
+        affected_factors: vec![],
+    });
     admission.checks.push(AdmissionCheck {
         kind: ProblemKind::Missing,
         disposition: ProblemDisposition::Block,
@@ -1191,7 +1282,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
             };
         save(
             request.output.join("execution_readiness.json"),
-            &serde_json::json!({"schema_version":4,"quality":quality_snapshot,"admission":admission,"ready":false,"reason":admission_issues.join("; "),"issues":admission_issues,"required_start":first_required,"pool_coverage":pool.coverage,"verified_raw_prices":dataset.has_raw_prices(),"market_issues":market_issues,"factor_basis_issues":factor_basis_issues,"adjustment_issues":adjustment_issues,"settlement_issues":settlement_issues,"successor_issues":successor_issues,"checks":{"schedule":"passed","membership":if pool_problem.is_some(){"failed"}else{"passed"},"factor_basis":if factor_basis_issues.is_empty(){"passed"}else{"failed"},"historical_events":if action_book.is_none(){"not_run"}else if adjustment_issues.is_empty(){"passed"}else{"failed"},"account_events":"not_run","benchmark":if benchmark_check.is_ok(){"passed"}else{"failed"}},"resolved_folds":folds,"sample_readiness":sample_readiness,"affected_factor_ids":affected_factor_ids}),
+            &serde_json::json!({"schema_version":5,"quality":quality_snapshot,"admission":admission,"ready":false,"reason":admission_issues.join("; "),"issues":admission_issues,"required_start":first_required,"pool_coverage":pool.coverage,"verified_raw_prices":dataset.has_raw_prices(),"market_issues":market_issues,"factor_basis_issues":factor_basis_issues,"adjustment_issues":adjustment_issues,"settlement_issues":settlement_issues,"successor_issues":successor_issues,"checks":{"schedule":"passed","membership":if pool_problem.is_some(){"failed"}else{"passed"},"factor_basis":if factor_basis_issues.is_empty(){"passed"}else{"failed"},"historical_events":if action_book.is_none(){"not_run"}else if adjustment_issues.is_empty(){"passed"}else{"failed"},"account_events":"not_run","benchmark":if benchmark_check.is_ok(){"passed"}else{"failed"}},"resolved_folds":folds,"sample_readiness":sample_readiness,"affected_factor_ids":affected_factor_ids}),
         )?;
         return if request.audit_only {
             Ok(())
@@ -1263,13 +1354,20 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
             &request.pool_signature,
             &request.benchmark,
             &price_inputs,
+            &request.price_basis,
+            &request.factor_set,
             &quality_snapshot,
-            "open-next-2,pit-mask,warmup756,explicit-price-input-v2"
+            request.factor_set.warmup_sessions(),
+            "open-next-2,pit-mask,explicit-or-provider-price-input-v3"
         ))?)
     );
     let historical_basis_signature =
-        adjustment_basis_signature(action_book.as_ref(), relevant_start, needed_end)?;
-    let mut execution = serde_json::json!({"mode":"raw_integer_shares",
+        if request.price_basis == analytics_core::research_quality::PriceBasis::Verified {
+            adjustment_basis_signature(action_book.as_ref(), relevant_start, needed_end)?
+        } else {
+            "provider-quotations;events-not-training-input".into()
+        };
+    let mut execution = serde_json::json!({"mode":"raw_integer_shares","factor_set":request.factor_set,"price_basis":request.price_basis,
         "quality_policy":request.quality_policy,"quality":quality_snapshot,"quality_sha256":format!("sha256:{:x}",Sha256::digest(serde_json::to_vec(&quality_snapshot)?)),
         "fee_application":"latest_only_for_all_dates", "market_rules":request.market_rules, "initial_cash_cny":request.initial_cash_cny,
         "price_limit_buffer":0.005,
@@ -1302,7 +1400,14 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
     }
     save(
         request.output.join("factor_audit.json"),
-        &analytics_factor::audit::entries(),
+        &if matches!(
+            request.factor_set,
+            analytics_core::research_quality::FactorSet::Gtja191
+        ) {
+            serde_json::to_value(analytics_factor::audit::entries())?
+        } else {
+            serde_json::to_value(registry.all().collect::<Vec<_>>())?
+        },
     )?;
     save(request.output.join("execution.json"), &execution)?;
     let coverage:Vec<_>=folds.iter().map(|f|serde_json::json!({"requested":f.requested,"actual":f.actual,"warmup_start":f.warmup_start,"warmup_sessions":f.warmup_sessions,"pool_coverage_start":pool.coverage.start,"unknown_cross_section_before":pool.coverage.start})).collect();
@@ -1328,6 +1433,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
                 dataset: &dataset,
                 members: &members,
                 benchmark: &request.benchmark,
+                universe_id: &request.universe_id,
                 pool_start: pool.coverage.start,
                 allow_missing: request.quality_policy.strictness
                     != analytics_core::research_quality::ResearchStrictness::Strict,
@@ -1490,10 +1596,10 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         };
     }
     save(request.output.join("admission.json"), &admission)?;
-    if !feature_issues.is_empty() {
+    if !feature_issues.is_empty() || !admission.ready() {
         save(
             request.output.join("execution_readiness.json"),
-            &serde_json::json!({"schema_version":4,"admission":admission,"quality":quality_snapshot,"sample_selection":execution["sample_selection"],"ready":false,"reason":"factor/sample eligibility failed before training","feature_issues":feature_issues,"resolved_folds":folds}),
+            &serde_json::json!({"schema_version":5,"admission":admission,"quality":quality_snapshot,"sample_selection":execution["sample_selection"],"ready":false,"reason":"factor/sample eligibility failed before training","feature_issues":feature_issues,"resolved_folds":folds}),
         )?;
         return if request.audit_only {
             Ok(())
@@ -1504,7 +1610,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
     if request.audit_only {
         save(
             request.output.join("execution_readiness.json"),
-            &serde_json::json!({"schema_version":4,"ready":admission.ready(),"quality":quality_snapshot,"sample_selection":execution["sample_selection"],"admission":admission,"resolved_folds":folds,"sample_readiness":sample_readiness,"backtest_checks":{"status":"not_run","reason":"账户检查在实际订单、持仓和权益执行时进行"}}),
+            &serde_json::json!({"schema_version":5,"ready":admission.ready(),"quality":quality_snapshot,"sample_selection":execution["sample_selection"],"admission":admission,"resolved_folds":folds,"sample_readiness":sample_readiness,"backtest_checks":{"status":"not_run","reason":"账户检查在实际订单、持仓和权益执行时进行"}}),
         )?;
         return Ok(());
     }
@@ -1675,7 +1781,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
             Err(e) => {
                 save(
                     request.output.join("execution_readiness.json"),
-                    &serde_json::json!({"schema_version":4,"ready":false,"training_complete":true,"backtest_complete":false,"reason":e.to_string(),"completed_fold_reports":reports}),
+                    &serde_json::json!({"schema_version":5,"ready":false,"training_complete":true,"backtest_complete":false,"reason":e.to_string(),"completed_fold_reports":reports}),
                 )?;
                 return Err(e);
             }
@@ -1743,7 +1849,16 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         let mut original = training_source_request;
         original.train_only = false;
         original.reuse_training = None;
-        let mut training = serde_json::json!({"schema_version":1,"status":"trained","request":original,"factor_signature":signature,"models":models,"adjustment_basis_signature":adjustment_basis_signature(action_book.as_ref(),relevant_start,needed_end)?,"training_signature":training_signature,"source_map":dataset.source_map(),"resolved_folds":folds,"formula_version":formula_version,"feature_order":ids});
+        let mut training = serde_json::json!({"schema_version":2,"factor_set":request.factor_set,"price_basis":request.price_basis,"status":"trained","request":original,"factor_signature":signature,"models":models,"adjustment_basis_signature":historical_basis_signature,"training_signature":training_signature,"source_map":dataset.source_map(),"resolved_folds":folds,"formula_version":formula_version,"feature_order":ids});
+        training["source_warnings"] = serde_json::to_value(
+            admission
+                .checks
+                .iter()
+                .filter(|c| c.disposition == ProblemDisposition::Warn)
+                .collect::<Vec<_>>(),
+        )?;
+        training["admission_report"] = serde_json::json!("admission.json");
+        training["sample_selection"] = execution["sample_selection"].clone();
         training["artifact_signature"] = serde_json::json!(format!(
             "sha256:{:x}",
             Sha256::digest(serde_json::to_vec(&training)?)

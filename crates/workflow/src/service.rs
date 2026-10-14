@@ -26,7 +26,7 @@ use std::{
 };
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TaskRequest {
@@ -314,7 +314,7 @@ impl Server {
                     TaskRequest::Workflow { request } => crate::snapshot(&self.workspace, request)
                         .map_err(|e| ServiceError::new("invalid_request", e))?,
                     _ => {
-                        json!({"request":request,"app_version":env!("CARGO_PKG_VERSION"),"formula_version":analytics_factor::FORMULA_VERSION})
+                        json!({"request":request,"app_version":env!("CARGO_PKG_VERSION"),"formula_version":match &request { TaskRequest::Pipeline {request} => analytics_factor::alpha158::version(request.factor_set), _=>analytics_factor::FORMULA_VERSION }})
                     }
                 };
                 let record = self

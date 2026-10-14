@@ -43,7 +43,9 @@ pub struct AdmissionCheck {
 /// Complete admission decision; an empty checklist cannot permit training.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdmissionReport {
-    /// Current admission report format, 3.
+    /// Training source trust; warnings never relax account execution.
+    pub price_basis: crate::research_quality::PriceBasis,
+    /// Current admission report format, 5.
     pub schema_version: u32,
     /// Actual frozen execution policy.
     pub policy: ResearchQualityPolicy,
@@ -53,15 +55,16 @@ pub struct AdmissionReport {
     pub checks: Vec<AdmissionCheck>,
 }
 impl AdmissionReport {
-    /// True only when all checks ran and every failure has policy-permitted missing-data handling.
+    /// Ready only when failures have explicit policy handling; warnings preserve not-run facts.
     pub fn ready(&self) -> bool {
-        self.schema_version == 4
+        self.schema_version == 5
             && !self.checks.is_empty()
             && self.policy.validate().is_ok()
             && self.decisions.iter().all(|d| {
                 d.kind == ProblemKind::Missing
                     && match d.disposition {
                         ProblemDisposition::Block => false,
+                        ProblemDisposition::Warn => false,
                         ProblemDisposition::KeepNull => self.policy.allows_missing(),
                         ProblemDisposition::ExcludeSample => {
                             self.policy.strictness
@@ -75,6 +78,18 @@ impl AdmissionReport {
             })
             && self.checks.iter().all(|c| {
                 c.status == CheckStatus::Passed
+                    || (c.status == CheckStatus::NotRun
+                        && c.kind == ProblemKind::ExecutionDependency
+                        && c.disposition == ProblemDisposition::Warn
+                        && matches!(
+                            c.category.as_str(),
+                            "settlement" | "successor" | "account_events"
+                        ))
+                    || (self.price_basis == crate::research_quality::PriceBasis::Provider
+                        && c.disposition == ProblemDisposition::Warn
+                        && c.category == "historical_events"
+                        && c.kind == ProblemKind::ExecutionDependency
+                        && c.code == "provider_adjustment_unreconciled")
                     || (c.status == CheckStatus::Failed
                         && c.kind == ProblemKind::Missing
                         && c.disposition == ProblemDisposition::KeepNull
@@ -88,7 +103,8 @@ mod tests {
     #[test]
     fn skipped_failed_and_empty_checks_never_authorize_training() {
         let mut r = AdmissionReport {
-            schema_version: 4,
+            price_basis: Default::default(),
+            schema_version: 5,
             policy: ResearchQualityPolicy::default(),
             decisions: vec![],
             checks: vec![],
@@ -115,7 +131,8 @@ mod tests {
     #[test]
     fn only_genuine_missing_features_can_be_nonblocking_and_not_run_never_passes() {
         let mut r = AdmissionReport {
-            schema_version: 4,
+            price_basis: Default::default(),
+            schema_version: 5,
             policy: ResearchQualityPolicy {
                 strictness: crate::research_quality::ResearchStrictness::AllowMissing,
                 ..Default::default()
@@ -145,5 +162,43 @@ mod tests {
         r.checks[0].status = CheckStatus::Failed;
         r.policy.strictness = crate::research_quality::ResearchStrictness::Strict;
         assert!(!r.ready());
+    }
+}
+
+#[cfg(test)]
+mod source_warning_tests {
+    use super::*;
+    #[test]
+    fn provider_warnings_cannot_release_conflicting_or_damaged_sources() {
+        let mut report = AdmissionReport {
+            schema_version: 5,
+            price_basis: crate::research_quality::PriceBasis::Provider,
+            policy: Default::default(),
+            decisions: vec![],
+            checks: vec![AdmissionCheck {
+                kind: ProblemKind::ExecutionDependency,
+                disposition: ProblemDisposition::Warn,
+                category: "historical_events".into(),
+                security: None,
+                coverage: None,
+                status: CheckStatus::NotRun,
+                code: "provider_adjustment_unreconciled".into(),
+                message: "event reconciliation not performed".into(),
+                evidence: vec![],
+                affected_factors: vec![],
+            }],
+        };
+        assert!(report.ready());
+        for kind in [
+            ProblemKind::Damaged,
+            ProblemKind::Conflict,
+            ProblemKind::Missing,
+        ] {
+            report.checks[0].kind = kind;
+            assert!(!report.ready());
+        }
+        report.checks[0].kind = ProblemKind::ExecutionDependency;
+        report.price_basis = crate::research_quality::PriceBasis::Verified;
+        assert!(!report.ready());
     }
 }

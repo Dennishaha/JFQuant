@@ -496,6 +496,7 @@ mod tests {
                 WorkerCommand::RunPipeline {
                     task: pipeline,
                     request: PipelineRequest {
+                        factor_set: Default::default(),
                         market_path: dir.path().join("missing-market.parquet"),
                         universe_path: dir.path().join("missing-universe.parquet"),
                         universe_id: "test".into(),
@@ -809,6 +810,7 @@ mod tests {
                 task,
                 cancel,
                 request: PipelineRequest {
+                    factor_set: Default::default(),
                     market_path: dir.path().join("missing"),
                     universe_path: dir.path().join("missing"),
                     universe_id: "test".into(),
@@ -923,6 +925,7 @@ mod tests {
                 task,
                 cancel: analytics_ml::pipeline::cancellation(),
                 request: PipelineRequest {
+                    factor_set: Default::default(),
                     market_path: market,
                     universe_path: universe,
                     universe_id: "test".into(),

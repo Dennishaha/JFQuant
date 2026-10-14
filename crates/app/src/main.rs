@@ -9,6 +9,8 @@
 
 mod panels;
 mod platform;
+mod quality_ui;
+mod schedule_ui;
 mod state;
 mod theme;
 mod worker;

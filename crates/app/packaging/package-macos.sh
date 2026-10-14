@@ -7,6 +7,7 @@ package_root="$repo_root/target/package-macos14"
 bundle_root="$repo_root/target/distribution"
 app="$bundle_root/JFQuant.app"
 [ "$(uname -m)" = arm64 ] || { echo 'Apple Silicon build host required'; exit 1; }
+"$repo_root/crates/app/packaging/build-collector.sh"
 [ -f "$native_root/install/lib/lib_lightgbm.dylib" ] || "$repo_root/crates/app/packaging/build-native.sh"
 export MACOSX_DEPLOYMENT_TARGET=14.0
 export LIGHTGBM_LIB_DIR="$native_root/install/lib"
@@ -20,6 +21,11 @@ mkdir -p "$bundle_root"
 if [ -d "$app" ]; then rm -rf "$app"; fi
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Frameworks" "$app/Contents/Resources/Licenses"
 cp "$package_root/release/analytics-desktop" "$package_root/release/jfquant" "$app/Contents/MacOS/"
+cp -R "$repo_root/target/collector-build/python" "$app/Contents/Resources/python"
+"$app/Contents/Resources/python/bin/python3" -I -B "$repo_root/crates/app/packaging/rewrite-python.py" "$app/Contents/Resources/python"
+"$app/Contents/Resources/python/bin/python3" -I -B "$repo_root/crates/app/packaging/verify-python.py" "$app/Contents/Resources/python"
+"$app/Contents/Resources/python/bin/python3" -I -B "$repo_root/crates/app/packaging/collect-python-licenses.py" "$app/Contents/Resources/Licenses/PythonPackages"
+cp "$app/Contents/Resources/python/lib/python3.12/LICENSE.txt" "$app/Contents/Resources/Licenses/CPython.txt"
 cp "$repo_root/crates/app/packaging/Info.plist" "$app/Contents/Info.plist"
 cp "$package_root/release/deps/libduckdb.dylib" "$app/Contents/Frameworks/"
 cp "$native_root/install/lib/lib_lightgbm.dylib" "$native_root/install/lib/libomp.dylib" "$app/Contents/Frameworks/"
@@ -43,6 +49,10 @@ for binary in "$app/Contents/MacOS/"* "$app/Contents/Frameworks/"*.dylib; do
 done
 "$repo_root/crates/app/packaging/verify-bundle.sh" "$app"
 for binary in "$app/Contents/Frameworks/"*.dylib; do codesign --force --sign - "$binary"; done
+# Sign all Python Mach-O objects before signing the enclosing bundle.
+while IFS= read -r -d '' binary; do
+  if file -b "$binary" | grep -q 'Mach-O'; then codesign --force --sign - "$binary"; fi
+done < <(find "$app/Contents/Resources/python" -type f -print0)
 codesign --force --sign - "$app/Contents/MacOS/jfquant"
 codesign --force --sign - "$app"
 codesign --verify --deep --strict "$app"

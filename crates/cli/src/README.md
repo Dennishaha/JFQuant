@@ -13,7 +13,7 @@ flowchart TD
   ARGS["命令参数"] --> PARSE["clap: 参数类型、冲突与必填检查"]
   PARSE --> HELP["help / version：文本直接返回"]
   PARSE --> WS["workspace 参数、环境变量或 App 偏好"]
-  WS --> CLIENT["Client.ensure：协议 2 服务"]
+  WS --> CLIENT["Client.ensure：协议 7 服务"]
   CLIENT --> CONTROL["状态、日志、模板与结果 RPC"]
   CLIENT --> REQ["标准 TaskRequest 或完整 JSON 请求"]
   REQ --> SUB["后台先落盘再返回 task_id"]
@@ -50,3 +50,68 @@ cargo clippy -p analytics-cli --all-targets -- -D warnings
 ```
 
 新增命令要验证转换后请求与 App 公共请求一致、JSON 可机器解析、错误码和退出码稳定；异步命令不要自己创建任务记录或实现业务循环。查询后续页必须携带 `query_id` 和原 cursor，不能从显示列重构游标。
+
+## 动态股票池与 Python 采集接口
+
+当前模板schema 5、研究结果schema 9、服务协议7；公式仍为v4。模板增加 `pool_version`、`benchmark` 和 `pool_exit_policy`；默认 `builtin:csi500` / `SH000905`，沪深300模板使用 `builtin:csi300` / `SH000300`。自选和集合组合引用不可变pool版本，冻结成员区间、人工日期调整及输入哈希；模型manifest和缓存签名包含这些研究输入。原schema结果明确拒绝，历史状态和日志仍可查看，不转换旧文件。
+
+```mermaid
+flowchart LR
+  CLIENT["App / jfquant"] --> SERVICE["协议7公共服务"]
+  SERVICE --> POOL["保存/预览不可变股票池"]
+  SERVICE --> COLLECT["Rust监督内置Python双源采集"]
+  COLLECT --> SNAPSHOT["验证后的Parquet版本与公司行动候选"]
+  POOL --> FREEZE["模板5：池、基准、退出策略、签名"]
+  SNAPSHOT --> READY["原价、历史覆盖、公司行动准入"]
+  QLIB["现有Qlib读取器"] --> READY
+  FREEZE --> READY
+  READY --> RESEARCH["统一日行情、年度模型、持续整数股账户"]
+  RESEARCH --> RESULT["结果9：成员变化、退出/阻碍、账本、费用"]
+```
+
+`pools create/validate/import/export/list/versions/preview` 使用公共定义及解析器；`data collect --provider akshare|yfinance --kind market|actions` 提交后台任务，使用 jobs wait 显式等待。`run --request` 可提交完整公共请求。App提供来源、采集日期/证券、股票池JSON编辑、日期预览、退出策略及失败采集恢复按钮。包内Python和依赖只用于采集，不需要外部Python；日常操作不调用Cargo。
+
+```bash
+jfquant templates default --universe csi300 --output csi300-template.json
+jfquant pools validate --definition pool.json
+jfquant pools create --definition pool.json
+jfquant pools preview pool-0123456789abcdef --market market-0123456789abcdef --date 2026-10-12
+jfquant data collect --provider akshare --start 2004-01-01 --end 2026-10-13 --instruments SH600000,SZ000001,SH000300 --benchmarks SH000300
+jfquant data collect --kind actions --provider akshare --start 2004-01-01 --end 2026-10-13 --instruments SH600000,SZ000001
+jfquant research demo-parquet
+```
+
+示例ID须换为实际版本。下载可恢复验证过的证券；重新提交时参数必须与owner一致。临时/缺失输入不会自动换源、补字段或启动训练。原价撮合不使用Yahoo拆股调整价；缺支付/上市日期或指数历史成员仍阻止研究。2010样本外的5+1窗口需要2004—2009完整历史池及行情，不能以当前成分回填。
+
+开发验收先运行 `crates/app/packaging/build-collector.sh`，再执行workspace nextest、严格Clippy/Rustdoc和格式检查。解释器、依赖、数据、模型、缓存、日志、运行记录及DMG均留在忽略目录。另一台Apple Silicon/macOS14实机验收待完成。
+
+clap CollectionAdjustment解析sina-hfq/none，转换为storage AdjustmentSource后由公共请求验证；AKShare默认sina_hfq，Yahoo默认none，JSON完整请求不补旧格式缺失字段。CLI不自行计算研究价量或对账。
+
+## 日期参数转换
+
+DateOptions仅在clap层，将train/validation/test任意日期、step/step-unit/expanding/until或--schedule JSON转换成同一Schedule；业务边界、日期日历和标签规则在core/workflow/ML。Research的preview/prepare-data/check/run共享转换，data inspect-actions/revise-actions只包装公共请求，不另建采集或账本。CLI测试验证缺参数退出2、日期请求一致、无验证集研究及持久化结果。
+
+## 为什么需要本组件
+
+限制命令解析层的业务职责。clap只承担帮助、参数和基础校验。证券身份、来源绑定、日期日程、准入与研究执行调用公共模块；代码复用防止CLI与界面对同一模板得出不同结果。
+
+设计依据：2026-10-14接受的证券身份与完整准入计划、组件接口及测试。未在代码或证据中确认的历史取舍不推定为既有设计理由；来源、法规或数据格式变化时重新评估。
+
+## 三级研究模式：为什么允许筛选
+
+决定日期2026-10-14，依据是用户接受的三级模式计划。正常预热空值、来源缺失和错误数据是不同问题：全部拒绝会浪费可用样本，全部放行又会混淆因子和真实权益。默认严格检查；另外提供“允许部分数据缺失”和“只用数据合格的股票”。模式是研究输入的一部分，不能作为训练失败后自动切换的兜底。
+
+第二档保持原成员，纯缺失传播null；第三档派生每日合格成员，不改原始成员或证据。不能看到后来缺价而倒删早期股票。账户仍采用原价、整数股、T+1和连续权益；未裁定冲突、损坏、基准缺项及剩余必要依赖仍阻断。默认有效因子比例0表示至少一项有效，最低有标签样本1只表示可执行，不表示样本在统计上充分。所选因子整列无有效值不会被自动删除。
+
+QualityOptions/StrictnessValue仅负责clap解析，research_template把覆盖值写入公共ResearchQualityPolicy再调用业务校验。preview/check/run和prepare-data共用同一路径，不能在CLI层把失败变成成功。stdout继续只输出JSON，帮助文本展示三个稳定枚举；查看原因通过jobs results。协议7、模板5、结果9，旧格式无回退。
+
+```mermaid
+flowchart LR
+  P[模式与门槛] --> C[结构化数据检查]
+  C --> U[原股票池或每日合格池]
+  U --> F[因子与nullable输入]
+  F --> M[按折样本掩码]
+  M --> G[剩余依赖与账户门禁]
+  G -->|通过| T[冻结签名后训练]
+  G -->|未通过| E[原因及处理清单]
+```

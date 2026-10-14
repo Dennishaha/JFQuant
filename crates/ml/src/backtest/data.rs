@@ -11,7 +11,7 @@ pub(super) struct Sample {
     pub day: usize,
     pub instrument: String,
     pub label: Option<f64>,
-    pub exit_year: i32,
+    pub label_end: Option<Date>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -54,29 +54,227 @@ pub(super) fn load_year(cache: &Path, year: i32, ids: &[String]) -> Result<YearD
         .collect();
     Ok(YearData { meta, features })
 }
-pub(super) fn append_matrix(
+pub(super) fn empty_matrix(columns: usize) -> DenseMatrix {
+    DenseMatrix {
+        features: Vec::new(),
+        labels: Vec::new(),
+        rows: 0,
+        columns,
+    }
+}
+pub(super) fn prediction_range(
     cache: &Path,
-    year: i32,
+    range: &DateRange,
     ids: &[String],
-    matrix: &mut DenseMatrix,
-    last_year: i32,
-) -> Result<()> {
-    let data = load_year(cache, year, ids)?;
+    calendar: &[Date],
+) -> Result<YearData> {
+    let mut rows = Vec::new();
+    let mut features = Vec::new();
+    for year in range.start.year()..=range.end.year() {
+        let data = load_year(cache, year, ids)?;
+        for (mut row, values) in data
+            .meta
+            .rows
+            .into_iter()
+            .zip(data.features.chunks_exact(ids.len()))
+        {
+            if calendar[row.day] >= range.start && calendar[row.day] <= range.end {
+                if row.label_end.is_none_or(|d| d > range.end) {
+                    row.label = None;
+                }
+                rows.push(row);
+                features.extend_from_slice(values);
+            }
+        }
+    }
+    Ok(YearData {
+        meta: YearMeta {
+            signature: String::new(),
+            factor_ids: ids.to_vec(),
+            rows,
+            finite_counts: BTreeMap::new(),
+        },
+        features,
+    })
+}
+#[cfg(test)]
+pub(super) fn matrix_range(
+    cache: &Path,
+    range: &DateRange,
+    ids: &[String],
+    calendar: &[Date],
+) -> Result<DenseMatrix> {
+    Ok(matrix_range_with_policy(
+        cache,
+        range,
+        ids,
+        calendar,
+        &ResearchQualityPolicy::default(),
+    )?
+    .matrix)
+}
+
+pub(super) struct SelectionMask {
+    pub row_mask: Vec<bool>,
+    pub row_order_sha256: String,
+    pub excluded: Vec<analytics_core::research_quality::QualityDecision>,
+    pub retained_rows: usize,
+}
+pub(super) struct MatrixSelection {
+    pub matrix: DenseMatrix,
+    pub mask: SelectionMask,
+}
+fn selection_mask(
+    data: &YearData,
+    range: &DateRange,
+    ids: &[String],
+    calendar: &[Date],
+    policy: &ResearchQualityPolicy,
+    require_labels: bool,
+) -> Result<SelectionMask> {
+    let row_order_sha256 = format!(
+        "sha256:{:x}",
+        Sha256::digest(serde_json::to_vec(
+            &data
+                .meta
+                .rows
+                .iter()
+                .map(|r| (r.day, &r.instrument))
+                .collect::<Vec<_>>()
+        )?)
+    );
+    let mut row_mask = Vec::new();
+    let mut excluded = Vec::new();
     for (row, values) in data
         .meta
         .rows
         .iter()
         .zip(data.features.chunks_exact(ids.len()))
     {
-        if let Some(label) = row.label
-            && row.exit_year <= last_year
+        let features =
+            policy.accepts_features(values.iter().filter(|v| v.is_finite()).count(), ids.len());
+        let labeled = !require_labels
+            || (row.label.is_some() && row.label_end.is_some_and(|d| d <= range.end));
+        row_mask.push(features && labeled);
+        if policy.strictness != analytics_core::research_quality::ResearchStrictness::Strict
+            && (!features || !labeled)
         {
+            excluded.push(analytics_core::research_quality::QualityDecision {
+                security: row.instrument.clone(),
+                coverage: DateRange {
+                    start: calendar[row.day],
+                    end: calendar[row.day],
+                },
+                code: if !labeled {
+                    "label_missing_or_outside_split"
+                } else {
+                    "insufficient_finite_features"
+                }
+                .into(),
+                kind: ProblemKind::Missing,
+                disposition: ProblemDisposition::ExcludeSample,
+                message: if !labeled {
+                    "缺少有效标签或标签越过截止日期"
+                } else {
+                    "有效因子数量不足"
+                }
+                .into(),
+                evidence: vec![row_order_sha256.clone()],
+                affected_factors: ids.to_vec(),
+            });
+        }
+    }
+    excluded.sort_by_key(|d| (d.security.clone(), d.code.clone(), d.coverage.start));
+    let mut compressed: Vec<analytics_core::research_quality::QualityDecision> = Vec::new();
+    for decision in excluded {
+        if let Some(last) = compressed.last_mut()
+            && last.security == decision.security
+            && last.code == decision.code
+            && calendar
+                .binary_search(&last.coverage.end)
+                .ok()
+                .zip(calendar.binary_search(&decision.coverage.start).ok())
+                .is_some_and(|(a, b)| a + 1 == b)
+        {
+            last.coverage.end = decision.coverage.end;
+        } else {
+            compressed.push(decision);
+        }
+    }
+    Ok(SelectionMask {
+        retained_rows: row_mask.iter().filter(|v| **v).count(),
+        row_mask,
+        row_order_sha256,
+        excluded: compressed,
+    })
+}
+pub(super) fn prediction_mask(
+    cache: &Path,
+    range: &DateRange,
+    ids: &[String],
+    calendar: &[Date],
+    policy: &ResearchQualityPolicy,
+) -> Result<SelectionMask> {
+    selection_mask(
+        &prediction_range(cache, range, ids, calendar)?,
+        range,
+        ids,
+        calendar,
+        policy,
+        false,
+    )
+}
+pub(super) fn prediction_range_with_policy(
+    cache: &Path,
+    range: &DateRange,
+    ids: &[String],
+    calendar: &[Date],
+    policy: &ResearchQualityPolicy,
+) -> Result<YearData> {
+    let mut data = prediction_range(cache, range, ids, calendar)?;
+    let mask = selection_mask(&data, range, ids, calendar, policy, false)?;
+    let mut rows = Vec::new();
+    let mut features = Vec::new();
+    for ((row, values), retain) in data
+        .meta
+        .rows
+        .into_iter()
+        .zip(data.features.chunks_exact(ids.len()))
+        .zip(mask.row_mask)
+    {
+        if retain {
+            rows.push(row);
+            features.extend_from_slice(values);
+        }
+    }
+    data.meta.rows = rows;
+    data.features = features;
+    Ok(data)
+}
+pub(super) fn matrix_range_with_policy(
+    cache: &Path,
+    range: &DateRange,
+    ids: &[String],
+    calendar: &[Date],
+    policy: &ResearchQualityPolicy,
+) -> Result<MatrixSelection> {
+    let data = prediction_range(cache, range, ids, calendar)?;
+    let mask = selection_mask(&data, range, ids, calendar, policy, true)?;
+    let mut matrix = empty_matrix(ids.len());
+    for ((row, values), retain) in data
+        .meta
+        .rows
+        .iter()
+        .zip(data.features.chunks_exact(ids.len()))
+        .zip(&mask.row_mask)
+    {
+        if *retain && let Some(label) = row.label {
             matrix.features.extend(values.iter().map(|v| *v as f64));
             matrix.labels.push(label as f32);
             matrix.rows += 1;
         }
     }
-    Ok(())
+    Ok(MatrixSelection { matrix, mask })
 }
 
 fn field(map: &BTreeMap<&str, DailyField>, name: &str, day: usize) -> Option<f64> {
@@ -103,15 +301,28 @@ fn directional_movements(
     (dtm, dbm)
 }
 
+pub(super) struct YearInputs<'a> {
+    pub dataset: &'a DailyDataset,
+    pub members: &'a BTreeMap<String, Vec<Membership>>,
+    pub benchmark: &'a str,
+    pub pool_start: Date,
+    pub allow_missing: bool,
+}
 pub(super) fn prepare_year(
-    dataset: &QlibDataset,
-    members: &BTreeMap<String, Vec<Membership>>,
+    inputs: YearInputs<'_>,
     registry: &FactorRegistry,
     ids: &[String],
     year: i32,
     cache: &Path,
     signature: &str,
 ) -> Result<()> {
+    let YearInputs {
+        dataset,
+        members,
+        benchmark,
+        pool_start,
+        allow_missing,
+    } = inputs;
     let (meta_path, feature_path) = paths(cache, year);
     if meta_path.exists() && feature_path.exists() {
         let meta = load_meta(cache, year)?;
@@ -127,9 +338,9 @@ pub(super) fn prepare_year(
         return Err(format!("no trading dates in {year}").into());
     }
     let warmup = first.saturating_sub(756);
-    let benchmark_open = dataset.field("SH000905", "open")?;
-    let benchmark_close = dataset.field("SH000905", "close")?;
-    let benchmark_factor = dataset.field("SH000905", "factor")?;
+    let benchmark_open = dataset.field(benchmark, "open")?;
+    let benchmark_close = dataset.field(benchmark, "close")?;
+    let benchmark_factor = dataset.field(benchmark, "factor")?;
     let b_anchor = benchmark_factor
         .values
         .iter()
@@ -174,7 +385,10 @@ pub(super) fn prepare_year(
         for name in [
             "open", "high", "low", "close", "volume", "vwap", "amount", "factor",
         ] {
-            raw.insert(name, dataset.field(instrument, name)?);
+            raw.insert(
+                name,
+                dataset.research_field(instrument, name, allow_missing && name != "factor")?,
+            );
         }
         let anchor = raw["factor"]
             .values
@@ -224,7 +438,11 @@ pub(super) fn prepare_year(
                 dbm,
                 benchmark_close.get(day).map(|v| v / b_anchor),
                 benchmark_open.get(day).map(|v| v / b_anchor),
-                Some(if member { 1.0 } else { 0.0 }),
+                if dataset.calendar[day] < pool_start {
+                    None
+                } else {
+                    Some(if member { 1.0 } else { 0.0 })
+                },
             ];
             for (name, value) in names.into_iter().zip(values) {
                 panel
@@ -233,7 +451,7 @@ pub(super) fn prepare_year(
                     .unwrap()
                     .push(value.filter(|v| v.is_finite()));
             }
-            if day >= first && member && day + 2 < dataset.calendar.len() {
+            if day >= first && member {
                 let label = ratio(p("open", day + 2), p("open", day + 1))
                     .map(|r| r - 1.0)
                     .filter(|v| v.is_finite());
@@ -242,7 +460,7 @@ pub(super) fn prepare_year(
                     day,
                     instrument: instrument.clone(),
                     label,
-                    exit_year: dataset.calendar[day + 2].year(),
+                    label_end: dataset.calendar.get(day + 2).copied(),
                 });
             }
         }
@@ -341,19 +559,19 @@ mod directional_tests {
                     day: 0,
                     instrument: "A".into(),
                     label: Some(0.1),
-                    exit_year: 2020,
+                    label_end: Some("2020-12-31".parse().unwrap()),
                 },
                 Sample {
                     day: 1,
                     instrument: "A".into(),
                     label: Some(0.2),
-                    exit_year: 2021,
+                    label_end: Some("2021-01-02".parse().unwrap()),
                 },
                 Sample {
                     day: 2,
                     instrument: "A".into(),
                     label: None,
-                    exit_year: 2020,
+                    label_end: Some("2020-12-31".parse().unwrap()),
                 },
             ],
             finite_counts: BTreeMap::new(),
@@ -365,13 +583,20 @@ mod directional_tests {
             .flat_map(f32::to_le_bytes)
             .collect();
         fs::write(&bin, &bytes).unwrap();
-        let mut matrix = DenseMatrix {
-            features: Vec::new(),
-            labels: Vec::new(),
-            rows: 0,
-            columns: 2,
-        };
-        append_matrix(dir.path(), 2020, &ids, &mut matrix, 2020).unwrap();
+        let matrix = matrix_range(
+            dir.path(),
+            &DateRange {
+                start: "2020-01-01".parse().unwrap(),
+                end: "2020-12-31".parse().unwrap(),
+            },
+            &ids,
+            &[
+                "2020-01-01".parse().unwrap(),
+                "2020-06-01".parse().unwrap(),
+                "2020-12-31".parse().unwrap(),
+            ],
+        )
+        .unwrap();
         assert_eq!(matrix.rows, 1);
         assert_eq!(matrix.labels, [0.1]);
         assert!(matrix.features[0].is_nan());
@@ -379,6 +604,81 @@ mod directional_tests {
         assert!(load_year(dir.path(), 2020, &[ids[1].clone(), ids[0].clone()]).is_err());
         fs::write(&bin, &bytes[..bytes.len() - 1]).unwrap();
         assert!(load_year(dir.path(), 2020, &ids).is_err());
+    }
+    #[test]
+    fn sample_masks_preserve_nulls_purge_labels_and_predict_tail_without_labels() {
+        let dir = tempfile::tempdir().unwrap();
+        let ids = vec!["alpha_002".into(), "alpha_014".into()];
+        let calendar = vec![
+            "2020-01-02".parse().unwrap(),
+            "2020-01-03".parse().unwrap(),
+            "2020-01-06".parse().unwrap(),
+        ];
+        let range = DateRange {
+            start: calendar[0],
+            end: calendar[2],
+        };
+        let meta = YearMeta {
+            signature: "fixture".into(),
+            factor_ids: ids.clone(),
+            rows: vec![
+                Sample {
+                    day: 0,
+                    instrument: "A".into(),
+                    label: Some(0.1),
+                    label_end: Some(calendar[2]),
+                },
+                Sample {
+                    day: 1,
+                    instrument: "A".into(),
+                    label: Some(0.2),
+                    label_end: Some(calendar[2]),
+                },
+                Sample {
+                    day: 2,
+                    instrument: "A".into(),
+                    label: None,
+                    label_end: None,
+                },
+            ],
+            finite_counts: Default::default(),
+        };
+        let (json, bin) = paths(dir.path(), 2020);
+        save(json, &meta).unwrap();
+        fs::write(
+            bin,
+            [f32::NAN, f32::NAN, 1., f32::NAN, 2., 3.]
+                .into_iter()
+                .flat_map(f32::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let policy = ResearchQualityPolicy {
+            strictness: analytics_core::research_quality::ResearchStrictness::AllowMissing,
+            ..Default::default()
+        };
+        let mask = matrix_range_with_policy(dir.path(), &range, &ids, &calendar, &policy).unwrap();
+        assert_eq!(mask.mask.row_mask, vec![false, true, false]);
+        assert!(mask.matrix.features[1].is_nan());
+        let predictions =
+            prediction_range_with_policy(dir.path(), &range, &ids, &calendar, &policy).unwrap();
+        assert_eq!(predictions.meta.rows.len(), 2);
+        assert!(predictions.meta.rows[1].label.is_none());
+        let strict =
+            matrix_range_with_policy(dir.path(), &range, &ids, &calendar, &Default::default())
+                .unwrap();
+        assert_eq!(strict.matrix.rows, 2);
+        let policy = ResearchQualityPolicy {
+            min_valid_feature_ratio: 1.,
+            ..policy
+        };
+        assert_eq!(
+            matrix_range_with_policy(dir.path(), &range, &ids, &calendar, &policy)
+                .unwrap()
+                .matrix
+                .rows,
+            0
+        );
     }
 }
 

@@ -12,9 +12,15 @@
 //! ```
 #![warn(missing_docs)]
 
+pub mod actions;
+pub mod admission;
 pub mod execution;
 pub mod market_rules;
+pub mod pool;
+pub mod research_quality;
 mod scalar_float;
+pub mod schedule;
+pub mod security;
 
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};

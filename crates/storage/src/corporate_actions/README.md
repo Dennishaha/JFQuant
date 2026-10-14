@@ -50,3 +50,13 @@ cargo nextest run -p analytics-cli -E 'test(standard_action_repair)'
 ```
 
 storage fixture验证现金/送股行分离、占位日期、错证券、缺日期、URL/哈希收据恢复及完成版本拒绝覆盖。CLI场景验证证据重解析后的去重版本ID与本次coverage产物；需要[原生环境](../../../README.md#开发与验收)。真实公开源仍有历史缺项，不能由fixture成功推断研究已就绪。
+
+## 审计修订
+
+[review.rs](review.rs)公开RevisionRequest/EventRevision/FieldEvidence/FailureResolution、verified_documents和apply。输入是当前格式2动作及本工作区announcements.json；原事件哈希过期、证券不符、非实施文档、引用缺失、元数据/PDF/文本/HTTP哈希不符均拒绝。成功输出保留原事件、修订理由和复制证据，供workflow登记新版本。require_adjustment_coverage检查历史参考，require_coverage另检查账户期间实际日期/资格/退市估值；required_symbols计算普通持有人的后继证券闭包。
+
+## 为什么需要本组件
+
+价格调整和真实持有人权益是两种事实。供应商除权参考不能直接作为账户到账记录。事件及审计修订分别记录参考参数和真实权益，实施证据支持每个修订字段；缺支付、交付或特殊规则时保留缺口，避免虚构收益。
+
+设计依据：2026-10-14接受的证券身份与完整准入计划、组件接口及测试。未在代码或证据中确认的历史取舍不推定为既有设计理由；来源、法规或数据格式变化时重新评估。

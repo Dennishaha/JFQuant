@@ -177,7 +177,7 @@ VS Code 任务 `Rust: desktop interaction tests (nextest)` 运行同一套桌面
 
 数据管理保留Parquet扫描，并提供候选版本检查、独立下载、登记、行情/公司行动列表、失败重试、日期补充和完整性明细。研究流程选择版本、日期、178项可用v4因子、滚动/训练/组合/资金/费用配置；模板默认5年训练、1年验证、次年测试，前50、每5交易日调仓、100万元和最新默认费率。12项公式隔离及缺真实三因子输入的030不能进入模板。使用Qlib二进制读取器，不转换全量行情为Parquet。
 
-行情和公司行动复核内容/来源/证据哈希，公司行动缺实际支付/上市日、来源冲突、特殊分配解释失败时显示逐项问题，记录blocked并在训练前停止，不推猜日期或切换旧近似。原价、整数股、T+1、分红送转与跨年账本由同一ml/core模块处理。运行记录显示阶段、日志、错误、冻结参数、产物和年度收益/IC/净值/费用；只读登记当前schema4严格结果；旧格式读取显示unsupported_result_format，旧文件不删除。
+行情和公司行动复核内容/来源/证据哈希，公司行动缺实际支付/上市日、来源冲突、特殊分配解释失败时显示逐项问题，记录blocked并在训练前停止，不推猜日期或切换旧近似。原价、整数股、T+1、分红送转与跨年账本由同一ml/core模块处理。运行记录显示阶段、日志、错误、冻结参数、产物和年度收益/IC/净值/费用；只读登记当前schema9严格结果；旧格式读取显示unsupported_result_format，旧文件不删除。
 
 App和独立jfquant连接同一工作区Unix socket服务，服务持锁并恢复interrupted记录；同时一个计算任务且无队列。界面显示CLI任务进度、结果、取消，业务与记录生命周期全在workflow。SQL快照按query_id隔离，其他客户端的SQL payload不覆盖App分页。关闭App不取消任务；首次前台CLI等待中断也不会SIGINT到服务，自动启动服务使用独立进程组。普通错误可重试，panic退役worker并在线程内销毁句柄。
 
@@ -200,7 +200,7 @@ data/、.jfquant/、target/内生成行情、缓存、模型、日志、run、�
 
 ## 自包含macOS内部试用包
 
-目标Apple Silicon、macOS 14及以上。packaging脚本、Info.plist和INSTALL.txt位于组件旁；所有源码下载、依赖库、签名App和DMG只生成到target。程序运行无需Codex、Cargo、Python、Homebrew或DYLD环境变量；联网调用macOS自带/usr/bin/curl。
+目标Apple Silicon、macOS 14及以上。packaging脚本、Info.plist和INSTALL.txt位于组件旁；所有源码下载、依赖库、签名App和DMG只生成到target。程序运行无需Codex、Cargo、外部Python、Homebrew或DYLD环境变量；联网调用macOS自带/usr/bin/curl。
 
 ```bash
 # 仅开发构建电脑需要Rust、Command Line Tools、CMake和git。
@@ -219,6 +219,79 @@ build-native.sh固定LightGBM v4.6.0/LLVM OpenMP 20.1.8，重建arm64/macOS 14�
 
 egui覆盖版本更新、重复点击防护、取消、错误、模板保存、缺项明细、完整合成研究、结果加载和重启后历史。真实服务测试覆盖CLI任务显示/取消、标准请求双方完整结果和年度账本一致；旧结果显示格式错误并禁止展示其净值，其他记录继续正常读取。App不提供旧口径执行或旧命令适配，下载恢复使用标准请求和验证检查点。
 
-服务协议2，研究结果schema4；程序更新不改用户工作区。若旧服务仍在运行，先完成活动任务并通过原版本CLI停止空闲服务，再打开新版，协议不自动降级。另一台Apple Silicon/macOS 14实机安装、数据更新及离线查看验收仍待完成。
+服务协议7，研究结果schema9；程序更新不改用户工作区。若旧服务仍在运行，先完成活动任务并通过原版本CLI停止空闲服务，再打开新版，协议不自动降级。另一台Apple Silicon/macOS 14实机安装、数据更新及离线查看验收仍待完成。
 
 本次清理验收：163项workspace nextest通过、0跳过；严格Clippy/Rustdoc、doctest、格式和差异检查通过。App/DMG已重建，包内正式研究、因子流水线和离线结果读取验证通过。复现命令见[workflow README](../workflow/README.md#2026-10-13-清理验收记录)，另一台实机验收待完成。
+
+## 动态股票池与 Python 采集接口
+
+当前模板schema 5、研究结果schema 9、服务协议7；公式仍为v4。模板增加 `pool_version`、`benchmark` 和 `pool_exit_policy`；默认 `builtin:csi500` / `SH000905`，沪深300模板使用 `builtin:csi300` / `SH000300`。自选和集合组合引用不可变pool版本，冻结成员区间、人工日期调整及输入哈希；模型manifest和缓存签名包含这些研究输入。原schema结果明确拒绝，历史状态和日志仍可查看，不转换旧文件。
+
+```mermaid
+flowchart LR
+  CLIENT["App / jfquant"] --> SERVICE["协议7公共服务"]
+  SERVICE --> POOL["保存/预览不可变股票池"]
+  SERVICE --> COLLECT["Rust监督内置Python双源采集"]
+  COLLECT --> SNAPSHOT["验证后的Parquet版本与公司行动候选"]
+  POOL --> FREEZE["模板5：池、基准、退出策略、签名"]
+  SNAPSHOT --> READY["原价、历史覆盖、公司行动准入"]
+  QLIB["现有Qlib读取器"] --> READY
+  FREEZE --> READY
+  READY --> RESEARCH["统一日行情、年度模型、持续整数股账户"]
+  RESEARCH --> RESULT["结果9：成员变化、退出/阻碍、账本、费用"]
+```
+
+`pools create/validate/import/export/list/versions/preview` 使用公共定义及解析器；`data collect --provider akshare|yfinance --kind market|actions` 提交后台任务，使用 jobs wait 显式等待。`run --request` 可提交完整公共请求。App提供来源、采集日期/证券、股票池JSON编辑、日期预览、退出策略及失败采集恢复按钮。包内Python和依赖只用于采集，不需要外部Python；日常操作不调用Cargo。
+
+```bash
+jfquant templates default --universe csi300 --output csi300-template.json
+jfquant pools validate --definition pool.json
+jfquant pools create --definition pool.json
+jfquant pools preview pool-0123456789abcdef --market market-0123456789abcdef --date 2026-10-12
+jfquant data collect --provider akshare --start 2004-01-01 --end 2026-10-13 --instruments SH600000,SZ000001,SH000300 --benchmarks SH000300
+jfquant data collect --kind actions --provider akshare --start 2004-01-01 --end 2026-10-13 --instruments SH600000,SZ000001
+jfquant research demo-parquet
+```
+
+示例ID须换为实际版本。下载可恢复验证过的证券；重新提交时参数必须与owner一致。临时/缺失输入不会自动换源、补字段或启动训练。原价撮合不使用Yahoo拆股调整价；缺支付/上市日期或指数历史成员仍阻止研究。2010样本外的5+1窗口需要2004—2009完整历史池及行情，不能以当前成分回填。
+
+开发验收先运行 `crates/app/packaging/build-collector.sh`，再执行workspace nextest、严格Clippy/Rustdoc和格式检查。解释器、依赖、数据、模型、缓存、日志、运行记录及DMG均留在忽略目录。另一台Apple Silicon/macOS14实机验收待完成。
+
+打包拒绝高于 macOS 14.0 的最低版本，包括14.0.1与14.1；Python原生审核实际解析依赖目标，拒绝缺失库和越出包内的路径。审核回归由nextest集成运行，无需联网。
+
+## 独立系数与研究输入
+
+数据面板显示并冻结新浪独立系数或Yahoo候选。共同后台以原价及F/F0生成价量，核验训练、验证、预热和测试历史；撮合使用真实量/股数。公式与178特征顺序不变，缓存和模型因输入签名变化重算。错误逐证券展示factor_basis_issues、adjustment_issues及affected_factor_ids；实际账户仍要求完整支付/上市资料。规范4、报告9经服务7执行，不转换旧文件。
+
+## 日期编辑与事件审查
+
+研究面板提供单次/滚动/手动多折选择、日期控件、可选验证、步长单位、扩展训练及自动数据末日；高级JSON编辑保留未完成输入，点击应用后校验。预览研究日程由后台显示实际每折日期、预热和样本数，补采所需公司行动/获取实施公告使用相同模板。
+
+事件审查按证券加载原事件、稳定哈希、来源错误和公告候选，复制核实后的逐字段引用到修订请求，提交后产生新动作版本。可用现金配股策略可在界面切换为明确放弃；不主动行使现金选择权。未知身份、日期、资格和估值仍显示数据未就绪，关闭界面不取消后台任务。
+
+## 为什么需要本组件
+
+研究操作不应依赖Codex或Cargo。App把数据更新、参数编辑、证据核验、任务和结果变成用户可操作的流程。业务仍在共享后台，界面展示失败原因、缺项和未执行检查，不把底层调试异常当成用户结果。
+
+设计依据：2026-10-14接受的证券身份与完整准入计划、组件接口及测试。未在代码或证据中确认的历史取舍不推定为既有设计理由；来源、法规或数据格式变化时重新评估。
+
+## 三级研究模式：为什么允许筛选
+
+决定日期2026-10-14，依据是用户接受的三级模式计划。正常预热空值、来源缺失和错误数据是不同问题：全部拒绝会浪费可用样本，全部放行又会混淆因子和真实权益。默认严格检查；另外提供“允许部分数据缺失”和“只用数据合格的股票”。模式是研究输入的一部分，不能作为训练失败后自动切换的兜底。
+
+第二档保持原成员，纯缺失传播null；第三档派生每日合格成员，不改原始成员或证据。不能看到后来缺价而倒删早期股票。账户仍采用原价、整数股、T+1和连续权益；未裁定冲突、损坏、基准缺项及剩余必要依赖仍阻断。默认有效因子比例0表示至少一项有效，最低有标签样本1只表示可执行，不表示样本在统计上充分。所选因子整列无有效值不会被自动删除。
+
+研究面板用“1. 严格检查”“2. 允许部分数据缺失”“3. 只用数据合格的股票”，并说明默认只排除完全无效样本。筛选门槛只在放宽档显示；模板保存实际参数。研究页顶部优先显示问题列表，支持证券/原因/类别搜索和处理方式筛选，展开证据和受影响因子，也可导出完整JSON。检查失败与排除分开显示，通过项不标成阻断。
+
+结果显示每日证券数量、逐折训练/验证/预测样本数量及排除范围。第三档始终说明经过筛选；查看历史调用同一schema9校验，不掩盖旧格式或签名错误。egui测试操作真实下拉框，确认发送公共请求及原因明细可见。
+
+```mermaid
+flowchart LR
+  P[模式与门槛] --> C[结构化数据检查]
+  C --> U[原股票池或每日合格池]
+  U --> F[因子与nullable输入]
+  F --> M[按折样本掩码]
+  M --> G[剩余依赖与账户门禁]
+  G -->|通过| T[冻结签名后训练]
+  G -->|未通过| E[原因及处理清单]
+```

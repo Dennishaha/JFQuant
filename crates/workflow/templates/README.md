@@ -6,11 +6,11 @@
 
 ## 精简文件为何能生成完整模板
 
-受控JSON保留schema1、固定模板ID、名称、公式版本、首末测试年、资金和股息研究税率。`ResearchTemplate`的serde defaults补齐当前`ResearchConfig`、按registry/audit筛选的有序178因子和最新市场费用；`builtin/read`加载后都校验。导出与提交运行时使用补齐后的完整模板，不以精简文件作为冻结快照。
+受控JSON保留schema3、模板ID、名称、公式版本、任意日期调度、资金和股息研究税率。`ResearchTemplate`的serde defaults补齐当前`ResearchConfig`、按registry/audit筛选的有序178因子和最新市场费用；`builtin/read`加载后都校验。导出与提交运行时使用补齐后的完整模板，不以精简文件作为冻结快照。
 
 ```mermaid
 flowchart TD
-  FILE["内置JSON：身份、schema1、公式v4、年份与资金"] --> DEFAULT["ResearchTemplate defaults"]
+  FILE["内置JSON：身份、schema3、公式v4、日期调度与资金"] --> DEFAULT["ResearchTemplate defaults"]
   DEFAULT --> FULL["完整窗口、训练参数、因子顺序与市场费率"]
   FULL --> VALIDATE["校验身份、版本、隔离项和数值范围"]
   VALIDATE --> USER["App编辑 / CLI导入导出"]
@@ -22,7 +22,7 @@ flowchart TD
 
 ## 默认与可编辑字段
 
-默认5年训练、1年验证、次年测试，前50只、每5交易日调仓、100万元、最新A股费率及零固定股息预扣研究税率。资金、费用、训练/组合参数和日期可在完整模板中修改；模板ID、schema和公式身份不是可随意覆盖的业务参数。
+默认5年训练、1年验证、次年测试，前50只、每5交易日调仓、100万元、最新A股费率及零固定股息预扣研究税率。资金、费用、训练/组合参数和日期可在完整模板中修改；模板ID可以命名不同研究；schema必须为3、公式必须为v4。股票池版本、基准证券和退出策略均为显式业务参数。
 
 修改`config.factor_ids`顺序会改变签名；重复、未知、隔离或缺输入因子拒绝。12项隔离公式和缺真实三因子输入的Alpha030不进入真实默认模板。合成演示生成独立的1+1、2009—2010、小因子模板，不改本目录的真实研究默认值。
 
@@ -48,3 +48,55 @@ cargo nextest run -p analytics-cli -E 'test(cli_native_research_templates)'
 ```
 
 修改defaults或JSON时同时核对完整导出的字段、178项顺序、签名变化、往返保存、拒绝未知字段和公式版本。真实公司行动未就绪时research check保持blocked，不因模板校验通过就开始训练。
+
+## 当前双模板
+
+`gtja191-csi500.json` 和 `gtja191-csi300.json` 均为schema3。`pool_version` 默认绑定所选行情版本的builtin:csi500/csi300；自定义组合填写已保存的pool版本ID。基准默认SH000905/SH000300，退出默认next_tradable_day，也可选择next_rebalance。源码模板不引用本地数据路径或生成版本ID。
+
+```mermaid
+flowchart LR
+  BUILTIN["沪深300 / 中证500内置模板5"] --> EDIT["资金、窗口、训练、池、基准、退出策略"]
+  EDIT --> SAVE["用户工作区模板"]
+  SAVE --> FREEZE["运行冻结模板及数据/池签名"]
+  FREEZE --> READY["严格历史与公司行动准入"]
+  READY --> RUN["年度研究结果9"]
+```
+
+`jfquant templates default --universe csi300 --output recipe.json` 导出完整默认值。未声明schema或schema1模板拒绝，不自动转换。用户池定义及修改过的模板只保存在工作区。
+
+## 模板5的日期与策略
+
+内置沪深300首折训练2006-01-01至2010-12-31、验证2011全年、测试2012全年，rolling每年移动一次、until=null。中证500仍从2013首测。模板含schedule、action_policy和identity_version及quality_policy，最终导出完整默认178项特征顺序；旧schema2及更早拒绝。
+
+single示例：`{"mode":"single","fold":{"train":{"start":"2006-02-15","end":"2010-10-29"},"validation":null,"test":{"start":"2012-03-01","end":"2012-09-28"}}}`。rolling包含first、step（count/unit）、expanding和until；manual包含folds数组。具体区间必须由所选数据日历验证，不自动修改显式请求。
+
+## 为什么需要本组件
+
+把已经研究过的配置沉淀为可审阅的参数。模板保存日程、股票池、基准、资金、费用和身份目录引用。沪深300默认2012年起测，是为了避开5年训练加1年验证所需的主要成员覆盖缺口；756交易日预热仍可能更早，相关未知历史不能回填。
+
+设计依据：2026-10-14接受的证券身份与完整准入计划、组件接口及测试。未在代码或证据中确认的历史取舍不推定为既有设计理由；来源、法规或数据格式变化时重新评估。
+
+## 三级研究模式：为什么允许筛选
+
+决定日期2026-10-14，依据是用户接受的三级模式计划。正常预热空值、来源缺失和错误数据是不同问题：全部拒绝会浪费可用样本，全部放行又会混淆因子和真实权益。默认严格检查；另外提供“允许部分数据缺失”和“只用数据合格的股票”。模式是研究输入的一部分，不能作为训练失败后自动切换的兜底。
+
+第二档保持原成员，纯缺失传播null；第三档派生每日合格成员，不改原始成员或证据。不能看到后来缺价而倒删早期股票。账户仍采用原价、整数股、T+1和连续权益；未裁定冲突、损坏、基准缺项及剩余必要依赖仍阻断。默认有效因子比例0表示至少一项有效，最低有标签样本1只表示可执行，不表示样本在统计上充分。所选因子整列无有效值不会被自动删除。
+
+当前模板schema5新增quality_policy，内置沪深300/中证500均默认strict、min_valid_feature_ratio=0、min_labeled_rows=1。用户显式选择allow_missing或qualified_only并保存新模板。工作区模板与内置模板使用同一校验，缺schema或schema4不能被解释为当前模式。
+
+```json
+{"strictness":"allow_missing","min_valid_feature_ratio":0.0,"min_labeled_rows":1}
+```
+
+这是quality_policy字段值，不能作为完整模板提交。更改模式或门槛改变缓存和模型来源签名，必须重新计算。
+
+```mermaid
+flowchart LR
+  P[模式与门槛] --> C[结构化数据检查]
+  C --> U[原股票池或每日合格池]
+  U --> F[因子与nullable输入]
+  F --> M[按折样本掩码]
+  M --> G[剩余依赖与账户门禁]
+  G -->|通过| T[冻结签名后训练]
+  G -->|未通过| E[原因及处理清单]
+```

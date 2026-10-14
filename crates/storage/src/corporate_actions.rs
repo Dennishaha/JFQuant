@@ -2,6 +2,7 @@
 //! Provider success is recorded separately from execution eligibility.
 mod aastocks;
 mod checkpoints;
+pub mod review;
 pub use aastocks::{fetch_pay_dates, repair_pay_dates};
 
 use analytics_core::{Date, execution::CorporateAction, market_rules::classify};
@@ -27,10 +28,42 @@ fn invalid(message: impl std::fmt::Display) -> io::Error {
 const HISTORY: &str = "https://datacenter-web.eastmoney.com/api/data/v1/get";
 const SETTLEMENT: &str = "https://emweb.securities.eastmoney.com/PC_HSF10/BonusFinancing/PageAjax";
 
+/// Required ordinary-holder event categories; a dividend endpoint cannot prove the others.
+pub const EVENT_CATEGORIES: &[&str] = &[
+    "distribution",
+    "differential",
+    "rights_issue",
+    "reduction",
+    "reform",
+    "reorganization",
+    "merger",
+    "code_change",
+    "delisting",
+];
+/// Explicit source coverage claim for one security, category and date range.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EventCoverage {
+    /// Event category from EVENT_CATEGORIES.
+    pub category: String,
+    /// Inclusive dates actually verified.
+    pub dates: analytics_core::DateRange,
+    /// passed, failed, or not_run.
+    pub status: analytics_core::admission::CheckStatus,
+    /// Original source or exhaustive query receipt.
+    pub evidence: Vec<String>,
+    /// Why the source proves or cannot prove completeness.
+    pub reason: String,
+}
+
 /// Versioned public-download bundle. Missing dates never count as complete.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActionBundle {
+    /// Explicit acquisition locators and their proved/requested date scope.
+    pub source_bindings: BTreeMap<String, analytics_core::security::SecurityLocator>,
+    /// Per-security/category historical completeness, separate from download success.
+    pub coverage: BTreeMap<String, Vec<EventCoverage>>,
     /// JSON schema version.
     pub schema_version: u32,
     /// JFQuant downloader identity.
@@ -47,18 +80,155 @@ pub struct ActionBundle {
     pub raw_sha256: BTreeMap<String, String>,
 }
 impl ActionBundle {
+    /// Source selector for supplemental requests; opaque IDs are never sliced into stock codes.
+    pub fn source_symbol<'a>(&'a self, id: &'a str) -> io::Result<&'a str> {
+        if analytics_core::security::is_security_id(id) {
+            let l = self
+                .source_bindings
+                .get(id)
+                .ok_or_else(|| invalid("company-action provider locator missing"))?;
+            analytics_core::pool::validate_exchange_symbol(&l.symbol).map_err(invalid)?;
+            Ok(&l.symbol)
+        } else {
+            analytics_core::pool::validate_exchange_symbol(id).map_err(invalid)?;
+            Ok(id)
+        }
+    }
+    fn parse_sina_bound(&self, id: &str, html: &str) -> io::Result<Vec<CorporateAction>> {
+        let mut actions = parse_sina(self.source_symbol(id)?, html)?;
+        if let Some(l) = self.source_bindings.get(id) {
+            actions.retain(|a| l.coverage.start <= a.ex_date && a.ex_date <= l.coverage.end);
+        }
+        for a in &mut actions {
+            a.instrument = id.into();
+            a.id = format!("{id}:{}", a.ex_date);
+        }
+        Ok(actions)
+    }
+    /// Mark every event category only for an explicitly generated complete synthetic fixture.
+    pub fn declare_synthetic_coverage(&mut self, start: Date, end: Date) -> io::Result<()> {
+        if self.downloader != "JFQuant analytics-workflow synthetic-demo-v1" {
+            return Err(invalid("cannot assert public coverage as synthetic"));
+        }
+        for id in &self.queried_symbols {
+            self.coverage.insert(
+                id.clone(),
+                EVENT_CATEGORIES
+                    .iter()
+                    .map(|category| EventCoverage {
+                        category: (*category).into(),
+                        dates: analytics_core::DateRange { start, end },
+                        status: analytics_core::admission::CheckStatus::Passed,
+                        evidence: vec!["JFQuant complete synthetic fixture".into()],
+                        reason: "all fixture events explicitly constructed".into(),
+                    })
+                    .collect(),
+            );
+        }
+        Ok(())
+    }
+    /// Aggregate missing categories; queried_symbols alone never grants all-event completeness.
+    pub fn coverage_issues(&self, id: &str, start: Date, end: Date) -> Vec<String> {
+        EVENT_CATEGORIES
+            .iter()
+            .filter_map(|category| {
+                let mut ranges: Vec<_> = self
+                    .coverage
+                    .get(id)
+                    .into_iter()
+                    .flatten()
+                    .filter(|c| {
+                        c.category == *category
+                            && c.status == analytics_core::admission::CheckStatus::Passed
+                            && !c.evidence.is_empty()
+                            && !c.reason.is_empty()
+                    })
+                    .map(|c| &c.dates)
+                    .collect();
+                ranges.sort_by_key(|r| r.start);
+                let mut next = start;
+                let mut covered = false;
+                for r in ranges {
+                    if r.end < next {
+                        continue;
+                    }
+                    if r.start > next {
+                        break;
+                    }
+                    if r.end >= end {
+                        covered = true;
+                        break;
+                    }
+                    if let Some(d) = r.end.succ_opt() {
+                        next = d;
+                    }
+                }
+                (!covered)
+                    .then(|| format!("{id} {category}: completeness unverified for {start}..{end}"))
+            })
+            .collect()
+    }
+    /// Transitive ordinary-holder successors needed during an actual account interval.
+    pub fn required_symbols(
+        &self,
+        seeds: &BTreeSet<String>,
+        start: Date,
+        end: Date,
+    ) -> BTreeSet<String> {
+        let mut out = seeds.clone();
+        loop {
+            let before = out.len();
+            for a in &self.actions {
+                if out.contains(&a.instrument)
+                    && a.ex_date >= start
+                    && a.record_date <= end
+                    && let analytics_core::actions::EventTerms::Conversion {
+                        successor: Some(id),
+                        ordinary_holder: true,
+                        ..
+                    } = &a.terms
+                {
+                    out.insert(id.clone());
+                }
+            }
+            if out.len() == before {
+                break;
+            }
+        }
+        out
+    }
+
     fn validate_identity(&self) -> io::Result<()> {
-        if self.schema_version != 1
+        if self.schema_version != 3
             || (self.downloader != "JFQuant analytics-storage corporate-actions"
                 && self.downloader != "JFQuant analytics-workflow synthetic-demo-v1")
         {
-            return Err(invalid("invalid action bundle identity"));
+            return Err(invalid(
+                "unsupported_data_format: action bundle requires format 3 and known source",
+            ));
+        }
+        for claims in self.coverage.values() {
+            for c in claims {
+                c.dates.validate().map_err(invalid)?;
+                if !EVENT_CATEGORIES.contains(&c.category.as_str()) || c.reason.trim().is_empty() {
+                    return Err(invalid("invalid event category coverage"));
+                }
+                if c.status == analytics_core::admission::CheckStatus::Passed
+                    && self.downloader != "JFQuant analytics-workflow synthetic-demo-v1"
+                    && (c.evidence.is_empty()
+                        || c.evidence.iter().any(|e| !self.raw_sha256.contains_key(e)))
+                {
+                    return Err(invalid(
+                        "public coverage claim lacks captured review evidence",
+                    ));
+                }
+            }
         }
         for id in self.queried_symbols.iter().chain(self.failures.keys()) {
-            classify(id).map_err(invalid)?;
+            analytics_core::pool::validate_instrument(id).map_err(invalid)?;
         }
         for a in &self.actions {
-            classify(&a.instrument).map_err(invalid)?;
+            analytics_core::pool::validate_instrument(&a.instrument).map_err(invalid)?;
             if a.id != format!("{}:{}", a.instrument, a.ex_date) {
                 return Err(invalid("corporate action ID/security/date mismatch"));
             }
@@ -70,8 +240,9 @@ impl ActionBundle {
         }
         Ok(())
     }
-    /// Require all symbols and settlement dates within a proposed execution range.
-    pub fn require_coverage(
+    /// Require verified histories and adjustment terms over training/warmup dates.
+    /// Payment/listing dates remain mandatory separately for actual execution rights.
+    pub fn require_adjustment_coverage(
         &self,
         symbols: &BTreeSet<String>,
         start: Date,
@@ -85,13 +256,47 @@ impl ActionBundle {
             if !self.queried_symbols.contains(id) || self.failures.contains_key(id) {
                 return Err(invalid(format!("company-action history unavailable: {id}")));
             }
+            let issues = self.coverage_issues(id, start, end);
+            if !issues.is_empty() {
+                return Err(invalid(issues.join("; ")));
+            }
         }
         let mut seen = BTreeSet::new();
         for a in &self.actions {
             if !seen.insert(a.id.clone()) {
                 return Err(invalid("duplicate corporate-action event"));
             }
+            if symbols.contains(&a.instrument) && a.ex_date >= start && a.ex_date <= end {
+                a.validate_adjustment_terms()
+                    .map_err(|e| invalid(format!("{} {}: {e}", a.instrument, a.ex_date)))?;
+            }
+        }
+        Ok(())
+    }
+    /// Require all symbols and complete settlement dates within the execution range.
+    pub fn require_coverage(
+        &self,
+        symbols: &BTreeSet<String>,
+        start: Date,
+        end: Date,
+    ) -> io::Result<()> {
+        self.require_adjustment_coverage(symbols, start, end)?;
+        for a in &self.actions {
             if symbols.contains(&a.instrument) && a.ex_date >= start && a.record_date <= end {
+                if let analytics_core::actions::EventTerms::Delisting {
+                    valuations,
+                    settlement_date,
+                    ..
+                } = &a.terms
+                {
+                    let until = settlement_date.map_or(end, |d| d.min(end));
+                    if valuations.last().is_none_or(|v| v.valid_until < until) {
+                        return Err(invalid(format!(
+                            "{}: delisting valuation coverage missing",
+                            a.id
+                        )));
+                    }
+                }
                 a.validate()
                     .map_err(|e| invalid(format!("{} {}: {e}", a.instrument, a.ex_date)))?;
             }
@@ -102,6 +307,57 @@ impl ActionBundle {
     pub fn read(path: &Path) -> io::Result<Self> {
         let bundle: Self = serde_json::from_slice(&fs::read(path)?).map_err(invalid)?;
         bundle.validate_identity()?;
+        if bundle.downloader != "JFQuant analytics-workflow synthetic-demo-v1" {
+            let root = path
+                .parent()
+                .ok_or_else(|| invalid("action evidence root missing"))?;
+            for (id, claims) in &bundle.coverage {
+                for c in claims
+                    .iter()
+                    .filter(|c| c.status == analytics_core::admission::CheckStatus::Passed)
+                {
+                    for name in &c.evidence {
+                        if !name.starts_with("review-") {
+                            return Err(invalid(
+                                "event completeness needs an auditable review receipt",
+                            ));
+                        }
+                        let bytes = fs::read(root.join("raw").join(name))?;
+                        if bundle.raw_sha256.get(name)
+                            != Some(&format!("sha256:{:x}", Sha256::digest(&bytes)))
+                        {
+                            return Err(invalid("category review receipt hash mismatch"));
+                        }
+                        let review: Value = serde_json::from_slice(&bytes).map_err(invalid)?;
+                        let consistent = review["request"]["coverage_reviews"]
+                            .as_array()
+                            .is_some_and(|rs| {
+                                rs.iter().any(|r| {
+                                    r["instrument"] == *id
+                                        && r["dates"] == serde_json::json!(c.dates)
+                                        && r["reason"] == c.reason
+                                        && r["categories"]
+                                            .as_array()
+                                            .is_some_and(|cs| cs.iter().any(|v| v == &c.category))
+                                        && r["expected_source_sha256"] == review["source_sha256"]
+                                })
+                            });
+                        if !consistent {
+                            return Err(invalid("category review claim/receipt mismatch"));
+                        }
+                        let receipt = &review["collection_receipts"][id];
+                        if receipt["evidence"]["pagination_complete"] != true
+                            || !receipt["evidence"]["all_announcements"].is_array()
+                        {
+                            return Err(invalid(
+                                "category review lacks complete disclosure metadata",
+                            ));
+                        }
+                        crate::collector::verify_http_receipts(root, &receipt["evidence"])?;
+                    }
+                }
+            }
+        }
         Ok(bundle)
     }
 }
@@ -186,6 +442,7 @@ fn parse_history(
             listing_date: None,
             cash_per_share: cash,
             shares_per_share: shares,
+            terms: Default::default(),
             source: format!("{HISTORY}?reportName=RPT_SHAREBONUS_DET; {SETTLEMENT}?code={symbol}"),
         });
     }
@@ -242,7 +499,7 @@ fn fetch_histories(symbols: &[String], output: &Path, resume: bool) -> io::Resul
             return Err(invalid("duplicate requested symbol"));
         }
     }
-    let owner = serde_json::json!({"schema_version":1,"downloader":"JFQuant analytics-storage company-actions","symbols":symbols});
+    let owner = serde_json::json!({"schema_version":3,"downloader":"JFQuant analytics-storage company-actions","symbols":symbols});
     if resume && output.exists() {
         let saved: Value =
             serde_json::from_slice(&fs::read(output.join("owner.json"))?).map_err(invalid)?;
@@ -308,7 +565,9 @@ fn fetch_histories(symbols: &[String], output: &Path, resume: bool) -> io::Resul
     });
     task_context_check()?;
     let mut bundle = ActionBundle {
-        schema_version: 1,
+        schema_version: 3,
+        source_bindings: Default::default(),
+        coverage: Default::default(),
         downloader: "JFQuant analytics-storage corporate-actions".into(),
         downloaded_at: chrono::Utc::now().to_rfc3339(),
         queried_symbols: BTreeSet::new(),
@@ -344,7 +603,7 @@ fn fetch_histories(symbols: &[String], output: &Path, resume: bool) -> io::Resul
         .iter()
         .filter_map(|a| a.validate().err().map(|e| format!("{}: {e}", a.id)))
         .collect();
-    fs::write(output.join("coverage.json"),serde_json::to_vec_pretty(&serde_json::json!({"symbols_requested":symbols.len(),"symbols_downloaded":bundle.queried_symbols.len(),"failures":bundle.failures,"events":bundle.actions.len(),"incomplete_events":incomplete,"complete_for_execution":incomplete.is_empty() && bundle.failures.is_empty(),"limitations":"F10 payment dates cover recent records only; history endpoint lacks share listing dates. Nulls require announcement-backed supplements; never substitute ex date."})).map_err(invalid)?)?;
+    fs::write(output.join("coverage.json"),serde_json::to_vec_pretty(&serde_json::json!({"symbols_requested":symbols.len(),"symbols_downloaded":bundle.queried_symbols.len(),"failures":bundle.failures,"events":bundle.actions.len(),"incomplete_events":incomplete,"complete_for_execution":false,"event_categories":"unverified","limitations":"F10 payment dates cover recent records only; history endpoint lacks share listing dates. Nulls require announcement-backed supplements; never substitute ex date."})).map_err(invalid)?)?;
     Ok(bundle)
 }
 
@@ -448,6 +707,7 @@ fn parse_sina(symbol: &str, html: &str) -> io::Result<Vec<CorporateAction>> {
             listing_date: c[7].parse().ok(),
             cash_per_share: cash,
             shares_per_share: shares,
+            terms: Default::default(),
             source: format!(
                 "https://money.finance.sina.com.cn/corp/go.php/vISSUE_ShareBonus/stockid/{}.phtml",
                 &symbol[2..]
@@ -468,7 +728,7 @@ pub fn enrich_public(
     output: &Path,
 ) -> io::Result<ActionBundle> {
     source.validate_identity()?;
-    if source.schema_version != 1
+    if source.schema_version != 3
         || source.downloader != "JFQuant analytics-storage corporate-actions"
     {
         return Err(invalid("invalid source bundle"));
@@ -493,10 +753,10 @@ pub fn enrich_public(
             if task_context.check().is_err(){break;}
             let i=index.fetch_add(1,Ordering::Relaxed);let Some(id)=symbols.get(i) else{break};
             let result=(||{
-                let url=format!("https://money.finance.sina.com.cn/corp/go.php/vISSUE_ShareBonus/stockid/{}.phtml",&id[2..]);
+                let url=format!("https://money.finance.sina.com.cn/corp/go.php/vISSUE_ShareBonus/stockid/{}.phtml",&source.source_symbol(id)?[2..]);
                 let bytes=checkpoints::page(&url,Command::new("/usr/bin/curl").args(["--fail","--silent","--show-error","--location","--retry","2","--max-time","45","--connect-timeout","15",&url]),&output.join(format!("raw/{id}-sina.html")))?;
                 let html=decode_table(&bytes,b"id=\"sharebonus_1\"")?;
-                parse_sina(id,&html)
+                source.parse_sina_bound(id,&html)
             })();
             if i.is_multiple_of(100){let _=task_context.report(format!("新浪历史 {i}/{}",symbols.len()));}
             results.lock().expect("worker result mutex").push((id.clone(),result));
@@ -559,7 +819,7 @@ pub fn enrich_public(
         .iter()
         .filter_map(|a| a.validate().err().map(|e| format!("{}: {e}", a.id)))
         .collect();
-    fs::write(output.join("coverage.json"),serde_json::to_vec_pretty(&serde_json::json!({"symbols_downloaded":bundle.queried_symbols.len(),"events":bundle.actions.len(),"failures":bundle.failures,"incomplete_events":missing,"complete_for_execution":missing.is_empty()&&bundle.failures.is_empty()})).map_err(invalid)?)?;
+    fs::write(output.join("coverage.json"),serde_json::to_vec_pretty(&serde_json::json!({"symbols_downloaded":bundle.queried_symbols.len(),"events":bundle.actions.len(),"failures":bundle.failures,"incomplete_events":missing,"complete_for_execution":false,"event_categories":"unverified"})).map_err(invalid)?)?;
     Ok(bundle)
 }
 
@@ -610,7 +870,7 @@ pub fn fetch_details(
     end: Date,
 ) -> io::Result<ActionBundle> {
     source.validate_identity()?;
-    if start > end || source.schema_version != 1 {
+    if start > end || source.schema_version != 3 {
         return Err(invalid("invalid detail range/bundle"));
     }
     checkpoints::prepare(
@@ -625,7 +885,7 @@ pub fn fetch_details(
     for id in &source.queried_symbols {
         if let Ok(bytes) = fs::read(source_root.join(format!("raw/{id}-sina.html")))
             && let Ok(html) = decode_table(&bytes, b"id=\"sharebonus_1\"")
-            && let Ok(actions) = parse_sina(id, &html)
+            && let Ok(actions) = source.parse_sina_bound(id, &html)
         {
             for a in actions {
                 announcements.insert(a.id, a.announced);
@@ -708,7 +968,7 @@ pub fn fetch_details(
         .filter(|a| a.ex_date >= start && a.ex_date <= end)
         .filter_map(|a| a.validate().err().map(|e| format!("{}: {e}", a.id)))
         .collect();
-    fs::write(output.join("details_coverage.json"),serde_json::to_vec_pretty(&serde_json::json!({"start":start,"end":end,"requested":candidates.len(),"cash_dates_added":cash_added,"listing_dates_added":listings_added,"detail_failures":failures,"incomplete_events":missing,"complete_for_execution":missing.is_empty()&&bundle.failures.is_empty(),"mixed_scheme_dates":"generic arrival date is not inferred as cash payment"})).map_err(invalid)?)?;
+    fs::write(output.join("details_coverage.json"),serde_json::to_vec_pretty(&serde_json::json!({"start":start,"end":end,"requested":candidates.len(),"cash_dates_added":cash_added,"listing_dates_added":listings_added,"detail_failures":failures,"incomplete_events":missing,"complete_for_execution":false,"event_categories":"unverified","mixed_scheme_dates":"generic arrival date is not inferred as cash payment"})).map_err(invalid)?)?;
     Ok(bundle)
 }
 
@@ -721,7 +981,7 @@ pub fn repair_from_evidence(
     output: &Path,
 ) -> io::Result<ActionBundle> {
     source.validate_identity()?;
-    if source.schema_version != 1
+    if source.schema_version != 3
         || source.downloader != "JFQuant analytics-storage corporate-actions"
     {
         return Err(invalid("invalid source bundle"));
@@ -731,11 +991,12 @@ pub fn repair_from_evidence(
     task_context_check()?;
     let mut bundle = source.clone();
     let failed: Vec<_> = bundle.failures.keys().cloned().collect();
+    let modified = !failed.is_empty();
     for id in failed {
         let path = source_root.join(format!("raw/{id}-sina.html"));
         let result = fs::read(path)
             .and_then(|bytes| decode_table(&bytes, b"id=\"sharebonus_1\""))
-            .and_then(|html| parse_sina(&id, &html));
+            .and_then(|html| source.parse_sina_bound(&id, &html));
         if let Ok(actions) = result {
             let mut conflict = None;
             for a in actions {
@@ -764,7 +1025,9 @@ pub fn repair_from_evidence(
             bundle.failures.insert(id, e.to_string());
         }
     }
-    bundle.actions.sort_by(|a, b| a.id.cmp(&b.id));
+    if modified {
+        bundle.actions.sort_by(|a, b| a.id.cmp(&b.id));
+    }
     fs::write(
         output.join("actions.json"),
         serde_json::to_vec_pretty(&bundle).map_err(invalid)?,
@@ -794,7 +1057,38 @@ pub fn retry_public(
         }
         fs::write(output.join("raw").join(name), bytes)?;
     }
-    let retry = fetch_public(&symbols, &output.join("retry"))?;
+    let codes: Vec<String> = symbols
+        .iter()
+        .map(|id| source.source_symbol(id).map(str::to_owned))
+        .collect::<io::Result<_>>()?;
+    let reverse: BTreeMap<String, String> =
+        codes.iter().cloned().zip(symbols.iter().cloned()).collect();
+    if reverse.len() != codes.len() {
+        return Err(invalid(
+            "reused provider code requires separate dated acquisition tasks",
+        ));
+    }
+    let mut retry = fetch_public(&codes, &output.join("retry"))?;
+    for a in &mut retry.actions {
+        a.instrument = reverse[&a.instrument].clone();
+        a.id = format!("{}:{}", a.instrument, a.ex_date);
+    }
+    retry.actions.retain(|a| {
+        source
+            .source_bindings
+            .get(&a.instrument)
+            .is_none_or(|l| l.coverage.start <= a.ex_date && a.ex_date <= l.coverage.end)
+    });
+    retry.queried_symbols = retry
+        .queried_symbols
+        .iter()
+        .map(|code| reverse[code].clone())
+        .collect();
+    retry.failures = retry
+        .failures
+        .into_iter()
+        .map(|(code, e)| (reverse[&code].clone(), e))
+        .collect();
     let mut bundle = source.clone();
     bundle.downloaded_at = chrono::Utc::now().to_rfc3339();
     for id in &retry.queried_symbols {
@@ -807,6 +1101,7 @@ pub fn retry_public(
                 .cloned(),
         );
         bundle.queried_symbols.insert(id.clone());
+        bundle.coverage.remove(id);
         if !source
             .failures
             .get(id)
@@ -935,7 +1230,9 @@ mod tests {
     #[test]
     fn malformed_bundle_is_rejected_before_worker_urls_or_evidence_paths() {
         let mut bundle = ActionBundle {
-            schema_version: 1,
+            schema_version: 3,
+            source_bindings: Default::default(),
+            coverage: Default::default(),
             downloader: "JFQuant analytics-storage corporate-actions".into(),
             downloaded_at: "fixture".into(),
             queried_symbols: BTreeSet::from(["x".into()]),
@@ -974,6 +1271,7 @@ mod tests {
             listing_date: None,
             cash_per_share: 0.55,
             shares_per_share: 0.0,
+            terms: Default::default(),
             source: "synthetic provider schema fixture".into(),
         };
         assert_eq!(

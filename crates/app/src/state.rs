@@ -512,6 +512,21 @@ pub fn apply_event(state: &mut AppState, event: &WorkerEvent) {
                     state.platform.actions = data.id.clone();
                 }
             }
+            if let Some(id) = outcome.details["id"]
+                .as_str()
+                .filter(|s| s.starts_with("pool-"))
+            {
+                state.platform.template.pool_version = id.into();
+                state.platform.pool_editor =
+                    serde_json::to_string_pretty(&outcome.details["definition"])
+                        .unwrap_or_default();
+            }
+            if let Some(id) = outcome.details["id"]
+                .as_str()
+                .filter(|id| id.starts_with("identity-"))
+            {
+                state.platform.template.identity_version = id.into();
+            }
             if let Some(id) = outcome.details["demo_actions"].as_str() {
                 state.platform.actions = id.into();
             }

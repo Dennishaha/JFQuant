@@ -10,6 +10,7 @@ pub(super) struct DayResult {
     pub benchmark_return: f64,
     pub turnover: f64,
     pub cost: f64,
+    pub corporate_action_cost_cny: f64,
     pub fee_breakdown_cny: FeeBreakdown,
     pub holdings: usize,
     pub blocked_orders: usize,
@@ -18,6 +19,7 @@ pub(super) struct DayResult {
 #[serde(deny_unknown_fields)]
 pub(super) struct Performance {
     pub fee_totals_cny: FeeBreakdown,
+    pub corporate_action_cost_cny: f64,
     pub observations: usize,
     pub start: Option<String>,
     pub end: Option<String>,
@@ -129,6 +131,7 @@ pub(super) fn performance(days: &[DayResult]) -> Performance {
     }
     Performance {
         fee_totals_cny,
+        corporate_action_cost_cny: days.iter().map(|d| d.corporate_action_cost_cny).sum(),
         observations: n,
         start: days.first().map(|d| d.date.clone()),
         end: days.last().map(|d| d.date.clone()),
@@ -155,6 +158,7 @@ mod tests {
             benchmark_return: 0.0,
             turnover: 0.0,
             cost: 0.0,
+            corporate_action_cost_cny: 0.0,
             fee_breakdown_cny: FeeBreakdown::default(),
             holdings: 0,
             blocked_orders: 0,

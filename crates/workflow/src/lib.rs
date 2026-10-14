@@ -5,12 +5,17 @@
 pub mod backend;
 /// Explicit synthetic demo generator.
 pub mod demo;
+pub mod identities;
+/// Immutable date-effective stock pools.
+pub mod pools;
+/// Independently validated acquisition checkpoints.
+pub mod preparation;
 /// Local service, task requests and transport client.
 #[cfg(unix)]
 pub mod service;
 use analytics_core::{market_rules::MarketRulesPreset, task::TaskContext};
 use analytics_ml::backtest::{ResearchConfig, ResearchRequest};
-use analytics_storage::{corporate_actions::ActionBundle, qlib::QlibDataset};
+use analytics_storage::{corporate_actions::ActionBundle, daily::DailyDataset};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -118,18 +123,29 @@ fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ResearchTemplate {
-    /// Template schema, currently 1.
+    /// Template schema, currently 5; absence is unsupported.
+    #[serde(default = "missing_template_version")]
     pub schema_version: u32,
+    /// Immutable pool version, or builtin:csi300/builtin:csi500 bound to the selected market.
+    pub pool_version: String,
+    /// Explicit benchmark security for factor inputs and performance.
+    pub benchmark: String,
+    /// Position treatment when membership ends.
+    pub pool_exit_policy: analytics_core::pool::PoolExitPolicy,
     /// Built-in workflow kind.
     pub id: String,
     /// User-visible name.
     pub name: String,
     /// Required implementation version.
     pub formula_version: String,
-    /// First out-of-sample year.
-    pub first_test_year: i32,
-    /// Last requested year; clipped to actual coverage.
-    pub last_year: i32,
+    /// Date-level training, validation and test windows.
+    pub schedule: analytics_core::schedule::Schedule,
+    /// Explicit ordinary-holder corporate action policy.
+    pub action_policy: analytics_core::actions::ActionPolicy,
+    /// Immutable reviewed identity directory; empty means not configured and blocks research.
+    pub identity_version: String,
+    /// Shared research completeness and sample policy.
+    pub quality_policy: analytics_core::research_quality::ResearchQualityPolicy,
     /// Rolling and model parameters.
     pub config: ResearchConfig,
     /// User account and latest-only exchange fees.
@@ -138,6 +154,9 @@ pub struct ResearchTemplate {
     pub initial_cash_cny: f64,
     /// Explicit fixed research dividend tax convention.
     pub dividend_withholding_rate: f64,
+}
+fn missing_template_version() -> u32 {
+    0
 }
 impl Default for ResearchTemplate {
     fn default() -> Self {
@@ -153,12 +172,17 @@ impl Default for ResearchTemplate {
             ..ResearchConfig::default()
         };
         Self {
-            schema_version: 1,
+            schema_version: 5,
+            pool_version: "builtin:csi500".into(),
+            benchmark: "SH000905".into(),
+            pool_exit_policy: Default::default(),
             id: "gtja191-csi500-annual".into(),
             name: "GTJA191 / 中证500年度研究".into(),
             formula_version: analytics_factor::FORMULA_VERSION.into(),
-            first_test_year: 2013,
-            last_year: 2026,
+            schedule: Default::default(),
+            action_policy: Default::default(),
+            identity_version: String::new(),
+            quality_policy: Default::default(),
             config,
             market_rules: MarketRulesPreset::a_share_latest(),
             initial_cash_cny: 1_000_000.0,
@@ -173,19 +197,28 @@ impl ResearchTemplate {
         t.validate()?;
         Ok(t)
     }
+    /// Load the CSI300 builtin recipe.
+    pub fn builtin_csi300() -> Result<Self> {
+        let t: Self = serde_json::from_str(include_str!("../templates/gtja191-csi300.json"))?;
+        t.validate()?;
+        Ok(t)
+    }
     /// Validate before saving or starting a task.
     pub fn validate(&self) -> Result<()> {
-        if self.schema_version != 1
-            || self.id != "gtja191-csi500-annual"
+        if self.schema_version != 5
+            || self.id.trim().is_empty()
             || self.formula_version != analytics_factor::FORMULA_VERSION
             || self.name.trim().is_empty()
         {
             return Err("unsupported recipe identity/version".into());
         }
-        if !(2000..=9999).contains(&self.first_test_year)
-            || self.first_test_year > self.last_year
-            || self.last_year > 9999
-            || !self.initial_cash_cny.is_finite()
+        self.schedule.validate()?;
+        if self.action_policy.exercise_optional_cash_choice {
+            return Err(
+                "optional cash-choice eligibility is outside passive ordinary-holder policy".into(),
+            );
+        }
+        if !self.initial_cash_cny.is_finite()
             || self.initial_cash_cny <= 0.0
             || self.initial_cash_cny > 1e13
             || !self.dividend_withholding_rate.is_finite()
@@ -193,7 +226,12 @@ impl ResearchTemplate {
         {
             return Err("invalid research years/cash/tax".into());
         }
+        analytics_core::pool::validate_instrument(&self.benchmark)?;
+        if self.pool_version.is_empty() {
+            return Err("missing pool version".into());
+        }
         self.config.validate()?;
+        self.quality_policy.validate()?;
         self.market_rules.validate()?;
         let registry = analytics_factor::FactorRegistry::default();
         let mut seen = BTreeSet::new();
@@ -302,6 +340,7 @@ impl Workspace {
             "data",
             ".jfquant/runs",
             ".jfquant/templates",
+            ".jfquant/pools",
             ".jfquant/catalog",
             ".jfquant/staging",
         ] {
@@ -364,7 +403,7 @@ impl Workspace {
     pub fn register(&self, path: &Path) -> Result<DataVersion> {
         let relative = self.relative(path)?;
         let (kind, details, start, end) = if path.is_dir() {
-            let dataset = QlibDataset::open(path)?;
+            let dataset = DailyDataset::open(path)?;
             let mut source: Value = serde_json::from_slice(&fs::read(
                 path.parent()
                     .ok_or("market parent missing")?
@@ -373,7 +412,7 @@ impl Workspace {
             if !(source["generator"] == "JFQuant analytics-workflow synthetic-demo-v1"
                 && source["synthetic_fixture"] == true)
                 && (source["downloader"] != "JFQuant analytics-storage"
-                    || source["archive_verified"] != true
+                    || (source["archive_verified"] != true && source["snapshot_verified"] != true)
                     || source["independent_download"] != true)
             {
                 return Err("unverified market provenance".into());
@@ -594,8 +633,77 @@ impl Workspace {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkflowRequest {
+    /// Save an immutable composed pool through the shared backend.
+    SavePool {
+        /// Validated composition and dated overrides.
+        definition: analytics_core::pool::PoolDefinition,
+    },
+    /// Preview effective dated membership.
+    PreviewPool {
+        /// Pool version or explicit builtin name.
+        id: String,
+        /// Selected immutable market version.
+        market: String,
+        /// Effective exchange date to inspect.
+        day: analytics_core::Date,
+    },
+    /// Preview actual date folds, required securities and coverage without training.
+    IdentityOperation {
+        /// list, show, check, import, export, or review.
+        method: String,
+        /// Selected directory version.
+        id: String,
+        /// Input registry or output package path.
+        path: PathBuf,
+        /// Optional dated source lookup.
+        provider: String,
+        /// Exact provider selector or opaque security ID.
+        symbol: String,
+        /// Explicit lookup date, required for reused codes.
+        date: Option<analytics_core::Date>,
+    },
+    /// Preview requirements without creating factor caches or native trainers.
+    PreviewResearch {
+        /// Optional selected action snapshot for transitive successor requirements.
+        actions: Option<String>,
+        /// Selected date schedule and ordinary-holder strategy.
+        template: Box<ResearchTemplate>,
+        /// Immutable market snapshot ID.
+        market: String,
+    },
+    /// Independently fetch the selected research pool's action history or announcement evidence.
+    PrepareResearchData {
+        /// Optional reviewed action snapshot for successor requirements.
+        actions: Option<String>,
+        /// Selected date schedule and ordinary-holder strategy.
+        template: Box<ResearchTemplate>,
+        /// Immutable market snapshot ID.
+        market: String,
+        /// Fetch implementation documents when true; action histories otherwise.
+        announcements: bool,
+        /// Matching prior task checkpoint ID.
+        resume: Option<Uuid>,
+    },
+    /// Inspect original events, stable hashes and captured candidates for a single security.
+    InspectActions {
+        /// Immutable original action snapshot.
+        actions: String,
+        /// Canonical security to inspect.
+        instrument: String,
+        /// Optional captured announcement manifest.
+        evidence_manifest: Option<PathBuf>,
+    },
+    /// Apply reviewed implementation evidence as a new immutable action version.
+    ReviseActions {
+        /// Original immutable action snapshot ID.
+        actions: String,
+        /// Evidence quotes, stale event hashes and reasons.
+        request: analytics_storage::corporate_actions::review::RevisionRequest,
+    },
     /// Create clearly marked synthetic inputs and a small acceptance recipe.
     CreateDemo {},
+    /// Complete synthetic research in canonical Parquet format.
+    CreateCanonicalDemo {},
     /// Discover a public release without changing the selected input version.
     CheckUpdates {},
     /// Download a fixed release; resume owned staging when supplied.
@@ -605,6 +713,20 @@ pub enum WorkflowRequest {
         /// Previous interrupted task staging ID.
         resume: Option<Uuid>,
     },
+    /// Collect daily data using the packaged Python provider.
+    CollectMarket {
+        /// Explicit provider and range.
+        request: analytics_storage::collector::CollectionRequest,
+        /// Existing owned task checkpoints.
+        resume: Option<Uuid>,
+    },
+    /// Fetch company-action candidates through the Python provider.
+    CollectActions {
+        /// Explicit securities/provider; no date guessing.
+        request: analytics_storage::collector::CollectionRequest,
+        /// Previous owned collection task.
+        resume: Option<Uuid>,
+    },
     /// Register existing JFQuant-owned data from an explicit workspace path.
     RegisterData {
         /// Relative or absolute input path.
@@ -612,6 +734,8 @@ pub enum WorkflowRequest {
     },
     /// Fetch first company action history using a registered market version.
     DownloadActions {
+        /// Effective pool for action coverage.
+        pool_version: String,
         /// Market version ID.
         market: String,
         /// Previous interrupted acquisition staging task.
@@ -646,9 +770,19 @@ impl WorkflowRequest {
     /// Display operation names without exposing backend details in the user flow.
     pub fn label(&self) -> String {
         match self {
+            Self::IdentityOperation { .. } => "证券身份与证据核验".into(),
+            Self::PreviewResearch { .. } => "预览研究日期和数据需求".into(),
+            Self::PrepareResearchData { .. } => "补采研究所需公司行动/公告".into(),
+            Self::InspectActions { .. } => "查看公司行动原值与实施证据".into(),
+            Self::ReviseActions { .. } => "实施公告对账修订".into(),
+            Self::SavePool { .. } => "保存股票池版本".into(),
+            Self::PreviewPool { .. } => "预览股票池成员".into(),
+            Self::CreateCanonicalDemo {} => "创建Parquet合成演示数据".into(),
             Self::CreateDemo {} => "创建合成演示数据".into(),
             Self::CheckUpdates {} => "检查行情更新".into(),
             Self::DownloadMarket { tag, .. } => format!("下载行情快照 {tag}"),
+            Self::CollectActions { .. } => "Python公司行动采集".into(),
+            Self::CollectMarket { .. } => "Python双源行情采集".into(),
             Self::RegisterData { .. } => "核验登记数据版本".into(),
             Self::DownloadActions { .. } => "下载公司行动历史".into(),
             Self::SupplementActions { method, .. } => format!("补充公司行动 ({method})"),
@@ -708,6 +842,22 @@ fn version(workspace: &Workspace, id: &str, kind: &str) -> Result<DataVersion> {
     let data = version_metadata(workspace, id, kind)?;
     let path = workspace.resolve(&data.path);
     if kind == "market" {
+        if let Some(hashes) = data.details["evidence_sha256"].as_object() {
+            for (name, expected) in hashes {
+                if Path::new(name).file_name().and_then(|n| n.to_str()) != Some(name) {
+                    return Err("unsafe market evidence name".into());
+                }
+                let raw = path
+                    .parent()
+                    .ok_or("missing parent")?
+                    .join("raw")
+                    .join(name);
+                let actual = format!("sha256:{:x}", Sha256::digest(fs::read(raw)?));
+                if expected.as_str() != Some(actual.as_str()) {
+                    return Err("market evidence changed".into());
+                }
+            }
+        }
         if data.details["content_sha256"] != market_content_hash(&path)? {
             return Err("registered market bytes changed; register it as a new version".into());
         }
@@ -742,6 +892,122 @@ fn execute_scoped(
     let mut data = None;
     let mut details = Value::Null;
     match request {
+        WorkflowRequest::IdentityOperation {
+            method,
+            id,
+            path,
+            provider,
+            symbol,
+            date,
+        } => {
+            details = match method.as_str() {
+                "list" => w.identity_versions()?,
+                "capture" => {
+                    let request: Value = serde_json::from_slice(&fs::read(w.resolve(path))?)?;
+                    let urls: Vec<String> = serde_json::from_value(request["urls"].clone())?;
+                    let output = w.resolve(&run.output).join("identity-evidence");
+                    analytics_storage::security::capture_sources(&urls, &output)?
+                }
+                "import" | "review" => {
+                    serde_json::to_value(w.import_identities(&w.resolve(path))?)?
+                }
+                "export" => w.export_identities(id, &w.resolve(path))?,
+                "show" => serde_json::to_value(w.identities(id)?)?,
+                "check" if symbol.is_empty() => {
+                    json!({"version":w.identity_version(id)?,"valid":true})
+                }
+                "check" => identities::lookup(&w.identities(id)?, provider, symbol, *date)?,
+                _ => return Err("unknown identity operation".into()),
+            };
+        }
+        WorkflowRequest::PreviewResearch {
+            template,
+            market,
+            actions,
+        } => {
+            details = research_requirements_with_actions(w, template, market, actions.as_deref())?;
+        }
+        WorkflowRequest::PrepareResearchData {
+            actions,
+            template,
+            market,
+            announcements,
+            resume,
+        } => {
+            details = research_requirements_with_actions(w, template, market, actions.as_deref())?;
+            atomic_json(&w.resolve(&run.output).join("requirements.json"), &details)?;
+            details = preparation::prepare(w, run, &details, *announcements, *resume, context)?;
+            atomic_json(
+                &w.resolve(&run.output).join("execution_readiness.json"),
+                &details,
+            )?;
+            atomic_json(&w.resolve(&run.output).join("outcome.json"), &details)?;
+            return Err("data_not_ready: acquisition candidates require identity/event-category review; see execution_readiness.json".into());
+        }
+
+        WorkflowRequest::InspectActions {
+            actions,
+            instrument,
+            evidence_manifest,
+        } => {
+            analytics_core::pool::validate_instrument(instrument)?;
+            let source = version(w, actions, "actions")?;
+            let book = ActionBundle::read(&w.resolve(source.path))?;
+            let events: Vec<_> = book
+                .actions
+                .iter()
+                .filter(|a| a.instrument == *instrument)
+                .map(|a| Ok(json!({"original":a,"original_sha256":signature(a)?})))
+                .collect::<Result<_>>()?;
+            let documents = if let Some(path) = evidence_manifest {
+                let path = w.resolve(path).canonicalize()?;
+                if !path.starts_with(w.root.canonicalize()?) {
+                    return Err("announcement evidence must belong to this workspace".into());
+                }
+                let docs = analytics_storage::corporate_actions::review::verified_documents(&path)?;
+                docs.into_values()
+                    .filter(|(d, _)| d["instrument"] == *instrument)
+                    .map(|(d, text)| json!({"document":d,"extracted_text":text}))
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            details = json!({"instrument":instrument,"events":events,"source_failure":book.failures.get(instrument),"documents":documents});
+        }
+        WorkflowRequest::ReviseActions { actions, request } => {
+            let source = version(w, actions, "actions")?;
+            let source_path = w.resolve(&source.path);
+            let book = ActionBundle::read(&source_path)?;
+            let mut request = request.clone();
+            request.evidence_manifest = w.resolve(&request.evidence_manifest).canonicalize()?;
+            if !request
+                .evidence_manifest
+                .starts_with(w.root.canonicalize()?)
+            {
+                return Err("announcement evidence must belong to this workspace".into());
+            }
+            let staging = w.resolve(format!(".jfquant/staging/action-review-{}", run.id));
+            analytics_storage::corporate_actions::review::apply(
+                &book,
+                source_path.parent().ok_or("missing source root")?,
+                &request,
+                &staging,
+            )?;
+            let output = w.resolve(format!("data/action-review-{}", run.id));
+            fs::rename(staging, &output)?;
+            data = Some(w.register(&output.join("actions.json"))?);
+        }
+        WorkflowRequest::SavePool { definition } => {
+            details = serde_json::to_value(w.save_pool(definition.clone())?)?;
+        }
+        WorkflowRequest::PreviewPool { id, market, day } => {
+            details = w.preview_pool(id, market, *day)?;
+        }
+        WorkflowRequest::CreateCanonicalDemo {} => {
+            let (m, a, t) = demo::create_canonical(w)?;
+            details = json!({"demo_actions":a.id,"demo_template":t});
+            data = Some(m);
+        }
         WorkflowRequest::CreateDemo {} => {
             context.report("创建合成演示输入（不是真实行情）")?;
             let (m, a, t) = demo::create(w)?;
@@ -773,17 +1039,36 @@ fn execute_scoped(
             analytics_storage::acquisition::fetch_release_resumable(tag, &staging, &output)?;
             data = Some(w.register(&output.join("qlib_bin"))?);
         }
+        WorkflowRequest::CollectActions { request, resume } => {
+            let owner = resume.unwrap_or(run.id);
+            let staging = w
+                .root
+                .join(format!(".jfquant/staging/python-actions-{owner}"));
+            analytics_storage::collector::collect_actions(request, &staging, context)?;
+            let output = w.root.join(format!("data/python-actions-{}", run.id));
+            fs::rename(staging, &output)?;
+            data = Some(w.register(&output.join("actions.json"))?);
+        }
+        WorkflowRequest::CollectMarket { request, resume } => {
+            let owner = resume.unwrap_or(run.id);
+            let staging = w.root.join(format!(".jfquant/staging/collector-{owner}"));
+            analytics_storage::collector::collect(request, &staging, context)?;
+            let output = w.root.join(format!("data/collector-{}", run.id));
+            fs::rename(staging, &output)?;
+            data = Some(w.register(&output.join("market"))?);
+        }
         WorkflowRequest::RegisterData { path } => {
             context.report("核验本地数据来源")?;
             data = Some(w.register(&w.resolve(path))?);
         }
-        WorkflowRequest::DownloadActions { market, resume } => {
-            let m = version(w, market, "market")?;
-            let dataset = QlibDataset::open(w.resolve(&m.path))?;
-            let symbols = dataset
-                .membership("csi500")?
-                .into_keys()
-                .collect::<Vec<_>>();
+        WorkflowRequest::DownloadActions {
+            market,
+            resume,
+            pool_version,
+        } => {
+            version(w, market, "market")?;
+            let (pool, _) = w.resolve_pool(pool_version, market)?;
+            let symbols = pool.intervals.into_keys().collect::<Vec<_>>();
             let path = w.root.join(format!("data/actions-{}", run.id));
             let owner = resume.unwrap_or(run.id);
             let staging = w.root.join(format!(".jfquant/staging/actions-{owner}"));
@@ -854,6 +1139,15 @@ fn execute_scoped(
 }
 /// Snapshot selected input versions when creating a run, rather than resolving them later.
 pub fn snapshot(workspace: &Workspace, request: &WorkflowRequest) -> Result<Value> {
+    match request {
+        WorkflowRequest::CollectMarket { request, .. }
+        | WorkflowRequest::CollectActions { request, .. } => request.validate()?,
+        WorkflowRequest::Research { template, .. }
+        | WorkflowRequest::PreviewResearch { template, .. }
+        | WorkflowRequest::PrepareResearchData { template, .. } => template.validate()?,
+        WorkflowRequest::SavePool { definition } => definition.validate()?,
+        _ => {}
+    };
     let versions = match request {
         WorkflowRequest::Research {
             market, actions, ..
@@ -861,16 +1155,20 @@ pub fn snapshot(workspace: &Workspace, request: &WorkflowRequest) -> Result<Valu
             version_metadata(workspace, market, "market")?,
             version_metadata(workspace, actions, "actions")?,
         ],
-        WorkflowRequest::DownloadActions { market, .. } => {
+        WorkflowRequest::DownloadActions { market, .. }
+        | WorkflowRequest::PreviewResearch { market, .. }
+        | WorkflowRequest::PrepareResearchData { market, .. } => {
             vec![version_metadata(workspace, market, "market")?]
         }
-        WorkflowRequest::SupplementActions { actions, .. } => {
+        WorkflowRequest::SupplementActions { actions, .. }
+        | WorkflowRequest::ReviseActions { actions, .. }
+        | WorkflowRequest::InspectActions { actions, .. } => {
             vec![version_metadata(workspace, actions, "actions")?]
         }
         _ => Vec::new(),
     };
     Ok(
-        json!({"request":request,"inputs":versions,"app_version":env!("CARGO_PKG_VERSION"),"formula_version":analytics_factor::FORMULA_VERSION}),
+        json!({"request":request,"inputs":versions,"app_version":env!("CARGO_PKG_VERSION"),"formula_version":analytics_factor::FORMULA_VERSION,"pool_definition": match request { WorkflowRequest::Research{template,..} if !template.pool_version.starts_with("builtin:") => Some(workspace.pool(&template.pool_version)?), _ => None }}),
     )
 }
 
@@ -961,6 +1259,8 @@ pub fn self_check(root: &Path) -> Result<Value> {
 pub mod testing;
 
 #[cfg(test)]
+mod quality_tests;
+#[cfg(test)]
 mod tests;
 
 pub(crate) fn research(
@@ -975,14 +1275,175 @@ pub(crate) fn research(
     template.validate()?;
     let mut request = ResearchRequest::new(w.resolve(&market.path), w.resolve(&run.output));
     request.config = template.config.clone();
-    request.first_test_year = template.first_test_year;
-    request.last_year = template.last_year;
+    request.quality_policy = template.quality_policy.clone();
+    request.schedule = template.schedule.clone();
+    request.action_policy = template.action_policy.clone();
     request.market_rules = template.market_rules.clone();
     request.initial_cash_cny = template.initial_cash_cny;
     request.dividend_withholding_rate = template.dividend_withholding_rate;
     request.corporate_actions = Some(w.resolve(&actions.path));
     request.audit_only = audit_only;
+    request.benchmark = template.benchmark.clone();
+    request.pool_exit_policy = template.pool_exit_policy;
+    let (mut pool, mut frozen) = match w.resolve_pool(&template.pool_version, &market.id) {
+        Ok(p) => p,
+        Err(e) => {
+            atomic_json(
+                &w.resolve(&run.output).join("execution_readiness.json"),
+                &json!({"ready":false,"reason":e.to_string()}),
+            )?;
+            return if audit_only { w.results(run) } else { Err(e) };
+        }
+    };
+    match w.identities(&template.identity_version) {
+        Ok(registry) => {
+            frozen["identity_issues"] = identities::resolve_pool(&registry, &mut pool);
+            frozen["identity_version"] =
+                serde_json::to_value(w.identity_version(&template.identity_version)?)?;
+            let dataset = DailyDataset::open(w.resolve(&market.path))?;
+            let folds = template.schedule.resolve(&dataset.calendar)?;
+            match identities::resolve_selector(
+                &registry,
+                &template.benchmark,
+                &analytics_core::DateRange {
+                    start: folds[0].warmup_start,
+                    end: folds.last().unwrap().actual.test.end,
+                },
+            ) {
+                Ok(id) => request.benchmark = id,
+                Err(e) => frozen["benchmark_identity_issue"] = json!(e.to_string()),
+            };
+            request.identity_registry = Some(registry);
+        }
+        Err(e) => {
+            frozen["identity_issues"] =
+                json!([{"code":"identity_directory_missing_or_invalid","message":e.to_string()}]);
+        }
+    }
+    request.pool_signature = signature(&frozen)?;
+    request.pool = Some(pool);
+    request.universe_id = template.pool_version.clone();
+    atomic_json(&w.resolve(&run.output).join("pool.json"), &frozen)?;
     context.report("检查研究输入与公司行动")?;
     analytics_ml::backtest::run_with_context(&request, context)?;
     w.results(run)
+}
+
+/// Shared pre-run schedule and security requirements; does not allocate native model handles.
+pub fn research_requirements(w: &Workspace, t: &ResearchTemplate, market: &str) -> Result<Value> {
+    research_requirements_with_actions(w, t, market, None)
+}
+/// Include reviewed transitive successors while retaining an explicit not-run when no book is selected.
+pub fn research_requirements_with_actions(
+    w: &Workspace,
+    t: &ResearchTemplate,
+    market: &str,
+    actions: Option<&str>,
+) -> Result<Value> {
+    t.validate()?;
+    let selected_market = version(w, market, "market")?;
+    let mut dataset =
+        analytics_storage::daily::DailyDataset::open(w.resolve(selected_market.path))?;
+    let folds = t.schedule.resolve(&dataset.calendar)?;
+    let (mut pool, mut frozen) = w.resolve_pool(&t.pool_version, market)?;
+    let selected_registry = w.identities(&t.identity_version);
+    let registry_error = selected_registry.as_ref().err().map(|e| e.to_string());
+    let registry = selected_registry.ok();
+    let identity_issues = match &registry {
+        Some(r) => identities::resolve_pool(r, &mut pool),
+        None => json!([{"code":"identity_directory_missing_or_invalid","message":registry_error}]),
+    };
+    frozen["identity_version"] = json!(t.identity_version);
+    frozen["identity_issues"] = identity_issues.clone();
+    let lo = folds
+        .iter()
+        .map(|f| f.warmup_start)
+        .min()
+        .ok_or("empty schedule")?;
+    let hi = folds.last().unwrap().actual.test.end;
+    dataset.restrict_reads(analytics_core::DateRange { start: lo, end: hi })?;
+    if let Some(r) = &registry {
+        dataset.bind_registry(r.clone())?;
+    }
+    let benchmark = match &registry {
+        Some(r) => identities::resolve_selector(
+            r,
+            &t.benchmark,
+            &analytics_core::DateRange { start: lo, end: hi },
+        )
+        .unwrap_or_else(|_| t.benchmark.clone()),
+        None => t.benchmark.clone(),
+    };
+    let benchmark_identity = json!({"status":if analytics_core::security::is_security_id(&benchmark){"passed"}else{"failed"},"selector":t.benchmark,"security_id":benchmark,"message":if analytics_core::security::is_security_id(&benchmark){"resolved without joining securities"}else{"benchmark identity/range unresolved"}});
+    let mut symbols: std::collections::BTreeSet<_> = pool
+        .intervals
+        .iter()
+        .filter(|(_, rs)| rs.iter().any(|r| r.start <= hi && r.end >= lo))
+        .map(|(id, _)| id.clone())
+        .collect();
+    if !dataset.is_price_index(&benchmark).unwrap_or(false) {
+        symbols.insert(benchmark.clone());
+    }
+    let successor_check = match actions {
+        Some(id) => match version(w, id, "actions")
+            .and_then(|v| Ok(ActionBundle::read(&w.resolve(v.path))?))
+        {
+            Ok(book) => {
+                let seeds = pool
+                    .intervals
+                    .iter()
+                    .filter(|(_, rs)| {
+                        rs.iter()
+                            .any(|r| r.end >= folds[0].actual.test.start && r.start <= hi)
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                symbols.extend(book.required_symbols(&seeds, folds[0].actual.test.start, hi));
+                json!({"status":"passed","action_version":id})
+            }
+            Err(e) => json!({"status":"failed","action_version":id,"message":e.to_string()}),
+        },
+        None => {
+            json!({"status":"not_run","message":"select an action version to enumerate successors"})
+        }
+    };
+    let mut dependencies = std::collections::BTreeMap::new();
+    for id in &symbols {
+        let record = registry.as_ref().and_then(|r| r.securities.get(id));
+        let history = analytics_core::DateRange {
+            start: record.map_or(lo, |r| lo.max(r.lifetime.start)),
+            end: record.map_or(hi, |r| hi.min(r.lifetime.end)),
+        };
+        let member = pool.intervals.get(id).cloned().unwrap_or_default();
+        let execution = member
+            .iter()
+            .any(|r| r.end >= folds[0].actual.test.start && r.start <= hi);
+        dependencies.insert(id,json!({"security_id":if record.is_some(){Some(id)}else{None},"required_history":history,"membership":member,"purpose":if *id==benchmark{"benchmark"}else if execution{"features_and_account"}else if pool.intervals.contains_key(id){"historical_cross_section"}else{"successor_account"},"identity_status":if record.is_some(){"passed"}else{"failed"}}));
+    }
+    let mut preview_pool = pool.clone();
+    preview_pool.intervals.retain(|_, rs| {
+        rs.retain(|r| r.end >= lo && r.start <= hi);
+        !rs.is_empty()
+    });
+    let qualification_book = actions
+        .and_then(|id| version(w, id, "actions").ok())
+        .and_then(|v| ActionBundle::read(&w.resolve(v.path)).ok());
+    let quality = analytics_ml::backtest::quality::qualify(
+        &dataset,
+        &preview_pool,
+        registry.as_ref(),
+        &t.quality_policy,
+        &analytics_core::DateRange { start: lo, end: hi },
+        &t.config.factor_ids,
+        qualification_book.as_ref(),
+    )?;
+    let sample_readiness = analytics_ml::backtest::preview_samples_with_policy(
+        &dataset,
+        &quality.effective_pool,
+        &folds,
+        &t.quality_policy,
+    )?;
+    Ok(
+        json!({"quality":quality,"dependencies":dependencies,"benchmark_identity":benchmark_identity,"successor_check":successor_check,"resolved_folds":folds,"sample_readiness":sample_readiness,"securities":symbols,"history_start":lo,"execution_end":hi,"pool":frozen,"schema_version":1,"identity_issues":identity_issues,"identity_registry":registry,"benchmark":benchmark,"unknown_cross_section_before":pool.coverage.start}),
+    )
 }

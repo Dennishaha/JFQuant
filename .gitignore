@@ -11,3 +11,7 @@ model.txt
 .jfquant/
 data/
 
+__pycache__/
+*.pyc
+.ruff_cache/
+.venv/

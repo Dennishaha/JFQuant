@@ -10,17 +10,61 @@ trap 'run_cli service stop >/dev/null 2>&1 || true' EXIT
 run_cli --help > "$check_root/help.txt"
 run_cli self-check --output "$check_root/native" > "$check_root/native.json"
 run_cli workspace create "$check_root/workspace" > "$check_root/workspace.json"
-run_cli research demo > "$check_root/submission.json"
+run_cli research demo-parquet > "$check_root/submission.json"
 demo_id="$(plutil -extract task_id raw -o - "$check_root/submission.json")"
 run_cli jobs wait "$demo_id" --timeout 30 > "$check_root/demo-wait.json"
 run_cli jobs results "$demo_id" > "$check_root/demo.json"
 plutil -extract details.demo_template json -o "$check_root/recipe.json" "$check_root/demo.json"
 market="$(plutil -extract data.id raw -o - "$check_root/demo.json")"
 actions="$(plutil -extract details.demo_actions raw -o - "$check_root/demo.json")"
+identity="$(plutil -extract details.demo_template.identity_version raw -o - "$check_root/demo.json")"
+run_cli identities show "$identity" > "$check_root/identity-submission.json"
+identity_task="$(plutil -extract task_id raw -o - "$check_root/identity-submission.json")"
+run_cli jobs wait "$identity_task" --timeout 30 > "$check_root/identity-result.json"
+[ "$(plutil -extract results.details.schema_version raw -o - "$check_root/identity-result.json")" = 1 ]
 run_cli research run --template "$check_root/recipe.json" --market "$market" --actions "$actions" > "$check_root/research-submission.json"
 research_id="$(plutil -extract task_id raw -o - "$check_root/research-submission.json")"
 run_cli jobs wait "$research_id" --timeout 60 > "$check_root/research.json"
 run_cli jobs results "$research_id" > "$check_root/online-results.json"
+[ "$(plutil -extract schema_version raw -o - "$check_root/online-results.json")" = 9 ]
+[ "$(plutil -extract execution.mode raw -o - "$check_root/online-results.json")" = raw_integer_shares ]
+"$app/Contents/Resources/python/bin/python3" -I -B - "$check_root/online-results.json" <<'PY'
+import hashlib
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    report = json.load(handle)
+inputs = report["execution"]["price_inputs"]
+assert inputs["normalization"] == "explicit-hfq-first-raw-close-v1;shares;cny;nulls"
+assert inputs["securities"]
+encoded = json.dumps(inputs, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
+assert "sha256:" + hashlib.sha256(encoded).hexdigest() == report["execution"]["price_input_sha256"]
+for security in inputs["securities"].values():
+    assert security["anchor"]["factor"]
+    assert security["sha256"].startswith("sha256:")
+PY
+# All three user-facing modes run through the same shipped service and produce current results.
+for strictness in strict allow_missing qualified_only; do
+  run_cli research run --template "$check_root/recipe.json" --market "$market" --actions "$actions" \
+    --strictness "$strictness" --min-valid-feature-ratio 0 --min-labeled-rows 1 > "$check_root/quality-$strictness-submission.json"
+  quality_id="$(plutil -extract task_id raw -o - "$check_root/quality-$strictness-submission.json")"
+  run_cli jobs wait "$quality_id" --timeout 60 > "$check_root/quality-$strictness.json"
+  [ "$(plutil -extract results.execution.quality_policy.strictness raw -o - "$check_root/quality-$strictness.json")" = "$strictness" ]
+  [ "$(plutil -extract results.admission.schema_version raw -o - "$check_root/quality-$strictness.json")" = 2 ]
+done
+# Exercise real date controls and absence of a validation set through the same service.
+run_cli research preview --template "$check_root/recipe.json" --market "$market" \
+  --train-start 2007-01-02 --train-end 2008-01-12 \
+  --test-start 2009-01-05 --test-end 2009-01-12 --no-validation > "$check_root/date-preview-submission.json"
+preview_id="$(plutil -extract task_id raw -o - "$check_root/date-preview-submission.json")"
+run_cli jobs wait "$preview_id" --timeout 30 > "$check_root/date-preview.json"
+run_cli research run --template "$check_root/recipe.json" --market "$market" --actions "$actions" \
+  --train-start 2007-01-02 --train-end 2008-01-12 \
+  --test-start 2009-01-05 --test-end 2009-01-12 --no-validation > "$check_root/date-run-submission.json"
+date_id="$(plutil -extract task_id raw -o - "$check_root/date-run-submission.json")"
+run_cli jobs wait "$date_id" --timeout 60 > "$check_root/date-run.json"
+[ "$(plutil -extract results.fold_reports.0.validation_rows raw -o - "$check_root/date-run.json")" = 0 ]
 # Build complete small Parquet inputs through the shared SQL exporter, then
 # submit the standard pipeline request using only packaged/native facilities.
 pipeline_dir=".jfquant/pipeline-$(uuidgen)"

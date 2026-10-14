@@ -10,6 +10,7 @@ name = "jfquant"
 path = "src/main.rs"
 
 [dependencies]
+analytics-storage = { path = "../storage" }
 analytics-core = { path = "../core" }
 analytics-workflow = { path = "../workflow" }
 analytics-ml = { path = "../ml", features = ["lightgbm-native", "duckdb-native"] }

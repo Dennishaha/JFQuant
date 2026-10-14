@@ -118,8 +118,16 @@ impl TrainingSplit {
     /// Validates every matrix and requires equal feature counts.
     pub fn validate(&self) -> Result<()> {
         self.train.validate()?;
-        self.validation.validate()?;
-        self.test.validate()?;
+        for matrix in [&self.validation, &self.test] {
+            if matrix.rows > 0 {
+                matrix.validate()?;
+            } else if matrix.columns == 0
+                || !matrix.features.is_empty()
+                || !matrix.labels.is_empty()
+            {
+                return Err(MlError::InvalidData("invalid empty optional matrix".into()));
+            }
+        }
         if self.train.columns != self.validation.columns || self.train.columns != self.test.columns
         {
             return Err(MlError::InvalidData(
@@ -818,8 +826,8 @@ mod native {
             self.train_impl(
                 request,
                 &split.train,
-                Some(&split.validation),
-                Some(&split.test),
+                (split.validation.rows > 0).then_some(&split.validation),
+                (split.test.rows > 0).then_some(&split.test),
                 output_dir,
                 progress,
                 cancel,

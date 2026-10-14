@@ -74,10 +74,77 @@ market_rules::MarketRulesPreset、ExchangeFees、BoardRules、BrokerCommission�
 
 execution::CorporateAction、ShareLedger、Position、receivable权利及fill返回的FeeBreakdown承载原价、整数股、现金、T+1及跨年账本。公司行动schema中每股现金/红股数量、公告/登记/除权日、实际支付/上市日和来源必需；仅当相应分配数量为0时可不填结算日期。字段缺失和特殊分配解释失败必须拒绝，不能猜日期。登记日收盘确定权益、除权确认应收、实际支付/上市日释放可用现金/股份；登记后卖出旧股仍保有权益，除权日新买入不取得旧权益。
 
-每年度模型换代不重置ShareLedger，不以年度虚拟卖出处理真实股数。买入预算含实际费用，按板块整手及价格规则成交；持仓估值包含未到账权益，不重复确认红利收益。缺失交易价时不成交。股数为整数，不支持不明确的零碎股分配或配股。
+每年度模型换代不重置ShareLedger，不以年度虚拟卖出处理真实股数。买入预算含实际费用，按板块整手及价格规则成交；持仓估值包含未到账权益，不重复确认红利收益。缺失交易价时不成交。股数为整数；零碎股分配和配股须有实施证据及完整执行条款，缺项时拒绝。
 
 ## 任务上下文与JSON数值
 
 TaskContext::new/current/install/execute/report/check提供任务ID、取消Arc和进度回调，TaskScope在正常返回和unwind时恢复线程上下文。下载子worker显式继承，原生计算在所属worker内调用；取消以Interrupted错误返回，不跨线程传递DuckDB/LightGBM句柄。
 
 ScalarValue::Float64的JSON使用有限数值或字符串NaN/Infinity/-Infinity保存非有限结果，解码只接受这三个标记。SQL NULL仍为独立Null枚举值；此表示不改变因子null到LightGBM missing的约定。
+
+## 日期生效股票池
+
+`pool` 提供 `PoolDefinition / PoolExpression / PoolAdjustment / PoolMembership / PoolExitPolicy`，格式版本2。研究证券使用独立SEC身份；SH/SZ/BJ加六位代码仅为日期化定位符；组合支持并集、交集、差集。人工增删从生效交易日起持续，周末调整顺延到下一交易日，同一交易日的增删冲突拒绝。引用源必须覆盖所需日期；空集合是有效状态，不扩展到全市场。
+
+```mermaid
+flowchart LR
+  SOURCES["不可变历史成员区间或显式自选"] --> SETS["并集 / 交集 / 差集"]
+  SETS --> OVERRIDE["日期调整：顺延、冲突检查、持续覆盖"]
+  OVERRIDE --> MASK["逐日成员与区间"]
+  MASK --> FEATURES["当日因子截面与训练样本"]
+  MASK --> ORDERS["执行日买入资格与退出策略"]
+```
+
+`NextTradableDay` 默认在下一可交易日退出；`NextRebalance` 在下一正常调仓时启动退出，之后持续重试。纯类型和运算由 `cargo nextest run -p analytics-core` 验收；执行限制、权益和费用测试位于 ML 组件。
+
+股票池求值只声明已经实际计算的交易日覆盖区间；定义中的未来增删可以保存，不能扩张当前数据覆盖，也不能改变过去成员。
+
+## 历史调整与执行权益
+
+CorporateAction::validate_adjustment_terms核验证券、公告/登记/除权日及每股金额/送转比例，用于历史价量。validate复用前者并要求实际支付/上市日期，用于账户权益。历史输入不创造过去账户，也不补猜结算日期；撮合仍使用原价、真实整数股及T+1。
+
+## 任意日期与全类公司行动
+
+`schedule::Schedule`只有single、rolling、manual三种当前模式；Fold包含任意train、可选validation和test日期。resolve根据所选日历生成requested/actual日期、756日预热范围；固定/扩展训练、日/月/年/交易日步长均从首折原始日期计算，保持月末语义。拒绝重叠、未来训练、空窗口和显式覆盖越界。
+
+`actions::EventTerms`区分普通分派、差异化分派、配股、缩股/股权分置/重整/换股/代码变更和退市。实际权益与Reference除权参数分离，特殊金额保存十进制原文；Historical只支持历史调整核验，进入账户区间必须补齐可执行条款。ShareLedger按登记、缴款、退款、到账与上市推进；配股默认可用现金比例分配、事件ID分配余量，不借款。零碎股需Exact或有证据的Floor/CashInLieu规则；未上市继承权益与退市债权必须有报价或覆盖有效日期的估值。不主动行使现金选择权。
+
+```mermaid
+flowchart LR
+  S[日期调度与实施事件] --> V[结构/来源/参考校验]
+  V --> F[冻结实际折日期]
+  V --> R[记录日确定权益]
+  R --> C[现金/待交付股份/认购退款]
+  C --> L[真实到账与上市]
+  L --> A[持续整数股账户]
+```
+
+开发验收：`cargo nextest run -p analytics-core`覆盖月末/闰年/窗口、配股分配、换股延迟、差异化现金、非股东重整、零碎股及退市清偿。
+
+## 为什么需要本组件
+
+表达研究约束而非供应商接口。证券身份、成员日期、事件权益和账户规则必须在联网、GUI和模型之外独立验证。同一个600018先后对应不同证券，因此交易代码只能是日期化定位符；永久证券身份保证持仓承继不会变成行情拼接。
+
+设计依据：2026-10-14接受的证券身份与完整准入计划、组件接口及测试。未在代码或证据中确认的历史取舍不推定为既有设计理由；来源、法规或数据格式变化时重新评估。
+
+
+普通分红送转的Distribution可显式提供allocation。实际账户出现零碎股时按登记证据取整或现金补偿，补偿按给定到账日结算；公开研究遇到非整数送转比例且无有效规则时在训练前阻断。合并关系目录只确认主体与比例，event_id未裁定不会补猜权益日期。该限制避免先训练、后因无法解释股数而失去完整账户结果。
+
+## 三级研究模式：为什么允许筛选
+
+决定日期2026-10-14，依据是用户接受的三级模式计划。正常预热空值、来源缺失和错误数据是不同问题：全部拒绝会浪费可用样本，全部放行又会混淆因子和真实权益。默认严格检查；另外提供“允许部分数据缺失”和“只用数据合格的股票”。模式是研究输入的一部分，不能作为训练失败后自动切换的兜底。
+
+第二档保持原成员，纯缺失传播null；第三档派生每日合格成员，不改原始成员或证据。不能看到后来缺价而倒删早期股票。账户仍采用原价、整数股、T+1和连续权益；未裁定冲突、损坏、基准缺项及剩余必要依赖仍阻断。默认有效因子比例0表示至少一项有效，最低有标签样本1只表示可执行，不表示样本在统计上充分。所选因子整列无有效值不会被自动删除。
+
+公共类型在[research_quality.rs](src/research_quality.rs)：ResearchStrictness、ResearchQualityPolicy、ProblemKind、ProblemDisposition及QualityDecision。策略校验与筛选门槛在core，clap类型留在CLI。AdmissionReport格式2保留passed/failed/not_run，另外记录处理方式；只有纯缺失的keep_null可在第二档非阻断，损坏和未执行不能改写为通过。枚举提供中文label/description供App统一显示。验收：`cargo nextest run -p analytics-core`。
+
+```mermaid
+flowchart LR
+  P[模式与门槛] --> C[结构化数据检查]
+  C --> U[原股票池或每日合格池]
+  U --> F[因子与nullable输入]
+  F --> M[按折样本掩码]
+  M --> G[剩余依赖与账户门禁]
+  G -->|通过| T[冻结签名后训练]
+  G -->|未通过| E[原因及处理清单]
+```

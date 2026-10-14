@@ -10,9 +10,12 @@
 //! Parquet directory -> ParquetCatalog -> Vec<DatasetFile> -> engine / factor
 //! ```
 #![warn(missing_docs)]
+pub mod security;
 
 pub mod acquisition;
+pub mod collector;
 pub mod corporate_actions;
+pub mod daily;
 pub mod qlib;
 
 use analytics_core::{ColumnSchema, DataType, DatasetFile};
@@ -239,3 +242,6 @@ mod tests {
 
 /// Cancellable public-data network transport.
 pub mod transport;
+
+/// Independent dated multiplicative adjustment coefficients.
+pub mod adjustment;

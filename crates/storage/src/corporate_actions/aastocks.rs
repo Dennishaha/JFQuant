@@ -73,7 +73,7 @@ fn supplement_pay_dates(
     saved_only: bool,
 ) -> io::Result<ActionBundle> {
     source.validate_identity()?;
-    if start > end || source.schema_version != 1 {
+    if start > end || source.schema_version != 3 {
         return Err(invalid("invalid payment range/bundle"));
     }
     let symbols: Vec<_> = source
@@ -110,15 +110,22 @@ fn supplement_pay_dates(
                     }
                     let i = index.fetch_add(1, Ordering::Relaxed);
                     let Some(id) = symbols.get(i) else { break };
+                    let selected = source.source_symbol(id).map(str::to_owned);
+                    let code = selected.as_deref().unwrap_or("");
                     let url = format!(
                         "https://quotes.aastocks.com/sc/cnhk/analysis/dividend.aspx?shsymbol={}",
-                        &id[2..]
+                        code.get(2..).unwrap_or("")
                     );
                     let result = (|| {
+                        selected.as_ref().map_err(invalid)?;
                         if saved_only {
                             let bytes = fs::read(output.join(format!("raw/{id}-aastocks.html")))?;
                             let html = String::from_utf8(bytes).map_err(invalid)?;
-                            if !html.contains(&format!("({}.{})", &id[2..], &id[..2])) {
+                            if !html.contains(&format!(
+                                "({}.{})",
+                                code.get(2..).unwrap_or(""),
+                                code.get(..2).unwrap_or("")
+                            )) {
                                 return Err(invalid("AAStocks security identity mismatch"));
                             }
                             return parse(&html, start, end);
@@ -141,7 +148,11 @@ fn supplement_pay_dates(
                             &output.join(format!("raw/{id}-aastocks.html")),
                         )?;
                         let html = String::from_utf8(bytes).map_err(invalid)?;
-                        if !html.contains(&format!("({}.{})", &id[2..], &id[..2])) {
+                        if !html.contains(&format!(
+                            "({}.{})",
+                            code.get(2..).unwrap_or(""),
+                            code.get(..2).unwrap_or("")
+                        )) {
                             return Err(invalid("AAStocks security identity mismatch"));
                         }
                         parse(&html, start, end)
@@ -217,7 +228,7 @@ fn supplement_pay_dates(
         .filter(|a| a.ex_date >= start && a.ex_date <= end)
         .filter_map(|a| a.validate().err().map(|e| format!("{}: {e}", a.id)))
         .collect();
-    fs::write(output.join("payment_coverage.json"),serde_json::to_vec_pretty(&serde_json::json!({"start":start,"end":end,"saved_evidence_only":saved_only,"processed_at":chrono::Utc::now().to_rfc3339(),"symbols_requested":symbols.len(),"cash_dates_added":added,"failures":failures,"incomplete_events":missing,"complete_for_execution":missing.is_empty()&&bundle.failures.is_empty()})).map_err(invalid)?)?;
+    fs::write(output.join("payment_coverage.json"),serde_json::to_vec_pretty(&serde_json::json!({"start":start,"end":end,"saved_evidence_only":saved_only,"processed_at":chrono::Utc::now().to_rfc3339(),"symbols_requested":symbols.len(),"cash_dates_added":added,"failures":failures,"incomplete_events":missing,"complete_for_execution":false,"event_categories":"unverified"})).map_err(invalid)?)?;
     Ok(bundle)
 }
 #[cfg(test)]
@@ -265,7 +276,9 @@ mod tests {
         let html = "(600000.SH)<div id=\"cp_pBottom\"><table><tr><td>公告日期</td><td>年度</td><td>分红</td><td>送股</td><td>股权登记日</td><td>除权除息日</td><td>派送日</td></tr><tr><td>2017/07/08</td><td>2016</td><td>¥3.700</td><td>-/-</td><td>2017/07/13</td><td>2017/07/14</td><td>2017/07/18</td></tr></table></div>";
         fs::write(root.join("raw").join(name), html).unwrap();
         let source = ActionBundle {
-            schema_version: 1,
+            schema_version: 3,
+            source_bindings: Default::default(),
+            coverage: Default::default(),
             downloader: "JFQuant analytics-storage corporate-actions".into(),
             downloaded_at: "2026-10-13T00:00:00Z".into(),
             queried_symbols: BTreeSet::from(["SH600000".into()]),
@@ -279,6 +292,7 @@ mod tests {
                 listing_date: None,
                 cash_per_share: 0.37,
                 shares_per_share: 0.0,
+                terms: Default::default(),
                 source: "https://example.test/evidence".into(),
             }],
             failures: BTreeMap::new(),
@@ -302,9 +316,13 @@ mod tests {
             repaired.actions[0].pay_date,
             Some("2017-07-18".parse().unwrap())
         );
-        repaired
-            .require_coverage(&source.queried_symbols, start, end)
-            .unwrap();
+        repaired.actions[0].validate().unwrap();
+        assert!(
+            repaired
+                .require_coverage(&source.queried_symbols, start, end)
+                .is_err(),
+            "payment repair must not certify other event categories"
+        );
         fs::write(root.join("raw").join(name), "altered evidence").unwrap();
         assert!(
             repair_pay_dates(&source, &root, &temp.path().join("tampered"), start, end).is_err()

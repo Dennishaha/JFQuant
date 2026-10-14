@@ -13,6 +13,9 @@
 | [qlib.rs](qlib.rs) | `QlibDataset/DailyField`、真实交易日历、历史membership、nullable float32偏移读取、原价恢复 |
 | [transport.rs](transport.rs) | 受`TaskContext`管理的curl、并发读取stdout/stderr、超时与取消回收；JSON请求错误 |
 | [corporate_actions.rs](corporate_actions.rs) | `ActionBundle`、公开历史/详情解析、来源对账、日期补充、失败项重试与证据repair |
+| [collector.rs](collector.rs) | 包内采集监督、协议4、限速/取消、分片证据与检查点校验 |
+| [adjustment.rs](adjustment.rs) | 显式日期系数、证券身份、首个原价收盘锚点和转换版本 |
+| [daily.rs](daily.rs) | Qlib/规范行情4共用读取、研究价量、原价及真实成交股数 |
 
 ```mermaid
 flowchart TD
@@ -58,3 +61,77 @@ cargo nextest run -p analytics-cli -E 'test(standard_download) | test(standard_a
 ```
 
 前两项核对schema、归档、二进制读取、解析器、本地HTTP故障和子进程取消；最后一项还需[原生环境](../../README.md#开发与验收)，验证任务记录、busy及原子版本发布。真实公网下载只作单独验收，不进入网络依赖单元测试。数据、证据和检查点不提交Git。
+
+## 双源采集与统一日行情
+
+`collector::CollectionRequest / Provider / collect / collect_actions` 使用包内 CPython 3.12，AKShare 1.19.1、yfinance 1.7.0，依赖和发行包 SHA256 在组件旁锁定。Rust 服务监督单任务子进程，JSON Lines 协议4承载进度、证券分片、完成或稳定错误；取消、超时和异常均回收进程。owner、证券文件及证据哈希匹配后才恢复，成功证券不重复下载。详见 [采集包](../collectors/README.md)。
+
+`daily::DailyDataset` 同时读取 Qlib 和规范 Parquet，提供交易日历、历史成员、归一化因子字段及独立 `raw_field`。规范格式3含 `daily_manifest.json` 和 `bars/SHxxxxxx.parquet`；实际价格、后复权价格、股数及人民币成交额分别保存，缺失值保留 null。`field` 采用固定价量重基准规则，`raw_field` 只接收已经验证的原价。Yahoo 标为 `split_adjusted_candidate`，不能用于严格撮合。
+
+```mermaid
+flowchart TD
+  REQUEST["公共采集请求：来源、证券、日期"] --> CHILD["内置Python：白名单AKShare / yfinance"]
+  CHILD --> EVIDENCE["HTTP响应体与结构化表格分开留证"]
+  CHILD --> SHARD["逐证券数据分片"]
+  EVIDENCE --> CHECK["Rust身份、单位、日期与哈希校验"]
+  SHARD --> CHECK
+  CHECK --> STAGING["已验证检查点 / 未完成内容不发布"]
+  STAGING --> SNAPSHOT["原子发布不可变Parquet版本"]
+  QLIB["现有Qlib二进制"] --> DAILY["DailyDataset"]
+  SNAPSHOT --> DAILY
+  DAILY --> RESEARCH["因子、原价撮合与严格公司行动检查"]
+```
+
+开发期先运行 `crates/app/packaging/build-collector.sh`，随后执行 nextest。开发构建可用 `JFQUANT_COLLECTOR_RUNTIME` 指定已经构建的解释器；发布构建只定位包内环境，不搜索系统 Python。公司行动采集成功不代表数据就绪：缺支付/上市日期、无法解释配股、未知历史覆盖均阻止训练。日线采集限定已结束的交易日，日历来自显式记录的 AKShare/新浪接口，不由存活股票的报价推断。
+
+检查点 owner 同时冻结采集代码、依赖锁与解释器锁签名；更新这些内容后应启动新采集，不能混用旧分片。恢复前逐份重验 HTTP 收据，行情和公司行动均适用。公司行动完成消息、依赖锁哈希和解释器来源也进入 ActionBundle 的证据哈希。JSON Lines 在读取时限制单行32 MiB，stderr单行64 KiB；缺换行、无效UTF-8、完成后追加协议事件或日志无法持久化均失败。规范行情校验 OHLC 范围、有限数值、证券身份和 Date32 边界，null保留。
+
+`DailyDataset::validate_factor_basis(id)` 验证独立系数的身份、日期覆盖及首个实际原价收盘锚点，不从供应商后复权报价推断系数。研究字段从原价与显式系数生成，原价字段和真实成交股数独立读取；历史跳变由公司行动证据核验。
+
+采集协议4要求先发送 `ready`，包含代码签名及AKShare/yfinance/CPython准确版本，之后才能写入行情/公司行动分片或完成消息。完成消息再次核对身份；错误/缺失握手不会生成证券检查点。
+
+## 独立系数接口
+
+[adjustment.rs](adjustment.rs)定义格式2的独立系数记录，含证券、源地址、观察末日和按日期升序的points；规范行情本身为格式4。DailyDataset::adjustment_factors返回原始系数对账，raw_volume返回真实股数，field生成研究OHLC、倒数缩放的研究量和实际金额VWAP；零量VWAP为null。price_inputs冻结源哈希、精度、覆盖、锚点与规则，进入缓存、模型和研究签名。供应商adj列是证据，保留有限负值，不参与正式计算。
+
+底层field保留Qlib字段单位：volume为研究股数/100，amount为实际人民币元/1000；ML的prepare_year统一乘回100和1000后再交给GTJA191。因此正式因子输入是股数/k及人民币元，两种读取器结果一致；raw_volume始终返回真实股数，执行账本不会读取调整量。
+
+## 实施证据与当前版本
+
+collector.rs增加collect_announcements，与行情/事件共用专用Python、取消/超时/回收及证据恢复；[corporate_actions/review.rs](corporate_actions/review.rs)负责元数据/HTTP/PDF/文本复核和不可变修订。公司行动3允许带类型条款；daily_manifest3、采集4，独立系数记录仍为1。复制旧文件或修改schema数字不能代替重新获取及证据核验。
+
+## 为什么需要本组件
+
+把来源证据与正式研究数据分开。每日行情通过统一读取器提供，Qlib保持原文件，规范Parquet记录转换依据。日期化身份绑定禁止复用代码时读取另一个证券的历史；缺失数据仍为null，但缺必要文件、身份或解释时准入失败。
+
+设计依据：2026-10-14接受的证券身份与完整准入计划、组件接口及测试。未在代码或证据中确认的历史取舍不推定为既有设计理由；来源、法规或数据格式变化时重新评估。
+
+
+## 身份与事件覆盖接口
+
+security::read/verify校验当前身份目录及原文、文本、引用、日期与来源；capture_sources只保存白名单HTML候选，沿用curl限时、重试和取消。DailyDataset::bind_registry在worker内安装目录，按日期屏蔽来源定位范围之外的报价，exchange_symbol只供执行日费用与板规则使用。Qlib源文件不改写，缺旧证券字段返回明确错误。
+
+CollectionRequest.source_bindings显式保存SEC到供应商定位符；bind_identities供App与CLI共用。子进程仅收到来源代码，Rust把验证后的分片标为SEC，AdjustmentRecord另存source_symbol用于源地址核验。无身份绑定的采集是来源候选；研究仍需要经审核身份目录。
+
+ActionBundle格式3增加source_bindings与coverage；前者供补充接口定位原证券，后者按证券、类别和日期证明完整性。公开passed声明必须引用raw_sha256内的审核证据，普通下载不自动产生全类别声明。RevisionRequest.coverage_reviews核对原动作哈希、完整未筛选公告元数据、全部捕获候选及日期范围，保留理由和HTTP证据；支付日修复不等于覆盖证明。
+
+## 三级研究模式：为什么允许筛选
+
+决定日期2026-10-14，依据是用户接受的三级模式计划。正常预热空值、来源缺失和错误数据是不同问题：全部拒绝会浪费可用样本，全部放行又会混淆因子和真实权益。默认严格检查；另外提供“允许部分数据缺失”和“只用数据合格的股票”。模式是研究输入的一部分，不能作为训练失败后自动切换的兜底。
+
+第二档保持原成员，纯缺失传播null；第三档派生每日合格成员，不改原始成员或证据。不能看到后来缺价而倒删早期股票。账户仍采用原价、整数股、T+1和连续权益；未裁定冲突、损坏、基准缺项及剩余必要依赖仍阻断。默认有效因子比例0表示至少一项有效，最低有标签样本1只表示可执行，不表示样本在统计上充分。所选因子整列无有效值不会被自动删除。
+
+[daily.rs](daily.rs)新增research_field，纯文件缺失与非法内容由io::ErrorKind区分；其返回值只是nullable研究输入，不是完整性的认证。规范容器缺必需列仍是格式错误，不能通过放宽模式把损坏容器当成缺数据。源格式和原文哈希不变；资格及筛选记录由ML/workflow管理。
+
+```mermaid
+flowchart LR
+  P[模式与门槛] --> C[结构化数据检查]
+  C --> U[原股票池或每日合格池]
+  U --> F[因子与nullable输入]
+  F --> M[按折样本掩码]
+  M --> G[剩余依赖与账户门禁]
+  G -->|通过| T[冻结签名后训练]
+  G -->|未通过| E[原因及处理清单]
+```
+
+DailyDataset的restrict_reads用于工作线程的日期需求；三个research读取方法按绑定区间处理缺失，不把一个未来代码的NotFound扩展到整条证券历史。内部bound_field_policy仍拒绝重叠和非法内容，股票身份与权益不因供应商代码变化而变更。

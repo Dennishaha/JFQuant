@@ -26,7 +26,7 @@ use std::{
 };
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 7;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TaskRequest {
@@ -196,6 +196,18 @@ pub enum Rpc {
     Versions,
     ImportRun {
         path: PathBuf,
+    },
+    Pools,
+    SavePool {
+        definition: analytics_core::pool::PoolDefinition,
+    },
+    Pool {
+        id: String,
+    },
+    PreviewPool {
+        id: String,
+        market: String,
+        day: analytics_core::Date,
     },
     Templates,
     SaveTemplate {
@@ -386,14 +398,30 @@ impl Server {
                     .map_err(|e| result_error(e, None))?,
             )
             .map_err(failure),
+            Rpc::Pools => {
+                serde_json::to_value(self.workspace.pools().map_err(failure)?).map_err(failure)
+            }
+            Rpc::Pool { id } => {
+                serde_json::to_value(self.workspace.pool(&id).map_err(failure)?).map_err(failure)
+            }
+            Rpc::SavePool { definition } => {
+                serde_json::to_value(self.workspace.save_pool(definition).map_err(failure)?)
+                    .map_err(failure)
+            }
+            Rpc::PreviewPool { id, market, day } => self
+                .workspace
+                .preview_pool(&id, &market, day)
+                .map_err(failure),
             Rpc::Templates => {
                 let mut out = vec![];
                 for e in
                     fs::read_dir(self.workspace.resolve(".jfquant/templates")).map_err(failure)?
                 {
                     let p = e.map_err(failure)?.path();
-                    if p.extension().is_some_and(|s| s == "json") {
-                        out.push(crate::ResearchTemplate::read(&p).map_err(failure)?);
+                    if p.extension().is_some_and(|s| s == "json")
+                        && let Ok(t) = crate::ResearchTemplate::read(&p)
+                    {
+                        out.push(t);
                     }
                 }
                 serde_json::to_value(out).map_err(failure)
@@ -642,10 +670,16 @@ impl Client {
         .map_err(failure)?;
         stream.write_all(b"\n").map_err(failure)?;
         let mut line = String::new();
-        BufReader::new(stream)
+        let bytes_read = BufReader::new(stream)
             .take(64 * 1024 * 1024)
             .read_line(&mut line)
             .map_err(failure)?;
+        if bytes_read == 0 {
+            return Err(ServiceError::new(
+                "service_unavailable",
+                "服务socket已关闭，可重新连接",
+            ));
+        }
         let response: Response = serde_json::from_str(&line).map_err(failure)?;
         if response.version != PROTOCOL_VERSION {
             return Err(ServiceError::new("protocol_mismatch", "服务协议不匹配"));
@@ -657,10 +691,16 @@ impl Client {
         Ok(response.data.unwrap_or(Value::Null))
     }
     pub fn ensure(&self, binary: Option<&Path>) -> Result<()> {
-        match self.call(Rpc::Status) {
-            Ok(_) => return Ok(()),
-            Err(e) if e.code != "service_unavailable" => return Err(e),
-            Err(_) => {}
+        let stopping_deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match self.call(Rpc::Status) {
+                Ok(_) => return Ok(()),
+                Err(e) if e.code == "service_stopping" && Instant::now() < stopping_deadline => {
+                    std::thread::sleep(Duration::from_millis(50))
+                }
+                Err(e) if e.code == "service_unavailable" => break,
+                Err(e) => return Err(e),
+            }
         }
         let binary = match binary {
             Some(p) => p.to_owned(),
@@ -1082,7 +1122,7 @@ mod protocol_tests {
                 .read_line(&mut line)
                 .unwrap();
             let request: Value = serde_json::from_str(&line).unwrap();
-            assert_eq!(request["version"], 2);
+            assert_eq!(request["version"], PROTOCOL_VERSION);
             stream
                 .write_all(b"{\"version\":1,\"data\":{\"active\":null},\"error\":null}\n")
                 .unwrap();

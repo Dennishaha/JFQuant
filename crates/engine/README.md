@@ -61,3 +61,9 @@ native 环境还要验证单 worker 连接、非法 sort identifier、cursor 长
     DUCKDB_DOWNLOAD_LIB=1 cargo nextest run -p analytics-desktop -E 'test(worker::tests::)'
 
 `DuckDbEngine::set_file_root`在worker内配置固定的DuckDB文件搜索根目录；App查询相对输入路径按工作区解释，不改变进程cwd，输出路径由worker在提交时解析为工作区路径。工作区名中的单引号按SQL字面量转义，参数修改不影响其他线程的文件系统基准。
+
+## 为什么需要本组件
+
+把SQL快照与原生资源约束封装起来。DuckDB负责查询和导出，分页会话须独立且有生命周期。引擎返回可展示错误，worker拥有句柄；用户看到的是查询失败原因，而非调试器内部异常。
+
+设计依据：2026-10-14接受的证券身份与完整准入计划、组件接口及测试。未在代码或证据中确认的历史取舍不推定为既有设计理由；来源、法规或数据格式变化时重新评估。

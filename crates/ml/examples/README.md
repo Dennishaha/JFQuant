@@ -6,13 +6,13 @@
 
 ## 文件与验证对象
 
-[native_smoke.rs](native_smoke.rs) 创建小矩阵，训练、读取manifest并执行普通预测/贡献值，检查官方LightGBM接口与产物形状。[plot_research.py](plot_research.py) 读取schema4严格研究的summary.json和nav.csv，以初始净值1计算回撤并生成nav.png/nav.svg；需要开发用matplotlib，不参与训练、策略或安装包运行。
+[native_smoke.rs](native_smoke.rs) 创建小矩阵，训练、读取manifest并执行普通预测/贡献值，检查官方LightGBM接口与产物形状。[plot_research.py](plot_research.py) 读取schema9严格研究的summary.json和nav.csv，以初始净值1计算回撤并生成nav.png/nav.svg；需要开发用matplotlib，不参与训练、策略或安装包运行。
 
 ```mermaid
 flowchart LR
   SMALL["开发用小训练矩阵"] --> SMOKE["native_smoke：真实 C API"]
   SMOKE --> ART["模型、manifest、预测与贡献值检查"]
-  RESEARCH["已完成的 schema4 原价研究"] --> JSON["summary.json 与 nav.csv"]
+  RESEARCH["已完成的 schema9 原价研究"] --> JSON["summary.json 与 nav.csv"]
   JSON --> PLOT["plot_research.py：离线 matplotlib"]
   PLOT --> FIG["NAV、回撤 PNG 与 SVG"]
 ```
@@ -34,3 +34,11 @@ python3 crates/ml/examples/plot_research.py .jfquant/runs/RESEARCH_TASK_UUID
 cargo check -p analytics-ml --examples --features lightgbm-native
 cargo nextest run -p analytics-ml --features lightgbm-native,duckdb-native
 ```
+
+plot_research.py只接收schema9、raw_integer_shares及价量来源哈希；读取benchmark_price_index_nav列，标题取冻结benchmark，不固定中证500。此开发绘图工具需要matplotlib，不作为App运行依赖。
+
+## 为什么需要本组件
+
+提供当前研究结果的可复现查看方式。示例只读取当前结果格式和冻结来源，不重建旧近似收益。绘图展示折、自然年度、费用和净值，让报告能够离线审查；示例数据及图片属于本地产物。
+
+设计依据：2026-10-14接受的证券身份与完整准入计划、组件接口及测试。未在代码或证据中确认的历史取舍不推定为既有设计理由；来源、法规或数据格式变化时重新评估。

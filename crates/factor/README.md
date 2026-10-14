@@ -56,3 +56,9 @@ python crates/factor/testdata/reference_ops.py .jfquant/audit-catalog.json .jfqu
 ```
 
 测试使用提交的合成fixture `testdata/operator_golden.json`，不联网。更改新因子或算子时必须独立重核期望值，不得用Rust执行器输出直接覆盖golden。
+
+## 为什么需要本组件
+
+将GTJA191定义与执行数据口径分开审计。公式v4和固定特征顺序可以独立于供应商复核。来源转换错误不能通过修改公式掩盖；隔离项保持明确理由，可用因子通过独立fixture或golden输出验证。
+
+设计依据：2026-10-14接受的证券身份与完整准入计划、组件接口及测试。未在代码或证据中确认的历史取舍不推定为既有设计理由；来源、法规或数据格式变化时重新评估。

@@ -92,6 +92,96 @@ fn clap_help_validation_json_and_exit_codes_require_no_workspace() {
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
 }
+
+#[test]
+fn quality_flags_match_public_api_freezing_and_reject_invalid_thresholds() {
+    let s = Sandbox::new();
+    let w = Workspace::open(&s.client.root).unwrap();
+    let (m, a, t) = analytics_workflow::demo::create_canonical(&w).unwrap();
+    t.write(&w.resolve("recipe.json")).unwrap();
+    for (mode, strictness) in [
+        (
+            "strict",
+            analytics_core::research_quality::ResearchStrictness::Strict,
+        ),
+        (
+            "allow_missing",
+            analytics_core::research_quality::ResearchStrictness::AllowMissing,
+        ),
+        (
+            "qualified_only",
+            analytics_core::research_quality::ResearchStrictness::QualifiedOnly,
+        ),
+    ] {
+        let mut template = t.clone();
+        template.quality_policy.strictness = strictness;
+        let request = WorkflowRequest::Research {
+            template: Box::new(template),
+            market: m.id.clone(),
+            actions: a.id.clone(),
+            audit_only: false,
+        };
+        let id = Uuid::new_v4();
+        let mut record = w
+            .begin(
+                id,
+                "direct quality",
+                analytics_workflow::snapshot(&w, &request).unwrap(),
+            )
+            .unwrap();
+        let api = analytics_workflow::execute(
+            &w,
+            &request,
+            &record,
+            &analytics_core::task::TaskContext::default(),
+        )
+        .unwrap()
+        .details;
+        w.finish(&mut record, analytics_workflow::RunStatus::Succeeded, None)
+            .unwrap();
+        let submitted = s.json(&[
+            "research",
+            "run",
+            "--template",
+            "recipe.json",
+            "--market",
+            &m.id,
+            "--actions",
+            &a.id,
+            "--strictness",
+            mode,
+            "--min-valid-feature-ratio",
+            "0",
+            "--min-labeled-rows",
+            "1",
+        ]);
+        let id = submitted["task_id"].as_str().unwrap();
+        s.json(&["jobs", "wait", id, "--timeout", "30"]);
+        let cli = s.json(&["jobs", "results", id]);
+        assert_eq!(cli, api);
+    }
+    let failed = s.cli(&[
+        "research",
+        "run",
+        "--template",
+        "recipe.json",
+        "--market",
+        &m.id,
+        "--actions",
+        &a.id,
+        "--strictness",
+        "allow_missing",
+        "--min-valid-feature-ratio",
+        "2",
+    ]);
+    assert_eq!(failed.status.code(), Some(2));
+    let help = s.cli(&["research", "check", "--help"]);
+    assert!(
+        String::from_utf8(help.stdout)
+            .unwrap()
+            .contains("qualified_only")
+    );
+}
 #[test]
 fn async_acceptance_busy_wait_timeout_cancel_and_client_exit_preserve_job() {
     let s = Sandbox::new();
@@ -228,12 +318,20 @@ fn cli_native_research_templates_results_and_incomplete_actions_share_strict_che
                 s.client
                     .root
                     .join(&run.output)
-                    .join(format!("fold-{year}/ledger.json")),
+                    .join(format!("account-through-{year}-01-12/ledger.json")),
             )
             .unwrap(),
         )
         .unwrap();
-        assert_eq!(ledger["positions"]["SH600000"]["shares"], 110);
+        assert_eq!(
+            ledger["positions"]
+                .as_object()
+                .unwrap()
+                .values()
+                .map(|p| p["shares"].as_u64().unwrap())
+                .sum::<u64>(),
+            110
+        );
         assert_eq!(ledger["cash"], 10.0);
     }
     let original = result["results"].clone();
@@ -523,7 +621,7 @@ fn current_research_cli_and_api_share_results_and_reject_old_imports_without_mod
     let cli_id = value["task_id"].as_str().unwrap().parse().unwrap();
     let actual = s.client.wait(cli_id, Some(15)).unwrap();
     assert_eq!(actual["results"], expected);
-    assert_eq!(expected["schema_version"], 4);
+    assert_eq!(expected["schema_version"], 9);
     assert!(
         expected["aggregate"]
             .get("terminal_valuation_fees_cny")
@@ -535,10 +633,14 @@ fn current_research_cli_and_api_share_results_and_reject_old_imports_without_mod
     );
     for year in [2009, 2010] {
         assert_eq!(
-            std::fs::read(w.resolve(format!(".jfquant/runs/{id}/fold-{year}/ledger.json")))
-                .unwrap(),
-            std::fs::read(w.resolve(format!(".jfquant/runs/{cli_id}/fold-{year}/ledger.json")))
-                .unwrap()
+            std::fs::read(w.resolve(format!(
+                ".jfquant/runs/{id}/account-through-{year}-01-12/ledger.json"
+            )))
+            .unwrap(),
+            std::fs::read(w.resolve(format!(
+                ".jfquant/runs/{cli_id}/account-through-{year}-01-12/ledger.json"
+            )))
+            .unwrap()
         );
     }
     let imported = s.json(&["jobs", "import", &format!(".jfquant/runs/{id}")]);
@@ -583,6 +685,11 @@ fn current_research_cli_and_api_share_results_and_reject_old_imports_without_mod
             .status
             .success()
     );
+    for field in ["action_policy", "schedule", "resolved_folds"] {
+        let mut corrupt = expected.clone();
+        corrupt["execution"].as_object_mut().unwrap().remove(field);
+        assert!(analytics_ml::backtest::validate_result(&corrupt).is_err());
+    }
     for corrupt in [
         {
             let mut v = expected.clone();
@@ -613,6 +720,7 @@ fn standard_action_repair_preserves_new_coverage_with_deduplicated_version() {
     let path = w.resolve(&a.path);
     let mut book = analytics_storage::corporate_actions::ActionBundle::read(&path).unwrap();
     book.downloader = "JFQuant analytics-storage corporate-actions".into();
+    book.coverage.clear();
     std::fs::write(&path, serde_json::to_vec(&book).unwrap()).unwrap();
     let a = w.register(&path).unwrap();
     let submission = s.json(&[
@@ -753,4 +861,211 @@ fn standard_pipeline_json_preserves_feature_order_and_persistent_artifacts() {
     );
     assert!(!s.client.root.join("unused-output").exists());
     assert!(s.cli(&["jobs", "list"]).status.success());
+}
+
+#[test]
+fn cli_pools_and_canonical_research_share_public_backend_and_schema() {
+    let s = Sandbox::new();
+    let submitted = s.json(&["research", "demo-parquet"]);
+    let id = submitted["task_id"].as_str().unwrap();
+    s.json(&["jobs", "wait", id, "--timeout", "30"]);
+    let demo = s.json(&["jobs", "results", id]);
+    let market = demo["data"]["id"].as_str().unwrap();
+    let actions = demo["details"]["demo_actions"].as_str().unwrap();
+    let definition = json!({"schema_version":2,"name":"CLI self-selected pool","coverage":{"start":"2007-01-02","end":"2010-01-12"},"expression":{"kind":"symbols","instruments":["SH600000","SH600001"]},"adjustments":[]});
+    std::fs::write(
+        s.client.root.join("pool.json"),
+        serde_json::to_vec(&definition).unwrap(),
+    )
+    .unwrap();
+    let version = s.json(&["pools", "create", "--definition", "pool.json"]);
+    let pool_id = version["id"].as_str().unwrap();
+    let public = Workspace::open(&s.client.root)
+        .unwrap()
+        .pool(pool_id)
+        .unwrap();
+    assert_eq!(version["signature"], public.signature);
+    let preview = s.json(&[
+        "pools",
+        "preview",
+        pool_id,
+        "--market",
+        market,
+        "--date",
+        "2009-01-03",
+    ]);
+    assert_eq!(preview["instruments"].as_array().unwrap().len(), 2);
+    let mut template = demo["details"]["demo_template"].clone();
+    template["pool_version"] = json!(pool_id);
+    std::fs::write(
+        s.client.root.join("recipe.json"),
+        serde_json::to_vec(&template).unwrap(),
+    )
+    .unwrap();
+    let run = s.json(&[
+        "research",
+        "run",
+        "--template",
+        "recipe.json",
+        "--market",
+        market,
+        "--actions",
+        actions,
+    ]);
+    let id = run["task_id"].as_str().unwrap();
+    s.json(&["jobs", "wait", id, "--timeout", "30"]);
+    let result = s.json(&["jobs", "results", id]);
+    assert_eq!(result["schema_version"], 9);
+    assert_eq!(
+        result["execution"]["benchmark"],
+        analytics_workflow::demo::fixture_security_id("SH000905")
+    );
+    assert_eq!(result["execution"]["pool_exit_policy"], "next_tradable_day");
+    assert!(
+        result["execution"]["pool_signature"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+    let bad = s.cli(&[
+        "data",
+        "collect",
+        "--provider",
+        "unknown",
+        "--start",
+        "2020-01-01",
+        "--end",
+        "2020-01-02",
+        "--instruments",
+        "SH600000",
+    ]);
+    assert_eq!(bad.status.code(), Some(2));
+}
+
+#[test]
+fn date_overrides_preview_and_no_validation_run_share_the_public_schedule() {
+    let s = Sandbox::new();
+    let w = Workspace::open(&s.client.root).unwrap();
+    let (m, a, t) = analytics_workflow::demo::create_canonical(&w).unwrap();
+    t.write(&w.resolve("recipe.json")).unwrap();
+    let submit = s.json(&[
+        "research",
+        "preview",
+        "--template",
+        "recipe.json",
+        "--market",
+        &m.id,
+        "--train-start",
+        "2007-01-02",
+        "--train-end",
+        "2008-01-12",
+        "--test-start",
+        "2009-01-05",
+        "--test-end",
+        "2009-01-12",
+        "--no-validation",
+    ]);
+    let id = submit["task_id"].as_str().unwrap();
+    let wait = s.json(&["jobs", "wait", id, "--timeout", "10"]);
+    assert_eq!(
+        wait["results"]["details"]["resolved_folds"][0]["actual"]["validation"],
+        Value::Null
+    );
+    let run = s.json(&[
+        "research",
+        "run",
+        "--template",
+        "recipe.json",
+        "--market",
+        &m.id,
+        "--actions",
+        &a.id,
+        "--train-start",
+        "2007-01-02",
+        "--train-end",
+        "2008-01-12",
+        "--test-start",
+        "2009-01-05",
+        "--test-end",
+        "2009-01-12",
+        "--no-validation",
+    ]);
+    let done = s.json(&[
+        "jobs",
+        "wait",
+        run["task_id"].as_str().unwrap(),
+        "--timeout",
+        "30",
+    ]);
+    assert_eq!(done["results"]["schema_version"], 9);
+    assert_eq!(done["results"]["fold_reports"][0]["validation_rows"], 0);
+    let invalid = s.cli(&[
+        "research",
+        "run",
+        "--template",
+        "recipe.json",
+        "--market",
+        &m.id,
+        "--actions",
+        &a.id,
+        "--train-start",
+        "2007-01-02",
+    ]);
+    assert_eq!(invalid.status.code(), Some(2));
+}
+
+#[test]
+fn identity_commands_use_the_shared_service_and_roundtrip_the_same_version() {
+    let s = Sandbox::new();
+    let w = Workspace::open(&s.client.root).unwrap();
+    let (_, _, t) = analytics_workflow::testing::synthetic(&w);
+    for args in [
+        vec!["identities", "show", t.identity_version.as_str()],
+        vec![
+            "identities",
+            "check",
+            t.identity_version.as_str(),
+            "--symbol",
+            "SH600000",
+            "--date",
+            "2008-01-02",
+        ],
+    ] {
+        let submission = s.json(&args);
+        let id = submission["task_id"].as_str().unwrap();
+        s.json(&["jobs", "wait", id, "--timeout", "15"]);
+        let result = s.json(&["jobs", "results", id]);
+        if args[1] == "check" {
+            assert_eq!(
+                result["details"]["security_id"],
+                analytics_workflow::demo::fixture_security_id("SH600000")
+            );
+        } else {
+            assert_eq!(result["details"]["schema_version"], 1);
+        }
+    }
+    let exported = s.json(&[
+        "identities",
+        "export",
+        &t.identity_version,
+        "identity-export",
+    ]);
+    let id = exported["task_id"].as_str().unwrap();
+    s.json(&["jobs", "wait", id, "--timeout", "15"]);
+    let imported = s.json(&["identities", "import", "identity-export/registry.json"]);
+    let id = imported["task_id"].as_str().unwrap();
+    s.json(&["jobs", "wait", id, "--timeout", "15"]);
+    let result = s.json(&["jobs", "results", id]);
+    assert_eq!(result["details"]["id"], t.identity_version);
+}
+
+#[test]
+fn stopping_idle_service_then_immediately_reconnecting_does_not_parse_empty_json() {
+    let s = Sandbox::new();
+    let initial = s.json(&["service", "status"]);
+    assert!(initial["active"].is_null());
+    s.json(&["service", "stop"]);
+    let after = s.json(&["service", "status"]);
+    assert!(after["active"].is_null());
+    assert_eq!(after["protocol_version"], 7);
 }

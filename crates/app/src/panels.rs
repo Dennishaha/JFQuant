@@ -53,7 +53,7 @@ pub fn render(
         Panel::Research => {
             crate::platform::research_panel(ui, state, worker, cancel_slot, registry)
         }
-        Panel::Runs => crate::platform::runs_panel(ui, state),
+        Panel::Runs => crate::platform::runs_panel(ui, state, worker, cancel_slot),
     }
     if state.worker_error.is_some() {
         *cancel_slot = None;

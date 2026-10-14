@@ -36,7 +36,7 @@ pub(super) fn prepare(
 ) -> io::Result<()> {
     source.validate_identity()?;
     task_context_check()?;
-    let owner = serde_json::json!({"schema_version":1,"downloader":"JFQuant analytics-storage derivation","source_sha256":format!("sha256:{:x}",Sha256::digest(serde_json::to_vec(source).map_err(invalid)?)),"method":method,"range":range});
+    let owner = serde_json::json!({"schema_version":3,"downloader":"JFQuant analytics-storage derivation","source_sha256":format!("sha256:{:x}",Sha256::digest(serde_json::to_vec(source).map_err(invalid)?)),"method":method,"range":range});
     if output.exists() {
         let saved: Value =
             serde_json::from_slice(&fs::read(output.join("owner.json"))?).map_err(invalid)?;
@@ -105,7 +105,9 @@ mod tests {
         let source_root = temp.path().join("source");
         fs::create_dir_all(source_root.join("raw")).unwrap();
         let source = ActionBundle {
-            schema_version: 1,
+            schema_version: 3,
+            source_bindings: Default::default(),
+            coverage: Default::default(),
             downloader: "JFQuant analytics-storage corporate-actions".into(),
             downloaded_at: "2026-10-13".into(),
             queried_symbols: Default::default(),

@@ -1008,12 +1008,48 @@ fn research_template_saves_and_real_worker_finishes_synthetic_annual_account() {
     );
     assert!(
         w.resolve(&record.output)
-            .join("fold-2009/ledger.json")
+            .join("account-through-2009-01-12/ledger.json")
             .exists()
     );
     h.app.state.panel = Panel::Runs;
     let out = h.frame(vec![]);
     assert!(rendered_text(&out).contains("年化"));
+}
+
+#[test]
+fn plain_language_quality_choices_submit_the_shared_policy_and_render_reason_filters() {
+    let (mut h, _temp) = platform_harness(Panel::Research);
+    let w = h.app.state.platform.workspace.as_ref().unwrap().clone();
+    let (m, a, t) = analytics_workflow::testing::synthetic(&w);
+    h.app.state.platform.template = t;
+    h.app.state.platform.datasets = w.datasets().unwrap();
+    h.app.state.platform.market = m.id;
+    h.app.state.platform.actions = a.id;
+    h.click("1. 严格检查");
+    h.click("2. 允许部分数据缺失");
+    assert_eq!(
+        h.app.state.platform.template.quality_policy.strictness,
+        analytics_core::research_quality::ResearchStrictness::AllowMissing
+    );
+    h.click("2. 允许部分数据缺失");
+    h.click("3. 只用数据合格的股票");
+    h.click("检查研究输入");
+    let command = h.commands.recv().unwrap();
+    assert!(
+        matches!(command,WorkerCommand::ExecuteWorkflow{request,..} if matches!(&*request,analytics_workflow::WorkflowRequest::Research{template,audit_only:true,..} if template.quality_policy.strictness==analytics_core::research_quality::ResearchStrictness::QualifiedOnly))
+    );
+    h.finish_recorded_task();
+    h.app.state.platform.details = serde_json::json!({"ready":false,"admission":{"policy":h.app.state.platform.template.quality_policy,"checks":[{"security":"SEC-fixture","category":"market","coverage":{"start":"2020-01-02","end":"2020-01-03"},"status":"failed","code":"input_file_missing","message":"成交额输入缺失","kind":"missing","disposition":"exclude_security","evidence":[],"affected_factors":["alpha_001"]}],"decisions":[]}});
+    h.ctx
+        .style_mut_of(egui::Theme::Light, |style| style.animation_time = 0.);
+    h.ctx
+        .style_mut_of(egui::Theme::Dark, |style| style.animation_time = 0.);
+    h.click("数据检查原因列表（1项）");
+    let output = h.frame(vec![]);
+    let text = rendered_text(&output);
+    assert!(text.contains("成交额输入缺失"), "{text}");
+    assert!(text.contains("排除股票"));
+    assert!(text.contains("导出完整检查JSON"));
 }
 #[test]
 fn research_worker_preserves_shares_cash_and_paid_fees_across_annual_models() {
@@ -1049,12 +1085,20 @@ fn research_worker_preserves_shares_cash_and_paid_fees_across_annual_models() {
         let ledger: serde_json::Value = serde_json::from_slice(
             &std::fs::read(
                 w.resolve(&record.output)
-                    .join(format!("fold-{year}/ledger.json")),
+                    .join(format!("account-through-{year}-01-12/ledger.json")),
             )
             .unwrap(),
         )
         .unwrap();
-        assert_eq!(ledger["positions"]["SH600000"]["shares"], 110);
+        assert_eq!(
+            ledger["positions"]
+                .as_object()
+                .unwrap()
+                .values()
+                .map(|p| p["shares"].as_u64().unwrap())
+                .sum::<u64>(),
+            110
+        );
         assert_eq!(ledger["cash"], 10.0);
     }
 }
@@ -1099,6 +1143,7 @@ fn interrupted_acquisition_can_prepare_exact_owned_resume_without_starting_resea
     let w = h.app.state.platform.workspace.as_ref().unwrap().clone();
     let task = Uuid::new_v4();
     let request = analytics_workflow::WorkflowRequest::DownloadActions {
+        pool_version: "builtin:csi500".into(),
         market: "market-id".into(),
         resume: None,
     };
@@ -1132,7 +1177,11 @@ fn demo_button_configures_full_research_without_download_or_developer_tools() {
         h.app.state.platform.template.config.factor_ids,
         ["alpha_002"]
     );
-    assert_eq!(h.app.state.platform.template.first_test_year, 2009);
+    assert!(
+        serde_json::to_string(&h.app.state.platform.template.schedule)
+            .unwrap()
+            .contains("2009-01-01")
+    );
     assert!(!h.app.state.platform.actions.is_empty());
     h.app.state.panel = Panel::Research;
     h.click("执行年度研究");
@@ -1234,7 +1283,7 @@ fn service_client_tasks_appear_in_egui_can_be_cancelled_and_share_research_resul
         })
         .unwrap();
     h.wait_for(|app| !app.state.busy() && app.state.platform.runs.iter().any(|r| r.id == task));
-    assert_eq!(h.app.state.platform.template.last_year, 2010);
+    assert_eq!(h.app.state.platform.template.schema_version, 5);
     h.app.state.panel = Panel::Research;
     h.click("执行年度研究");
     h.wait_for(|app| !app.state.busy() && app.state.platform.details.get("aggregate").is_some());
@@ -1280,11 +1329,13 @@ fn service_client_tasks_appear_in_egui_can_be_cancelled_and_share_research_resul
         assert_eq!(
             std::fs::read(
                 w.resolve(&record.output)
-                    .join(format!("fold-{year}/ledger.json"))
+                    .join(format!("account-through-{year}-01-12/ledger.json"))
             )
             .unwrap(),
-            std::fs::read(w.resolve(format!(".jfquant/runs/{cli_id}/fold-{year}/ledger.json")))
-                .unwrap()
+            std::fs::read(w.resolve(format!(
+                ".jfquant/runs/{cli_id}/account-through-{year}-01-12/ledger.json"
+            )))
+            .unwrap()
         );
     }
     client.call(Rpc::Stop).unwrap();
@@ -1356,4 +1407,100 @@ fn unsupported_history_shows_error_without_nav_or_resumption_and_other_records_r
     let text = rendered_text(&h.frame(vec![]));
     assert!(text.contains("年化"));
     assert!(!text.contains("unsupported_result_format"));
+}
+
+#[test]
+fn pool_benchmark_exit_policy_and_save_controls_use_shared_requests() {
+    let (mut h, _tmp) = platform_harness(Panel::Research);
+    h.ctx.all_styles_mut(|s| s.animation_time = 0.0);
+    h.click("股票池、基准与日期调整");
+    h.click("沪深300默认模板");
+    assert_eq!(h.app.state.platform.template.benchmark, "SH000300");
+    assert_eq!(h.app.state.platform.template.pool_version, "builtin:csi300");
+    h.click("下次正常调仓退出");
+    assert_eq!(
+        h.app.state.platform.template.pool_exit_policy,
+        analytics_core::pool::PoolExitPolicy::NextRebalance
+    );
+    h.click("自选池示例");
+    h.click("校验并保存股票池新版本");
+    let command = h
+        .commands
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .unwrap();
+    assert!(
+        matches!(command,WorkerCommand::ExecuteWorkflow{request,..} if matches!(*request,analytics_workflow::WorkflowRequest::SavePool{..}))
+    );
+    assert!(h.app.state.busy());
+}
+#[test]
+fn data_collection_controls_preserve_provider_and_prevent_duplicate_submissions() {
+    let (mut h, _tmp) = platform_harness(Panel::Dataset);
+    h.ctx.all_styles_mut(|s| s.animation_time = 0.0);
+    h.click("AKShare / yfinance 日线采集");
+    h.click("yfinance（候选与核验）");
+    h.click("采集日线并发布新版本");
+    let command = h
+        .commands
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .unwrap();
+    assert!(
+        matches!(command,WorkerCommand::ExecuteWorkflow{request,..} if matches!(&*request,analytics_workflow::WorkflowRequest::CollectMarket{request,..} if request.provider==analytics_storage::collector::Provider::Yfinance && request.adjustment_source==analytics_storage::adjustment::AdjustmentSource::None))
+    );
+    h.click("采集日线并发布新版本");
+    assert!(h.commands.try_recv().is_err());
+}
+
+#[test]
+fn packaging_load_command_rejection_fixtures() {
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("packaging");
+    let output = std::process::Command::new(analytics_storage::collector::runtime().unwrap())
+        .args(["-I", "-B", "-m", "unittest", "discover", "-s"])
+        .arg(directory)
+        .args(["-p", "test_packaging.py"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn date_preview_and_manual_fold_editor_submit_shared_requests_without_training() {
+    let (mut h, _tmp) = platform_harness(Panel::Research);
+    let w = h.app.state.platform.workspace.as_ref().unwrap().clone();
+    let (m, a, mut t) = analytics_workflow::demo::create_canonical(&w).unwrap();
+    let first = match t.schedule {
+        analytics_core::schedule::Schedule::Rolling { first, .. } => first,
+        _ => unreachable!(),
+    };
+    t.schedule = analytics_core::schedule::Schedule::Single { fold: first };
+    h.app.state.platform.template = t.clone();
+    h.app.state.platform.datasets = w.datasets().unwrap();
+    h.app.state.platform.market = m.id;
+    h.app.state.platform.actions = a.id;
+    h.click("预览研究日程");
+    let command = h.commands.try_recv().unwrap();
+    assert!(
+        matches!(command,WorkerCommand::ExecuteWorkflow{request,..} if matches!(&*request,analytics_workflow::WorkflowRequest::PreviewResearch{template,..} if serde_json::to_value(&template.schedule).unwrap()==serde_json::to_value(&t.schedule).unwrap()))
+    );
+    h.click("预览研究日程");
+    assert!(h.commands.try_recv().is_err());
+}
+
+#[test]
+fn identity_review_controls_submit_public_requests_and_prevent_duplicate_clicks() {
+    let (mut h, _tmp) = platform_harness(Panel::Research);
+    h.ctx.all_styles_mut(|s| s.animation_time = 0.0);
+    h.click("证券身份、别名与承继证据");
+    h.click("列出身份版本");
+    let command = h.commands.try_recv().unwrap();
+    assert!(
+        matches!(command,WorkerCommand::ExecuteWorkflow{request,..} if matches!(&*request,analytics_workflow::WorkflowRequest::IdentityOperation{method,..} if method=="list"))
+    );
+    h.click("列出身份版本");
+    assert!(h.commands.try_recv().is_err());
+    assert!(h.app.state.busy());
 }

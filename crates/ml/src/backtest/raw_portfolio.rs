@@ -5,10 +5,7 @@ use analytics_core::{
     execution::{CorporateAction, ShareLedger},
     market_rules::{Board, FeeBreakdown},
 };
-use analytics_storage::{
-    corporate_actions::ActionBundle,
-    qlib::{DailyField, raw_price},
-};
+use analytics_storage::{corporate_actions::ActionBundle, daily::DailyDataset, qlib::DailyField};
 use std::collections::{BTreeSet, HashMap};
 
 pub(super) struct RawPortfolio {
@@ -18,16 +15,24 @@ pub(super) struct RawPortfolio {
     last_day: Option<usize>,
     pending_signal: Option<Vec<(String, f64)>>,
     marks: BTreeMap<String, f64>,
+    pool_exits: BTreeSet<String>,
+    previous_eligible: BTreeSet<String>,
 }
 impl RawPortfolio {
     pub(super) fn new(request: &ResearchRequest) -> Result<Self> {
+        let mut ledger =
+            ShareLedger::new(request.initial_cash_cny, request.dividend_withholding_rate)?;
+        ledger.action_policy = request.action_policy.clone();
+        ledger.security_registry = request.identity_registry.clone();
         Ok(Self {
-            ledger: ShareLedger::new(request.initial_cash_cny, request.dividend_withholding_rate)?,
+            ledger,
             previous_nav: request.initial_cash_cny,
             rebalance_clock: 0,
             last_day: None,
             pending_signal: None,
             marks: BTreeMap::new(),
+            pool_exits: BTreeSet::new(),
+            previous_eligible: BTreeSet::new(),
         })
     }
 }
@@ -38,83 +43,177 @@ struct RawFields {
     factor: DailyField,
 }
 impl RawFields {
-    fn load(d: &QlibDataset, id: &str) -> Result<Self> {
+    fn load(d: &DailyDataset, id: &str) -> Result<Self> {
+        Self::load_with_missing(d, id, false)
+    }
+    fn load_with_missing(d: &DailyDataset, id: &str, allow_missing: bool) -> Result<Self> {
         Ok(Self {
-            open: d.field(id, "open")?,
-            close: d.field(id, "close")?,
-            volume: d.field(id, "volume")?,
-            factor: d.field(id, "factor")?,
+            open: d.research_raw_field(id, "open", allow_missing)?,
+            close: d.research_raw_field(id, "close", allow_missing)?,
+            volume: d.research_raw_volume(id, allow_missing)?,
+            factor: d.adjustment_factors(id)?,
+        })
+    }
+    fn adjustment_inputs(d: &DailyDataset, id: &str) -> Result<Self> {
+        let close = match d.raw_field(id, "close") {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => DailyField {
+                start: 0,
+                values: vec![None; d.calendar.len()],
+            },
+            r => r?,
+        };
+        Ok(Self {
+            open: DailyField {
+                start: 0,
+                values: vec![],
+            },
+            close,
+            volume: DailyField {
+                start: 0,
+                values: vec![],
+            },
+            factor: d.adjustment_factors(id)?,
         })
     }
     fn open(&self, day: usize) -> Option<f64> {
-        raw_price(self.open.get(day), self.factor.get(day))
+        self.open.get(day)
     }
     fn close(&self, day: usize) -> Option<f64> {
-        raw_price(self.close.get(day), self.factor.get(day))
+        self.close.get(day)
     }
 }
 /// Check every adjustment-factor transition against dated distributions. Unknown
 /// rights issues, missing events and unexplained source adjustments stop execution.
 pub(super) fn validate_actions(
-    dataset: &QlibDataset,
+    dataset: &DailyDataset,
     book: &ActionBundle,
     symbols: &BTreeSet<String>,
     start: Date,
     end: Date,
 ) -> Result<()> {
     book.require_coverage(symbols, start, end)?;
-    let lo = dataset.calendar.partition_point(|d| *d < start).max(1);
-    let hi = dataset.calendar.partition_point(|d| *d <= end);
-    let mut by_date = BTreeMap::new();
-    for a in &book.actions {
-        if by_date
-            .insert((a.instrument.as_str(), a.ex_date), a)
-            .is_some()
-        {
-            return Err("duplicate action for security/ex date".into());
-        }
-    }
-    for id in symbols {
-        analytics_core::task::TaskContext::current().check()?;
-        let fields = RawFields::load(dataset, id)?;
-        let mut previous_factor = (0..lo).rev().find_map(|day| fields.factor.get(day));
-        for day in lo..hi {
-            analytics_core::task::TaskContext::current().check()?;
-            let current_factor = fields.factor.get(day);
-            let action = by_date.get(&(id.as_str(), dataset.calendar[day]));
-            if let Some(a) = action {
-                let previous = fields.close(day - 1).ok_or(
-                    "ex-date reference price unavailable; require exchange reference data",
-                )?;
-                let reference = (previous - a.cash_per_share) / (1.0 + a.shares_per_share);
-                if reference <= 0.0 {
-                    return Err("invalid ex-right reference price".into());
-                }
-                if let Some((old, new)) = previous_factor.zip(current_factor) {
-                    let expected = previous / reference;
-                    if (new / old / expected - 1.0).abs() > 0.002 {
-                        return Err(format!("{id} {} distribution disagrees with adjustment factor (possible rights issue/source revision)",dataset.calendar[day]).into());
-                    }
-                }
-            } else if let Some((old, new)) = previous_factor.zip(current_factor)
-                && old > 0.0
-                && (new / old - 1.0).abs() > 0.00002
-            {
-                return Err(format!(
-                    "{id} {} unexplained factor change; company-action history incomplete",
-                    dataset.calendar[day]
-                )
-                .into());
-            }
-            if current_factor.is_some() {
-                previous_factor = current_factor;
-            }
-        }
+    let issues = adjustment_issues(dataset, book, symbols, start, end)?;
+    if !issues.is_empty() {
+        return Err(format!("company-action adjustment issues: {issues:?}").into());
     }
     Ok(())
 }
+/// Independently verify every coefficient transition and every implemented event,
+/// including training and warmup; return individual securities without starting training.
+pub(super) fn adjustment_issues(
+    dataset: &DailyDataset,
+    book: &ActionBundle,
+    symbols: &BTreeSet<String>,
+    start: Date,
+    end: Date,
+) -> Result<BTreeMap<String, Vec<String>>> {
+    let lo = dataset.calendar.partition_point(|d| *d < start).max(1);
+    let hi = dataset.calendar.partition_point(|d| *d <= end);
+    let mut out = BTreeMap::new();
+    for id in symbols {
+        analytics_core::task::TaskContext::current().check()?;
+        let result = (|| -> Result<Vec<String>> {
+            let range = dataset.security_range(id, start, end)?;
+            let start = range.start;
+            let end = range.end;
+            let lo = dataset.calendar.partition_point(|d| *d < start).max(lo);
+            let hi = dataset.calendar.partition_point(|d| *d <= end).min(hi);
+            book.require_adjustment_coverage(&BTreeSet::from([id.clone()]), start, end)?;
+            let fields = RawFields::adjustment_inputs(dataset, id)?;
+            let explicit = dataset.has_independent_coefficients();
+            let events: BTreeMap<_, _> = book
+                .actions
+                .iter()
+                .filter(|a| a.instrument == *id)
+                .map(|a| (a.ex_date, a))
+                .collect();
+            let mut issues = Vec::new();
+            for a in events
+                .values()
+                .filter(|a| a.ex_date >= start && a.ex_date <= end)
+            {
+                match dataset.calendar.binary_search(&a.ex_date) {
+                    Err(_) => issues.push(format!(
+                        "{}: company action outside verified trading calendar",
+                        a.ex_date
+                    )),
+                    Ok(0) => issues.push(format!(
+                        "{}: ex-date reference price unavailable at first calendar observation",
+                        a.ex_date
+                    )),
+                    _ => {}
+                }
+            }
+            for date in dataset.adjustment_change_dates(id)? {
+                if date >= start && date <= end {
+                    match dataset.calendar.binary_search(&date) {
+                        Err(_) => issues.push(format!(
+                            "{date}: coefficient change outside verified trading calendar"
+                        )),
+                        Ok(0) if !events.contains_key(&date) => issues.push(format!(
+                            "{date}: first-day coefficient change without verifiable event/reference price"
+                        )),
+                        _ => {}
+                    }
+                }
+            }
+            let mut previous_factor = (0..lo).rev().find_map(|d| fields.factor.get(d));
+            for day in lo..hi {
+                analytics_core::task::TaskContext::current().check()?;
+                let date = dataset.calendar[day];
+                let current = fields.factor.get(day);
+                let transition = previous_factor.zip(current).map(|(a, b)| b / a);
+                if let Some(a) = events.get(&date) {
+                    let reference = fields
+                        .close(day - 1)
+                        .and_then(|c| a.reference_price(c).ok().map(|p| (c, p)));
+                    let reference = if matches!(
+                        a.terms.reference(),
+                        Some(analytics_core::actions::Reference::Unchanged { .. })
+                    ) {
+                        Some((1., 1.))
+                    } else {
+                        reference
+                    };
+                    match (reference,transition) {
+                        (Some((previous,reference)),Some(ratio)) if reference>0. && ratio.is_finite() => {
+                            if (ratio-1.).abs()<=1e-12 && !matches!(a.terms.reference(),Some(analytics_core::actions::Reference::Unchanged{..})) {
+                                issues.push(format!("{date}: company action without coefficient change"));
+                            } else if (ratio/(previous/reference)-1.).abs()>0.002 {
+                                issues.push(format!("{date}: distribution disagrees with independent coefficient (possible special distribution/rights issue/source revision)"));
+                            }
+                        }
+                        _=>issues.push(format!("{date}: ex-date reference price or coefficient unavailable; require verified exchange reference data")),
+                    }
+                } else if let Some(ratio) = transition {
+                    let threshold = if explicit { 1e-12 } else { 0.00002 };
+                    if !ratio.is_finite() || (ratio - 1.).abs() > threshold {
+                        issues.push(format!("{date}: unexplained coefficient change; company-action history incomplete"));
+                    }
+                }
+                if current.is_some() {
+                    previous_factor = current;
+                }
+            }
+            Ok(issues)
+        })();
+        analytics_core::task::TaskContext::current().check()?;
+        match result {
+            Ok(issues) if !issues.is_empty() => {
+                out.insert(id.clone(), issues);
+            }
+            Err(error) => {
+                out.insert(id.clone(), vec![error.to_string()]);
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
 fn trade_allowed(
     id: &str,
+    code: &str,
     field: &RawFields,
     day: usize,
     actions: &[CorporateAction],
@@ -131,12 +230,12 @@ fn trade_allowed(
         return Ok(false);
     };
     for a in actions.iter().filter(|a| a.instrument == id) {
-        previous = (previous - a.cash_per_share) / (1.0 + a.shares_per_share);
+        previous = a.reference_price(previous)?;
     }
     if previous <= 0.0 {
         return Ok(false);
     }
-    let limit = rules.board_for(id)?.daily_limit - 0.005;
+    let limit = rules.board_for(code)?.daily_limit - 0.005;
     let change = price / previous - 1.0;
     Ok(if buy { change < limit } else { change > -limit })
 }
@@ -144,29 +243,46 @@ pub(super) fn simulate(
     state: &mut RawPortfolio,
     meta: &YearMeta,
     scores: &[f64],
-    dataset: &QlibDataset,
+    dataset: &DailyDataset,
     book: &ActionBundle,
     request: &ResearchRequest,
-    year: i32,
+    range: &DateRange,
 ) -> Result<Vec<DayResult>> {
     if meta.rows.len() != scores.len() {
         return Err("prediction length mismatch".into());
     }
-    let first = dataset.calendar.partition_point(|d| d.year() < year);
-    let end = dataset.calendar.partition_point(|d| d.year() <= year);
+    let requested_first = dataset.calendar.partition_point(|d| *d < range.start);
+    let first = state.last_day.map_or(requested_first, |d| d + 1);
+    let end = dataset.calendar.partition_point(|d| *d <= range.end);
     if first >= end {
         return Err("no raw execution calendar".into());
     }
     if state.last_day.is_some_and(|day| day + 1 != first) {
         return Err("raw ledger requires consecutive model folds".into());
     }
-    let symbols: Vec<_> = dataset.membership("csi500")?.into_keys().collect();
+    let pool = match &request.pool {
+        Some(p) => p.clone(),
+        None => dataset.pool(&request.universe_id)?,
+    };
+    let symbols: BTreeSet<_> = pool
+        .intervals
+        .keys()
+        .chain(state.ledger.positions.keys())
+        .cloned()
+        .collect();
+    let symbols =
+        book.required_symbols(&symbols, dataset.calendar[first], dataset.calendar[end - 1]);
     // Load one field per stock; no DuckDB/LightGBM handle crosses a worker boundary.
     let fields: HashMap<_, _> = symbols
         .iter()
-        .map(|id| Ok((id.as_str(), RawFields::load(dataset, id)?)))
+        .map(|id| {
+            Ok((
+                id.as_str(),
+                RawFields::load_with_missing(dataset, id, request.quality_policy.allows_missing())?,
+            ))
+        })
         .collect::<Result<_>>()?;
-    let benchmark = RawFields::load(dataset, "SH000905")?;
+    let benchmark = RawFields::load(dataset, &request.benchmark)?;
     let mut signals = BTreeMap::<usize, Vec<(String, f64)>>::new();
     for (r, s) in meta.rows.iter().zip(scores) {
         if s.is_finite() {
@@ -176,14 +292,32 @@ pub(super) fn simulate(
                 .push((r.instrument.clone(), *s));
         }
     }
-    if let Some(previous) = state.pending_signal.take() {
+    if first == requested_first
+        && let Some(previous) = state.pending_signal.take()
+    {
         signals.insert(first, previous);
+    } else {
+        state.pending_signal = None;
     }
     state.pending_signal = signals.remove(&end);
     let mut out = Vec::new();
     for day in first..end {
         analytics_core::task::TaskContext::current().check()?;
         let date = dataset.calendar[day];
+        for id in state.ledger.positions.keys() {
+            let f = fields
+                .get(id.as_str())
+                .ok_or("held security fields unavailable")?;
+            if (f.close(day).is_none() || f.volume.get(day).is_none())
+                && f.volume.get(day) != Some(0.)
+                && !quality::evidenced_nonquote(Some(book), id, date)
+            {
+                return Err(format!(
+                    "data_not_ready: {id} {date}: held security has no close or verified suspension"
+                )
+                .into());
+            }
+        }
         let actions: Vec<_> = book
             .actions
             .iter()
@@ -193,7 +327,7 @@ pub(super) fn simulate(
         // Adjust stale marks on an ex date even when a stock is suspended.
         for a in &actions {
             if let Some(p) = state.marks.get_mut(&a.instrument) {
-                *p = (*p - a.cash_per_share) / (1.0 + a.shares_per_share);
+                *p = a.reference_price(*p)?;
             }
         }
         state.ledger.begin_day(date)?;
@@ -209,11 +343,90 @@ pub(super) fn simulate(
         let mut traded = 0.0;
         let mut fees = FeeBreakdown::default();
         let mut blocked = 0;
+        let eligible = pool.on(date);
+        state.pool_exits.retain(|id| !eligible.contains(id));
+        let scheduled = state
+            .rebalance_clock
+            .is_multiple_of(request.config.rebalance_days);
+        if (scheduled && day >= requested_first)
+            || request.pool_exit_policy == analytics_core::pool::PoolExitPolicy::NextTradableDay
+        {
+            state.pool_exits.extend(
+                state
+                    .ledger
+                    .positions
+                    .keys()
+                    .filter(|id| !eligible.contains(*id))
+                    .cloned(),
+            );
+        }
+        let exit_ids: Vec<_> = state.pool_exits.iter().cloned().collect();
+        for id in exit_ids {
+            let Some(p) = state.ledger.positions.get(&id) else {
+                state.pool_exits.remove(&id);
+                continue;
+            };
+            let Some(f) = fields.get(id.as_str()) else {
+                blocked += 1;
+                continue;
+            };
+            let quantity = p.shares.min(p.sellable);
+            let price = f.open(day);
+            let can_trade = quantity > 0
+                && price.is_some()
+                && state.ledger.can_trade(&id)
+                && trade_allowed(
+                    &id,
+                    &dataset.exchange_symbol(&id, date)?,
+                    f,
+                    day,
+                    &actions,
+                    &request.market_rules,
+                    false,
+                )?;
+            let entry = serde_json::json!({"date":date,"instrument":id,"reason":"pool_removed","status":if can_trade{"filled"}else{"blocked"},"shares":quantity});
+            use std::io::Write;
+            writeln!(
+                fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(request.output.join("pool_events.jsonl"))?,
+                "{}",
+                entry
+            )?;
+            if can_trade {
+                let price = price.unwrap();
+                fees.add(state.ledger.fill(
+                    &id,
+                    OrderSide::Sell,
+                    quantity,
+                    price,
+                    &request.market_rules,
+                )?);
+                traded += quantity as f64 * price;
+            } else {
+                blocked += 1;
+            }
+        }
+        if eligible != state.previous_eligible {
+            use std::io::Write;
+            writeln!(
+                fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(request.output.join("pool_events.jsonl"))?,
+                "{}",
+                serde_json::json!({"date":date,"added":eligible.difference(&state.previous_eligible).collect::<Vec<_>>(),"removed":state.previous_eligible.difference(&eligible).collect::<Vec<_>>() })
+            )?;
+            state.previous_eligible = eligible.clone();
+        }
         if state
             .rebalance_clock
             .is_multiple_of(request.config.rebalance_days)
+            && day >= requested_first
             && let Some(ranked) = signals.get_mut(&day)
         {
+            ranked.retain(|(id, _)| eligible.contains(id));
             ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
             let desired: BTreeSet<_> = ranked
                 .iter()
@@ -223,6 +436,9 @@ pub(super) fn simulate(
             let target = opening_nav / request.config.top_n as f64;
             let current: Vec<_> = state.ledger.positions.keys().cloned().collect();
             for id in current {
+                if state.pool_exits.contains(&id) {
+                    continue;
+                }
                 let Some(f) = fields.get(id.as_str()) else {
                     blocked += 1;
                     continue;
@@ -231,6 +447,10 @@ pub(super) fn simulate(
                     blocked += 1;
                     continue;
                 };
+                if !state.ledger.can_trade(&id) {
+                    blocked += 1;
+                    continue;
+                }
                 let p = &state.ledger.positions[&id];
                 let sell = if desired.contains(id.as_str()) {
                     ((p.shares as f64 - target / price).max(0.0)).floor() as u64
@@ -239,7 +459,10 @@ pub(super) fn simulate(
                 };
                 let mut quantity = sell.min(p.sellable);
                 if matches!(
-                    request.market_rules.board_for(&id)?.board,
+                    request
+                        .market_rules
+                        .board_for(&dataset.exchange_symbol(&id, date)?)?
+                        .board,
                     Board::Main | Board::Chinext
                 ) && quantity != p.shares
                 {
@@ -248,13 +471,29 @@ pub(super) fn simulate(
                 if quantity == 0 {
                     continue;
                 }
-                if quantity < u64::from(request.market_rules.board_for(&id)?.minimum_buy_shares)
+                if quantity
+                    < u64::from(
+                        request
+                            .market_rules
+                            .board_for(&dataset.exchange_symbol(&id, date)?)?
+                            .minimum_buy_shares,
+                    )
                     && quantity != p.shares
                 {
                     blocked += 1;
                     continue;
                 }
-                if !trade_allowed(&id, f, day, &actions, &request.market_rules, false)? {
+                if !state.ledger.can_trade(&id)
+                    || !trade_allowed(
+                        &id,
+                        &dataset.exchange_symbol(&id, date)?,
+                        f,
+                        day,
+                        &actions,
+                        &request.market_rules,
+                        false,
+                    )?
+                {
                     blocked += 1;
                     continue;
                 }
@@ -291,7 +530,17 @@ pub(super) fn simulate(
                 if quantity == 0 {
                     continue;
                 }
-                if !trade_allowed(id, f, day, &actions, &request.market_rules, true)? {
+                if !state.ledger.can_trade(id)
+                    || !trade_allowed(
+                        id,
+                        &dataset.exchange_symbol(id, date)?,
+                        f,
+                        day,
+                        &actions,
+                        &request.market_rules,
+                        true,
+                    )?
+                {
                     blocked += 1;
                     continue;
                 }
@@ -327,10 +576,25 @@ pub(super) fn simulate(
         };
         out.push(DayResult {
             date: date.to_string(),
-            net_return: closing_nav / state.previous_nav - 1.0,
+            net_return: if state.previous_nav > 0. {
+                closing_nav / state.previous_nav - 1.
+            } else if closing_nav == 0. {
+                0.
+            } else {
+                return Err("cannot define returns after zero-NAV resurrection".into());
+            },
             benchmark_return,
-            turnover: traded / opening_nav / 2.0,
-            cost: fees.total() / opening_nav,
+            turnover: if opening_nav > 0. {
+                traded / opening_nav / 2.
+            } else {
+                0.
+            },
+            cost: if opening_nav > 0. {
+                (fees.total() + state.ledger.corporate_fees_today) / opening_nav
+            } else {
+                0.
+            },
+            corporate_action_cost_cny: state.ledger.corporate_fees_today,
             fee_breakdown_cny: fees,
             holdings: state.ledger.positions.len(),
             blocked_orders: blocked,
@@ -341,9 +605,15 @@ pub(super) fn simulate(
         }
         state.last_day = Some(day);
     }
-    fs::create_dir_all(request.output.join(format!("fold-{year}")))?;
+    fs::create_dir_all(
+        request
+            .output
+            .join(format!("account-through-{}", range.end)),
+    )?;
     save(
-        request.output.join(format!("fold-{year}/ledger.json")),
+        request
+            .output
+            .join(format!("account-through-{}/ledger.json", range.end)),
         &state.ledger,
     )?;
     Ok(out)
@@ -395,10 +665,10 @@ mod tests {
         for id in ["sh600000", "sh000905"] {
             write(id, "volume", &[10000.0; 6]);
         }
-        let dataset = QlibDataset::open(&root).unwrap();
+        let dataset = DailyDataset::open(&root).unwrap();
         let output = dir.path().join("run");
         fs::create_dir(&output).unwrap();
-        let request = ResearchRequest::new(root, output);
+        let request = ResearchRequest::new(root.clone(), output);
         let action = CorporateAction {
             id: "SH600000:2025-01-02".into(),
             instrument: "SH600000".into(),
@@ -409,17 +679,22 @@ mod tests {
             listing_date: Some("2025-01-07".parse().unwrap()),
             cash_per_share: 1.0,
             shares_per_share: 0.5,
+            terms: Default::default(),
             source: "synthetic hand-calculated fixture".into(),
         };
         let mut book = ActionBundle {
-            schema_version: 1,
-            downloader: "JFQuant analytics-storage corporate-actions".into(),
+            schema_version: 3,
+            source_bindings: Default::default(),
+            coverage: Default::default(),
+            downloader: "JFQuant analytics-workflow synthetic-demo-v1".into(),
             downloaded_at: "fixture".into(),
             queried_symbols: BTreeSet::from(["SH600000".into()]),
             actions: vec![action],
             failures: BTreeMap::new(),
             raw_sha256: BTreeMap::new(),
         };
+        book.declare_synthetic_coverage(dataset.calendar[0], dataset.calendar[5])
+            .unwrap();
         validate_actions(
             &dataset,
             &book,
@@ -435,12 +710,24 @@ mod tests {
                 day: 0,
                 instrument: "SH600000".into(),
                 label: None,
-                exit_year: 2025,
+                label_end: Some(dataset.calendar[5]),
             }],
             finite_counts: BTreeMap::new(),
         };
         let mut state = RawPortfolio::new(&request).unwrap();
-        simulate(&mut state, &meta, &[1.0], &dataset, &book, &request, 2024).unwrap();
+        simulate(
+            &mut state,
+            &meta,
+            &[1.0],
+            &dataset,
+            &book,
+            &request,
+            &DateRange {
+                start: Date::from_ymd_opt(2024, 1, 1).unwrap(),
+                end: Date::from_ymd_opt(2024, 12, 31).unwrap(),
+            },
+        )
+        .unwrap();
         assert_eq!(state.ledger.positions["SH600000"].shares, 2000);
         let before_cash = state.ledger.cash;
         let before_nav = state.previous_nav;
@@ -448,11 +735,208 @@ mod tests {
             rows: vec![],
             ..meta
         };
-        let second = simulate(&mut state, &empty, &[], &dataset, &book, &request, 2025).unwrap();
+        let second = simulate(
+            &mut state,
+            &empty,
+            &[],
+            &dataset,
+            &book,
+            &request,
+            &DateRange {
+                start: Date::from_ymd_opt(2025, 1, 1).unwrap(),
+                end: Date::from_ymd_opt(2025, 12, 31).unwrap(),
+            },
+        )
+        .unwrap();
         assert_eq!(state.ledger.positions["SH600000"].shares, 3000);
         assert!((state.ledger.cash - before_cash - 2000.0).abs() < 1e-8);
         assert!((state.previous_nav - before_nav).abs() < 1e-8);
         assert!(second.iter().all(|d| d.net_return.abs() < 1e-12));
+        // Pool exits continue without model signals, and unlisted rights survive liquidation.
+        use analytics_core::{
+            DateRange,
+            pool::{PoolExitPolicy, PoolMembership},
+        };
+        for (policy, expected_first) in [
+            (PoolExitPolicy::NextTradableDay, "2025-01-02"),
+            (PoolExitPolicy::NextRebalance, "2025-01-07"),
+        ] {
+            let mut request = ResearchRequest::new(
+                dataset.root.clone(),
+                dir.path().join(format!("policy-{policy:?}")),
+            );
+            fs::create_dir_all(&request.output).unwrap();
+            request.config.rebalance_days = 4;
+            request.pool_exit_policy = policy;
+            request.pool = Some(PoolMembership {
+                coverage: DateRange {
+                    start: dataset.calendar[0],
+                    end: dataset.calendar[5],
+                },
+                intervals: BTreeMap::from([(
+                    "SH600000".into(),
+                    vec![DateRange {
+                        start: dataset.calendar[0],
+                        end: dataset.calendar[1],
+                    }],
+                )]),
+            });
+            let mut state = RawPortfolio::new(&request).unwrap();
+            let initial = YearMeta {
+                signature: "fixture".into(),
+                factor_ids: vec![],
+                rows: vec![super::super::data::Sample {
+                    day: 0,
+                    instrument: "SH600000".into(),
+                    label: None,
+                    label_end: Some(dataset.calendar[5]),
+                }],
+                finite_counts: BTreeMap::new(),
+            };
+            simulate(
+                &mut state,
+                &initial,
+                &[1.0],
+                &dataset,
+                &book,
+                &request,
+                &DateRange {
+                    start: Date::from_ymd_opt(2024, 1, 1).unwrap(),
+                    end: Date::from_ymd_opt(2024, 12, 31).unwrap(),
+                },
+            )
+            .unwrap();
+            simulate(
+                &mut state,
+                &empty,
+                &[],
+                &dataset,
+                &book,
+                &request,
+                &DateRange {
+                    start: Date::from_ymd_opt(2025, 1, 1).unwrap(),
+                    end: Date::from_ymd_opt(2025, 12, 31).unwrap(),
+                },
+            )
+            .unwrap();
+            assert!(state.ledger.positions.is_empty());
+            let events: Vec<serde_json::Value> =
+                fs::read_to_string(request.output.join("pool_events.jsonl"))
+                    .unwrap()
+                    .lines()
+                    .map(|s| serde_json::from_str(s).unwrap())
+                    .filter(|v: &serde_json::Value| v["status"] == "filled")
+                    .collect();
+            assert_eq!(events[0]["date"], expected_first);
+            assert_eq!(
+                events
+                    .iter()
+                    .map(|v| v["shares"].as_u64().unwrap())
+                    .sum::<u64>(),
+                3000
+            );
+        }
+        // Suspension blocks an exit; re-entry cancels it before a later usable quote.
+        write(
+            "sh600000",
+            "volume",
+            &[10000.0, 10000.0, 0.0, 10000.0, 10000.0, 10000.0],
+        );
+        let mut request = ResearchRequest::new(dataset.root.clone(), dir.path().join("reentry"));
+        fs::create_dir_all(&request.output).unwrap();
+        request.pool = Some(PoolMembership {
+            coverage: DateRange {
+                start: dataset.calendar[0],
+                end: dataset.calendar[5],
+            },
+            intervals: BTreeMap::from([(
+                "SH600000".into(),
+                vec![
+                    DateRange {
+                        start: dataset.calendar[0],
+                        end: dataset.calendar[1],
+                    },
+                    DateRange {
+                        start: dataset.calendar[3],
+                        end: dataset.calendar[5],
+                    },
+                ],
+            )]),
+        });
+        let mut state = RawPortfolio::new(&request).unwrap();
+        let initial = YearMeta {
+            signature: "fixture".into(),
+            factor_ids: vec![],
+            rows: vec![super::super::data::Sample {
+                day: 0,
+                instrument: "SH600000".into(),
+                label: None,
+                label_end: Some(dataset.calendar[5]),
+            }],
+            finite_counts: BTreeMap::new(),
+        };
+        simulate(
+            &mut state,
+            &initial,
+            &[1.0],
+            &dataset,
+            &book,
+            &request,
+            &DateRange {
+                start: Date::from_ymd_opt(2024, 1, 1).unwrap(),
+                end: Date::from_ymd_opt(2024, 12, 31).unwrap(),
+            },
+        )
+        .unwrap();
+        simulate(
+            &mut state,
+            &empty,
+            &[],
+            &dataset,
+            &book,
+            &request,
+            &DateRange {
+                start: Date::from_ymd_opt(2025, 1, 1).unwrap(),
+                end: Date::from_ymd_opt(2025, 12, 31).unwrap(),
+            },
+        )
+        .unwrap();
+        assert_eq!(state.ledger.positions["SH600000"].shares, 3000);
+        assert!(state.pool_exits.is_empty());
+        // A score generated on the last eligible day cannot buy on the following day.
+        request.output = dir.path().join("expired-signal");
+        fs::create_dir_all(&request.output).unwrap();
+        request
+            .pool
+            .as_mut()
+            .unwrap()
+            .intervals
+            .get_mut("SH600000")
+            .unwrap()
+            .truncate(1);
+        request
+            .pool
+            .as_mut()
+            .unwrap()
+            .intervals
+            .get_mut("SH600000")
+            .unwrap()[0]
+            .end = dataset.calendar[0];
+        let mut state = RawPortfolio::new(&request).unwrap();
+        simulate(
+            &mut state,
+            &initial,
+            &[1.0],
+            &dataset,
+            &book,
+            &request,
+            &DateRange {
+                start: Date::from_ymd_opt(2024, 1, 1).unwrap(),
+                end: Date::from_ymd_opt(2024, 12, 31).unwrap(),
+            },
+        )
+        .unwrap();
+        assert!(state.ledger.positions.is_empty());
         book.actions.clear();
         assert!(
             validate_actions(

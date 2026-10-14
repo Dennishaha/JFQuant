@@ -1,5 +1,5 @@
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "id": "gtja191-csi500-annual",
   "name": "GTJA191 / 中证500年度研究",
   "formula_version": "gtja191-paper-2017+jfquant-audit-v4",
@@ -31,7 +31,6 @@
     "expanding": false,
     "until": null
   },
-  "identity_version": "",
   "quality_policy": {
     "strictness": "strict",
     "min_valid_feature_ratio": 0.0,

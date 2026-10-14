@@ -101,7 +101,7 @@ impl AdjustmentRecord {
     pub fn validate(&self) -> io::Result<()> {
         validate_instrument(&self.instrument_id).map_err(invalid)?;
         analytics_core::pool::validate_exchange_symbol(&self.source_symbol).map_err(invalid)?;
-        if self.schema_version != 2 {
+        if self.schema_version != 3 {
             return Err(invalid("unsupported_data_format: adjustment record"));
         }
         match &self.basis {
@@ -213,7 +213,7 @@ mod tests {
     use super::*;
     fn record() -> AdjustmentRecord {
         AdjustmentRecord {
-            schema_version: 2,
+            schema_version: 3,
             instrument_id: "SH600000".into(),
             source_symbol: "SH600000".into(),
             basis: AdjustmentBasis::Explicit {

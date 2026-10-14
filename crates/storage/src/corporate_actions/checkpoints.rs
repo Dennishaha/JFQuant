@@ -105,7 +105,7 @@ mod tests {
         let source_root = temp.path().join("source");
         fs::create_dir_all(source_root.join("raw")).unwrap();
         let source = ActionBundle {
-            schema_version: 3,
+            schema_version: 4,
             source_bindings: Default::default(),
             coverage: Default::default(),
             downloader: "JFQuant analytics-storage corporate-actions".into(),

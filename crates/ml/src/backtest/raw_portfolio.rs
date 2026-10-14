@@ -23,7 +23,6 @@ impl RawPortfolio {
         let mut ledger =
             ShareLedger::new(request.initial_cash_cny, request.dividend_withholding_rate)?;
         ledger.action_policy = request.action_policy.clone();
-        ledger.security_registry = request.identity_registry.clone();
         Ok(Self {
             ledger,
             previous_nav: request.initial_cash_cny,
@@ -35,6 +34,24 @@ impl RawPortfolio {
             previous_eligible: BTreeSet::new(),
         })
     }
+}
+fn reject_order(
+    request: &ResearchRequest,
+    date: Date,
+    id: &str,
+    side: &str,
+    reason: &str,
+) -> Result<()> {
+    use std::io::Write;
+    writeln!(
+        fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(request.output.join("order_events.jsonl"))?,
+        "{}",
+        serde_json::json!({"date":date,"instrument":id,"side":side,"status":"not_filled","reason":reason})
+    )?;
+    Ok(())
 }
 struct RawFields {
     open: DailyField,
@@ -51,7 +68,13 @@ impl RawFields {
             open: d.research_raw_field(id, "open", allow_missing)?,
             close: d.research_raw_field(id, "close", allow_missing)?,
             volume: d.research_raw_volume(id, allow_missing)?,
-            factor: d.adjustment_factors(id)?,
+            factor: match d.adjustment_factors(id) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => DailyField {
+                    start: 0,
+                    values: vec![None; d.calendar.len()],
+                },
+                r => r?,
+            },
         })
     }
     fn adjustment_inputs(d: &DailyDataset, id: &str) -> Result<Self> {
@@ -84,6 +107,7 @@ impl RawFields {
 }
 /// Check every adjustment-factor transition against dated distributions. Unknown
 /// rights issues, missing events and unexplained source adjustments stop execution.
+#[cfg(test)]
 pub(super) fn validate_actions(
     dataset: &DailyDataset,
     book: &ActionBundle,
@@ -118,7 +142,17 @@ pub(super) fn adjustment_issues(
             let end = range.end;
             let lo = dataset.calendar.partition_point(|d| *d < start).max(lo);
             let hi = dataset.calendar.partition_point(|d| *d <= end).min(hi);
-            book.require_adjustment_coverage(&BTreeSet::from([id.clone()]), start, end)?;
+            if book.failures.contains_key(id) {
+                return Err("company-action source failure remains unresolved".into());
+            }
+            for action in book
+                .actions
+                .iter()
+                .filter(|a| a.instrument == *id && a.ex_date >= start && a.ex_date <= end)
+            {
+                action.validate_adjustment_terms()?;
+            }
+
             let fields = RawFields::adjustment_inputs(dataset, id)?;
             let explicit = dataset.has_independent_coefficients();
             let events: BTreeMap<_, _> = book
@@ -133,13 +167,14 @@ pub(super) fn adjustment_issues(
                 .filter(|a| a.ex_date >= start && a.ex_date <= end)
             {
                 match dataset.calendar.binary_search(&a.ex_date) {
-                    Err(_) => issues.push(format!(
-                        "{}: company action outside verified trading calendar",
-                        a.ex_date
+                    Err(_) => issues.push((
+                        a.ex_date,
+                        "company action outside verified trading calendar".to_string(),
                     )),
-                    Ok(0) => issues.push(format!(
-                        "{}: ex-date reference price unavailable at first calendar observation",
-                        a.ex_date
+                    Ok(0) => issues.push((
+                        a.ex_date,
+                        "ex-date reference price unavailable at first calendar observation"
+                            .to_string(),
                     )),
                     _ => {}
                 }
@@ -147,11 +182,14 @@ pub(super) fn adjustment_issues(
             for date in dataset.adjustment_change_dates(id)? {
                 if date >= start && date <= end {
                     match dataset.calendar.binary_search(&date) {
-                        Err(_) => issues.push(format!(
-                            "{date}: coefficient change outside verified trading calendar"
+                        Err(_) => issues.push((
+                            date,
+                            "coefficient change outside verified trading calendar".to_string(),
                         )),
-                        Ok(0) if !events.contains_key(&date) => issues.push(format!(
-                            "{date}: first-day coefficient change without verifiable event/reference price"
+                        Ok(0) if !events.contains_key(&date) => issues.push((
+                            date,
+                            "first-day coefficient change without verifiable event/reference price"
+                                .to_string(),
                         )),
                         _ => {}
                     }
@@ -178,24 +216,28 @@ pub(super) fn adjustment_issues(
                     match (reference,transition) {
                         (Some((previous,reference)),Some(ratio)) if reference>0. && ratio.is_finite() => {
                             if (ratio-1.).abs()<=1e-12 && !matches!(a.terms.reference(),Some(analytics_core::actions::Reference::Unchanged{..})) {
-                                issues.push(format!("{date}: company action without coefficient change"));
+                                issues.push((date, "company action without coefficient change".to_string()));
                             } else if (ratio/(previous/reference)-1.).abs()>0.002 {
-                                issues.push(format!("{date}: distribution disagrees with independent coefficient (possible special distribution/rights issue/source revision)"));
+                                issues.push((date, "distribution disagrees with independent coefficient (possible special distribution/rights issue/source revision)".to_string()));
                             }
                         }
-                        _=>issues.push(format!("{date}: ex-date reference price or coefficient unavailable; require verified exchange reference data")),
+                        _=>issues.push((date, "ex-date reference price or coefficient unavailable; require verified exchange reference data".to_string())),
                     }
                 } else if let Some(ratio) = transition {
                     let threshold = if explicit { 1e-12 } else { 0.00002 };
                     if !ratio.is_finite() || (ratio - 1.).abs() > threshold {
-                        issues.push(format!("{date}: unexplained coefficient change; company-action history incomplete"));
+                        issues.push((
+                            date,
+                            "unexplained coefficient change; company-action history incomplete"
+                                .to_string(),
+                        ));
                     }
                 }
                 if current.is_some() {
                     previous_factor = current;
                 }
             }
-            Ok(issues)
+            Ok(compress_adjustment_issues(&dataset.calendar, issues))
         })();
         analytics_core::task::TaskContext::current().check()?;
         match result {
@@ -209,6 +251,40 @@ pub(super) fn adjustment_issues(
         }
     }
     Ok(out)
+}
+
+fn compress_adjustment_issues(calendar: &[Date], issues: Vec<(Date, String)>) -> Vec<String> {
+    let mut groups = BTreeMap::<String, Vec<Date>>::new();
+    for (date, message) in issues {
+        groups.entry(message).or_default().push(date);
+    }
+    let mut output = Vec::new();
+    for (message, mut dates) in groups {
+        dates.sort();
+        dates.dedup();
+        let mut ranges = Vec::<(Date, Date)>::new();
+        for date in dates {
+            if let Some((_, end)) = ranges.last_mut()
+                && calendar
+                    .binary_search(end)
+                    .ok()
+                    .zip(calendar.binary_search(&date).ok())
+                    .is_some_and(|(a, b)| b == a + 1)
+            {
+                *end = date;
+            } else {
+                ranges.push((date, date));
+            }
+        }
+        output.extend(ranges.into_iter().map(|(start, end)| {
+            if start == end {
+                format!("{start}: {message}")
+            } else {
+                format!("{start}..{end}: {message}")
+            }
+        }));
+    }
+    output
 }
 
 fn trade_allowed(
@@ -260,6 +336,7 @@ pub(super) fn simulate(
     if state.last_day.is_some_and(|day| day + 1 != first) {
         return Err("raw ledger requires consecutive model folds".into());
     }
+    state.ledger.source_map = dataset.source_map().clone();
     let pool = match &request.pool {
         Some(p) => p.clone(),
         None => dataset.pool(&request.universe_id)?,
@@ -278,7 +355,7 @@ pub(super) fn simulate(
         .map(|id| {
             Ok((
                 id.as_str(),
-                RawFields::load_with_missing(dataset, id, request.quality_policy.allows_missing())?,
+                RawFields::load_with_missing(dataset, id, true)?,
             ))
         })
         .collect::<Result<_>>()?;
@@ -304,6 +381,11 @@ pub(super) fn simulate(
     for day in first..end {
         analytics_core::task::TaskContext::current().check()?;
         let date = dataset.calendar[day];
+        let held = state.ledger.required_instruments();
+        if !held.is_empty() {
+            book.require_coverage(&held, date, date)
+                .map_err(|e| format!("data_not_ready: held account dependencies {date}: {e}"))?;
+        }
         for id in state.ledger.positions.keys() {
             let f = fields
                 .get(id.as_str())
@@ -445,6 +527,7 @@ pub(super) fn simulate(
                 };
                 let Some(price) = f.open(day) else {
                     blocked += 1;
+                    reject_order(request, date, &id, "sell", "missing_deal_price")?;
                     continue;
                 };
                 if !state.ledger.can_trade(&id) {
@@ -469,6 +552,10 @@ pub(super) fn simulate(
                     quantity = quantity / 100 * 100;
                 }
                 if quantity == 0 {
+                    if sell > 0 {
+                        blocked += 1;
+                        reject_order(request, date, &id, "sell", "t_plus_one_or_minimum_lot")?;
+                    }
                     continue;
                 }
                 if quantity
@@ -495,6 +582,13 @@ pub(super) fn simulate(
                     )?
                 {
                     blocked += 1;
+                    reject_order(
+                        request,
+                        date,
+                        &id,
+                        "sell",
+                        "suspended_or_price_limit_or_nontradeable",
+                    )?;
                     continue;
                 }
                 let order = state.ledger.fill(
@@ -510,12 +604,33 @@ pub(super) fn simulate(
             for (id, _) in ranked.iter().take(request.config.top_n) {
                 let Some(f) = fields.get(id.as_str()) else {
                     blocked += 1;
+                    reject_order(request, date, id, "buy", "source_missing")?;
                     continue;
                 };
                 let Some(price) = f.open(day) else {
                     blocked += 1;
+                    reject_order(request, date, id, "buy", "missing_deal_price")?;
                     continue;
                 };
+                if !state.ledger.positions.contains_key(id) {
+                    let scope = std::iter::once(id.clone()).collect();
+                    if let Err(e) = book.require_coverage(&scope, date, date) {
+                        blocked += 1;
+                        reject_order(
+                            request,
+                            date,
+                            id,
+                            "buy",
+                            &format!("execution_data_missing: {e}"),
+                        )?;
+                        continue;
+                    }
+                    if let Err(e) = dataset.exchange_symbol(id, date) {
+                        blocked += 1;
+                        reject_order(request, date, id, "buy", &e.to_string())?;
+                        continue;
+                    }
+                }
                 let existing = state
                     .ledger
                     .positions
@@ -528,6 +643,10 @@ pub(super) fn simulate(
                     &request.market_rules,
                 )?;
                 if quantity == 0 {
+                    if target > existing {
+                        blocked += 1;
+                        reject_order(request, date, id, "buy", "insufficient_cash_or_minimum_lot")?;
+                    }
                     continue;
                 }
                 if !state.ledger.can_trade(id)
@@ -542,6 +661,13 @@ pub(super) fn simulate(
                     )?
                 {
                     blocked += 1;
+                    reject_order(
+                        request,
+                        date,
+                        id,
+                        "buy",
+                        "suspended_or_price_limit_or_nontradeable",
+                    )?;
                     continue;
                 }
                 fees.add(state.ledger.fill(
@@ -562,7 +688,13 @@ pub(super) fn simulate(
         for (id, p) in &state.marks {
             state.ledger.mark(id, *p)?;
         }
-        state.ledger.end_day(&book.actions)?;
+        let relevant_actions: Vec<_> = book
+            .actions
+            .iter()
+            .filter(|a| state.ledger.positions.contains_key(&a.instrument))
+            .cloned()
+            .collect();
+        state.ledger.end_day(&relevant_actions)?;
         let closing_nav = state.ledger.nav(&state.marks)?;
         let benchmark_return = if day > 0 {
             benchmark
@@ -599,6 +731,11 @@ pub(super) fn simulate(
             holdings: state.ledger.positions.len(),
             blocked_orders: blocked,
         });
+        save(request.output.join("partial_daily.json"), &out)?;
+        save(
+            request.output.join("account_checkpoint.json"),
+            &serde_json::json!({"date":date,"ledger":state.ledger,"complete":false}),
+        )?;
         state.previous_nav = closing_nav;
         if state.rebalance_clock > 0 || signals.contains_key(&day) {
             state.rebalance_clock += 1;
@@ -683,7 +820,7 @@ mod tests {
             source: "synthetic hand-calculated fixture".into(),
         };
         let mut book = ActionBundle {
-            schema_version: 3,
+            schema_version: 4,
             source_bindings: Default::default(),
             coverage: Default::default(),
             downloader: "JFQuant analytics-workflow synthetic-demo-v1".into(),
@@ -842,6 +979,7 @@ mod tests {
             "volume",
             &[10000.0, 10000.0, 0.0, 10000.0, 10000.0, 10000.0],
         );
+        let dataset = DailyDataset::open(&dataset.root).unwrap();
         let mut request = ResearchRequest::new(dataset.root.clone(), dir.path().join("reentry"));
         fs::create_dir_all(&request.output).unwrap();
         request.pool = Some(PoolMembership {
@@ -948,5 +1086,29 @@ mod tests {
             )
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod issue_compression_tests {
+    use super::*;
+    #[test]
+    fn consecutive_trading_issues_are_intervals_and_different_causes_stay_visible() {
+        let days: Vec<Date> = ["2020-01-02", "2020-01-03", "2020-01-06"]
+            .iter()
+            .map(|d| d.parse().unwrap())
+            .collect();
+        let output = compress_adjustment_issues(
+            &days,
+            vec![
+                (days[0], "missing event".into()),
+                (days[1], "missing event".into()),
+                (days[2], "missing event".into()),
+                (days[1], "bad reference".into()),
+            ],
+        );
+        assert_eq!(output.len(), 2);
+        assert!(output.contains(&"2020-01-02..2020-01-06: missing event".into()));
+        assert!(output.contains(&"2020-01-03: bad reference".into()));
     }
 }

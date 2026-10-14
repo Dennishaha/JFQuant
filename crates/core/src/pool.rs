@@ -112,10 +112,7 @@ impl PoolMembership {
 }
 /// Strict internal A-share/index identifier validation.
 pub fn validate_instrument(id: &str) -> Result<(), String> {
-    if crate::security::is_security_id(id) {
-        return Ok(());
-    }
-    validate_exchange_symbol(id)
+    crate::source_map::validate_key(id)
 }
 /// Validate a source/exchange locator separately from opaque securities.
 pub fn validate_exchange_symbol(id: &str) -> Result<(), String> {
@@ -131,7 +128,7 @@ pub fn validate_exchange_symbol(id: &str) -> Result<(), String> {
 impl PoolDefinition {
     /// Validate structure, duplicate-day conflicts and bounded expression depth.
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema_version != 2
+        if self.schema_version != 3
             || self.name.trim().is_empty()
             || self.coverage.start > self.coverage.end
         {
@@ -347,7 +344,7 @@ mod tests {
     }
     fn definition(expression: PoolExpression) -> PoolDefinition {
         PoolDefinition {
-            schema_version: 2,
+            schema_version: 3,
             name: "test".into(),
             coverage: DateRange {
                 start: d("2020-01-03"),

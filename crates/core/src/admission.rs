@@ -43,7 +43,7 @@ pub struct AdmissionCheck {
 /// Complete admission decision; an empty checklist cannot permit training.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdmissionReport {
-    /// Current admission report format, 2.
+    /// Current admission report format, 3.
     pub schema_version: u32,
     /// Actual frozen execution policy.
     pub policy: ResearchQualityPolicy,
@@ -55,7 +55,7 @@ pub struct AdmissionReport {
 impl AdmissionReport {
     /// True only when all checks ran and every failure has policy-permitted missing-data handling.
     pub fn ready(&self) -> bool {
-        self.schema_version == 2
+        self.schema_version == 4
             && !self.checks.is_empty()
             && self.policy.validate().is_ok()
             && self.decisions.iter().all(|d| {
@@ -88,7 +88,7 @@ mod tests {
     #[test]
     fn skipped_failed_and_empty_checks_never_authorize_training() {
         let mut r = AdmissionReport {
-            schema_version: 2,
+            schema_version: 4,
             policy: ResearchQualityPolicy::default(),
             decisions: vec![],
             checks: vec![],
@@ -115,7 +115,7 @@ mod tests {
     #[test]
     fn only_genuine_missing_features_can_be_nonblocking_and_not_run_never_passes() {
         let mut r = AdmissionReport {
-            schema_version: 2,
+            schema_version: 4,
             policy: ResearchQualityPolicy {
                 strictness: crate::research_quality::ResearchStrictness::AllowMissing,
                 ..Default::default()

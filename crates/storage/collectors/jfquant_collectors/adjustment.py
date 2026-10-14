@@ -75,7 +75,7 @@ def parse_response(symbol, text, verified_through):
         points.append({"effective_date": day, "factor": number})
     points.sort(key=lambda p: p["effective_date"])
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "instrument_id": symbol,
         "source_symbol": symbol,
         "basis": {

@@ -203,7 +203,7 @@ def market(request, report):
         if request["provider"] == "akshare":
             if symbol in indices:
                 adjustment = {
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "instrument_id": symbol,
                     "source_symbol": symbol,
                     "basis": {"kind": "price_index", "source": "akshare.index_zh_a_hist"},
@@ -212,7 +212,7 @@ def market(request, report):
                 adjustment = fetch_adjustment(symbol, end, report, request_call)
         else:
             adjustment = {
-                "schema_version": 2,
+                "schema_version": 3,
                 "instrument_id": symbol,
                 "source_symbol": symbol,
                 "basis": {

@@ -5,7 +5,6 @@
 pub mod backend;
 /// Explicit synthetic demo generator.
 pub mod demo;
-pub mod identities;
 /// Immutable date-effective stock pools.
 pub mod pools;
 /// Independently validated acquisition checkpoints.
@@ -123,7 +122,7 @@ fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ResearchTemplate {
-    /// Template schema, currently 5; absence is unsupported.
+    /// Template schema, currently 6; absence is unsupported.
     #[serde(default = "missing_template_version")]
     pub schema_version: u32,
     /// Immutable pool version, or builtin:csi300/builtin:csi500 bound to the selected market.
@@ -142,8 +141,6 @@ pub struct ResearchTemplate {
     pub schedule: analytics_core::schedule::Schedule,
     /// Explicit ordinary-holder corporate action policy.
     pub action_policy: analytics_core::actions::ActionPolicy,
-    /// Immutable reviewed identity directory; empty means not configured and blocks research.
-    pub identity_version: String,
     /// Shared research completeness and sample policy.
     pub quality_policy: analytics_core::research_quality::ResearchQualityPolicy,
     /// Rolling and model parameters.
@@ -172,7 +169,7 @@ impl Default for ResearchTemplate {
             ..ResearchConfig::default()
         };
         Self {
-            schema_version: 5,
+            schema_version: 6,
             pool_version: "builtin:csi500".into(),
             benchmark: "SH000905".into(),
             pool_exit_policy: Default::default(),
@@ -181,7 +178,6 @@ impl Default for ResearchTemplate {
             formula_version: analytics_factor::FORMULA_VERSION.into(),
             schedule: Default::default(),
             action_policy: Default::default(),
-            identity_version: String::new(),
             quality_policy: Default::default(),
             config,
             market_rules: MarketRulesPreset::a_share_latest(),
@@ -205,7 +201,7 @@ impl ResearchTemplate {
     }
     /// Validate before saving or starting a task.
     pub fn validate(&self) -> Result<()> {
-        if self.schema_version != 5
+        if self.schema_version != 6
             || self.id.trim().is_empty()
             || self.formula_version != analytics_factor::FORMULA_VERSION
             || self.name.trim().is_empty()
@@ -418,6 +414,7 @@ impl Workspace {
                 return Err("unverified market provenance".into());
             }
             source["content_sha256"] = json!(market_content_hash(path)?);
+            source["source_map"] = serde_json::to_value(dataset.source_map())?;
             (
                 "market",
                 source,
@@ -605,15 +602,36 @@ impl Workspace {
         if workbench.exists() {
             return Ok(serde_json::from_slice(&fs::read(workbench)?)?);
         }
+        let training = dir.join("training.json");
+        let training_value = if training.exists() {
+            {
+                let artifact = serde_json::from_slice::<Value>(&fs::read(&training)?)?;
+                analytics_ml::backtest::validate_training_artifact(&artifact)?;
+                Some(artifact)
+            }
+        } else {
+            None
+        };
         let p = dir.join("summary.json");
         if p.exists() {
             let summary = serde_json::from_slice(&fs::read(p)?)?;
             analytics_ml::backtest::validate_result(&summary)?;
             Ok(summary)
         } else {
+            if matches!(
+                run.request["request"]["operation"].as_str(),
+                Some("train_research")
+            ) && let Some(artifact) = training_value.as_ref()
+            {
+                return Ok(artifact.clone());
+            }
             let p = dir.join("execution_readiness.json");
             if p.exists() {
-                Ok(serde_json::from_slice(&fs::read(p)?)?)
+                let mut readiness: Value = serde_json::from_slice(&fs::read(p)?)?;
+                if let Some(t) = &training_value {
+                    readiness["training_artifact"] = t.clone();
+                }
+                Ok(readiness)
             } else {
                 let payload = dir.join("payload.json");
                 if payload.exists() {
@@ -623,7 +641,7 @@ impl Workspace {
                 if p.exists() {
                     Ok(serde_json::from_slice(&fs::read(p)?)?)
                 } else {
-                    Ok(Value::Null)
+                    Ok(training_value.unwrap_or(Value::Null))
                 }
             }
         }
@@ -646,21 +664,6 @@ pub enum WorkflowRequest {
         market: String,
         /// Effective exchange date to inspect.
         day: analytics_core::Date,
-    },
-    /// Preview actual date folds, required securities and coverage without training.
-    IdentityOperation {
-        /// list, show, check, import, export, or review.
-        method: String,
-        /// Selected directory version.
-        id: String,
-        /// Input registry or output package path.
-        path: PathBuf,
-        /// Optional dated source lookup.
-        provider: String,
-        /// Exact provider selector or opaque security ID.
-        symbol: String,
-        /// Explicit lookup date, required for reused codes.
-        date: Option<analytics_core::Date>,
     },
     /// Preview requirements without creating factor caches or native trainers.
     PreviewResearch {
@@ -754,6 +757,22 @@ pub enum WorkflowRequest {
         /// Previous interrupted derivation task.
         resume: Option<Uuid>,
     },
+    /// Train reusable fold models without validating future account settlements.
+    TrainResearch {
+        /// Recipe.
+        template: Box<ResearchTemplate>,
+        /// Market snapshot.
+        market: String,
+        /// Historical adjustment/event source.
+        actions: String,
+    },
+    /// Execute previously trained models without calling the trainer.
+    BacktestResearch {
+        /// Completed training or combined task containing training.json.
+        training: Uuid,
+        /// Selected execution event version.
+        actions: String,
+    },
     /// Readiness-only or full annual research.
     Research {
         /// Frozen recipe.
@@ -770,7 +789,8 @@ impl WorkflowRequest {
     /// Display operation names without exposing backend details in the user flow.
     pub fn label(&self) -> String {
         match self {
-            Self::IdentityOperation { .. } => "证券身份与证据核验".into(),
+            Self::TrainResearch { .. } => "训练研究模型".into(),
+            Self::BacktestResearch { .. } => "使用已有模型回测".into(),
             Self::PreviewResearch { .. } => "预览研究日期和数据需求".into(),
             Self::PrepareResearchData { .. } => "补采研究所需公司行动/公告".into(),
             Self::InspectActions { .. } => "查看公司行动原值与实施证据".into(),
@@ -828,6 +848,11 @@ fn version_metadata(workspace: &Workspace, id: &str, kind: &str) -> Result<DataV
             .as_str()
             .ok_or("market version has no content hash; register it again before research")?;
         source["content_sha256"] = json!(expected);
+        source["source_map"] = data
+            .details
+            .get("source_map")
+            .cloned()
+            .ok_or("market source map missing; register it again")?;
         source
     } else {
         serde_json::to_value(ActionBundle::read(&path)?)?
@@ -892,34 +917,6 @@ fn execute_scoped(
     let mut data = None;
     let mut details = Value::Null;
     match request {
-        WorkflowRequest::IdentityOperation {
-            method,
-            id,
-            path,
-            provider,
-            symbol,
-            date,
-        } => {
-            details = match method.as_str() {
-                "list" => w.identity_versions()?,
-                "capture" => {
-                    let request: Value = serde_json::from_slice(&fs::read(w.resolve(path))?)?;
-                    let urls: Vec<String> = serde_json::from_value(request["urls"].clone())?;
-                    let output = w.resolve(&run.output).join("identity-evidence");
-                    analytics_storage::security::capture_sources(&urls, &output)?
-                }
-                "import" | "review" => {
-                    serde_json::to_value(w.import_identities(&w.resolve(path))?)?
-                }
-                "export" => w.export_identities(id, &w.resolve(path))?,
-                "show" => serde_json::to_value(w.identities(id)?)?,
-                "check" if symbol.is_empty() => {
-                    json!({"version":w.identity_version(id)?,"valid":true})
-                }
-                "check" => identities::lookup(&w.identities(id)?, provider, symbol, *date)?,
-                _ => return Err("unknown identity operation".into()),
-            };
-        }
         WorkflowRequest::PreviewResearch {
             template,
             market,
@@ -942,7 +939,7 @@ fn execute_scoped(
                 &details,
             )?;
             atomic_json(&w.resolve(&run.output).join("outcome.json"), &details)?;
-            return Err("data_not_ready: acquisition candidates require identity/event-category review; see execution_readiness.json".into());
+            return Err("data_not_ready: acquisition candidates require source and event-category validation; see execution_readiness.json".into());
         }
 
         WorkflowRequest::InspectActions {
@@ -1122,6 +1119,61 @@ fn execute_scoped(
             }
             data = Some(w.register(&final_output.join("actions.json"))?);
         }
+        WorkflowRequest::TrainResearch {
+            template,
+            market,
+            actions,
+        } => {
+            let m = version(w, market, "market")?;
+            let a = version(w, actions, "actions")?;
+            let mut r = research_request(w, run, template, &m, &a, false)?;
+            r.train_only = true;
+            context.report("批量检查训练输入")?;
+            analytics_ml::backtest::run_with_context(&r, context)?;
+            details = w.results(run)?;
+        }
+        WorkflowRequest::BacktestResearch { training, actions } => {
+            let saved = w
+                .runs()?
+                .into_iter()
+                .find(|r| r.id == *training)
+                .ok_or("training task not found")?;
+            let frozen = saved
+                .request
+                .get("workflow_snapshot")
+                .unwrap_or(&saved.request);
+            let mut training_market = None;
+            for input in frozen["inputs"].as_array().into_iter().flatten() {
+                if input["kind"] == "market" {
+                    training_market = Some(version(
+                        w,
+                        input["id"].as_str().ok_or("training market missing")?,
+                        "market",
+                    )?);
+                }
+            }
+            let market = training_market.ok_or("training market snapshot missing")?;
+            let source = w.resolve(&saved.output);
+            if let Some(expected) = run.request.get("training_artifact_sha256") {
+                let actual = format!(
+                    "sha256:{:x}",
+                    Sha256::digest(fs::read(source.join("training.json"))?)
+                );
+                if expected != &json!(actual) {
+                    return Err("training_artifact_damaged".into());
+                }
+            }
+            let a = version(w, actions, "actions")?;
+            context.report("读取已有模型并回测")?;
+            analytics_ml::backtest::backtest_from_training_with_data(
+                &source,
+                &w.resolve(&run.output),
+                &w.resolve(a.path),
+                Some(&w.resolve(market.path)),
+                context,
+            )?;
+            details = w.results(run)?;
+        }
         WorkflowRequest::Research {
             template,
             market,
@@ -1142,14 +1194,18 @@ pub fn snapshot(workspace: &Workspace, request: &WorkflowRequest) -> Result<Valu
     match request {
         WorkflowRequest::CollectMarket { request, .. }
         | WorkflowRequest::CollectActions { request, .. } => request.validate()?,
-        WorkflowRequest::Research { template, .. }
+        WorkflowRequest::TrainResearch { template, .. }
+        | WorkflowRequest::Research { template, .. }
         | WorkflowRequest::PreviewResearch { template, .. }
         | WorkflowRequest::PrepareResearchData { template, .. } => template.validate()?,
         WorkflowRequest::SavePool { definition } => definition.validate()?,
         _ => {}
     };
     let versions = match request {
-        WorkflowRequest::Research {
+        WorkflowRequest::TrainResearch {
+            market, actions, ..
+        }
+        | WorkflowRequest::Research {
             market, actions, ..
         } => vec![
             version_metadata(workspace, market, "market")?,
@@ -1160,16 +1216,34 @@ pub fn snapshot(workspace: &Workspace, request: &WorkflowRequest) -> Result<Valu
         | WorkflowRequest::PrepareResearchData { market, .. } => {
             vec![version_metadata(workspace, market, "market")?]
         }
-        WorkflowRequest::SupplementActions { actions, .. }
+        WorkflowRequest::BacktestResearch { actions, .. }
+        | WorkflowRequest::SupplementActions { actions, .. }
         | WorkflowRequest::ReviseActions { actions, .. }
         | WorkflowRequest::InspectActions { actions, .. } => {
             vec![version_metadata(workspace, actions, "actions")?]
         }
         _ => Vec::new(),
     };
-    Ok(
-        json!({"request":request,"inputs":versions,"app_version":env!("CARGO_PKG_VERSION"),"formula_version":analytics_factor::FORMULA_VERSION,"pool_definition": match request { WorkflowRequest::Research{template,..} if !template.pool_version.starts_with("builtin:") => Some(workspace.pool(&template.pool_version)?), _ => None }}),
-    )
+    let mut frozen = json!({"request":request,"inputs":versions,"app_version":env!("CARGO_PKG_VERSION"),"formula_version":analytics_factor::FORMULA_VERSION,"pool_definition": match request { WorkflowRequest::Research{template,..}|WorkflowRequest::TrainResearch{template,..} if !template.pool_version.starts_with("builtin:") => Some(workspace.pool(&template.pool_version)?), _ => None }});
+    if let WorkflowRequest::BacktestResearch { training, .. } = request {
+        let record = workspace
+            .runs()?
+            .into_iter()
+            .find(|r| r.id == *training)
+            .ok_or("training task not found")?;
+        let artifact_path = workspace.resolve(record.output).join("training.json");
+        if !artifact_path.is_file() {
+            return Err(
+                "training_artifact_unavailable: selected task has no completed training models"
+                    .into(),
+            );
+        }
+        frozen["training_artifact_sha256"] = json!(format!(
+            "sha256:{:x}",
+            Sha256::digest(fs::read(artifact_path)?)
+        ));
+    }
+    Ok(frozen)
 }
 
 /// Lifetime lock prevents a second app from recovering or writing active runs.
@@ -1263,6 +1337,34 @@ mod quality_tests;
 #[cfg(test)]
 mod tests;
 
+fn research_request(
+    w: &Workspace,
+    run: &RunRecord,
+    template: &ResearchTemplate,
+    market: &DataVersion,
+    actions: &DataVersion,
+    audit_only: bool,
+) -> Result<ResearchRequest> {
+    template.validate()?;
+    let mut r = ResearchRequest::new(w.resolve(&market.path), w.resolve(&run.output));
+    r.config = template.config.clone();
+    r.quality_policy = template.quality_policy.clone();
+    r.schedule = template.schedule.clone();
+    r.action_policy = template.action_policy.clone();
+    r.market_rules = template.market_rules.clone();
+    r.initial_cash_cny = template.initial_cash_cny;
+    r.dividend_withholding_rate = template.dividend_withholding_rate;
+    r.corporate_actions = Some(w.resolve(&actions.path));
+    r.audit_only = audit_only;
+    r.benchmark = template.benchmark.clone();
+    r.pool_exit_policy = template.pool_exit_policy;
+    let (pool, frozen) = w.resolve_pool(&template.pool_version, &market.id)?;
+    r.pool_signature = signature(&frozen)?;
+    r.pool = Some(pool);
+    r.universe_id = template.pool_version.clone();
+    atomic_json(&w.resolve(&run.output).join("pool.json"), &frozen)?;
+    Ok(r)
+}
 pub(crate) fn research(
     w: &Workspace,
     run: &RunRecord,
@@ -1272,60 +1374,9 @@ pub(crate) fn research(
     actions: &DataVersion,
     audit_only: bool,
 ) -> Result<Value> {
-    template.validate()?;
-    let mut request = ResearchRequest::new(w.resolve(&market.path), w.resolve(&run.output));
-    request.config = template.config.clone();
-    request.quality_policy = template.quality_policy.clone();
-    request.schedule = template.schedule.clone();
-    request.action_policy = template.action_policy.clone();
-    request.market_rules = template.market_rules.clone();
-    request.initial_cash_cny = template.initial_cash_cny;
-    request.dividend_withholding_rate = template.dividend_withholding_rate;
-    request.corporate_actions = Some(w.resolve(&actions.path));
-    request.audit_only = audit_only;
-    request.benchmark = template.benchmark.clone();
-    request.pool_exit_policy = template.pool_exit_policy;
-    let (mut pool, mut frozen) = match w.resolve_pool(&template.pool_version, &market.id) {
-        Ok(p) => p,
-        Err(e) => {
-            atomic_json(
-                &w.resolve(&run.output).join("execution_readiness.json"),
-                &json!({"ready":false,"reason":e.to_string()}),
-            )?;
-            return if audit_only { w.results(run) } else { Err(e) };
-        }
-    };
-    match w.identities(&template.identity_version) {
-        Ok(registry) => {
-            frozen["identity_issues"] = identities::resolve_pool(&registry, &mut pool);
-            frozen["identity_version"] =
-                serde_json::to_value(w.identity_version(&template.identity_version)?)?;
-            let dataset = DailyDataset::open(w.resolve(&market.path))?;
-            let folds = template.schedule.resolve(&dataset.calendar)?;
-            match identities::resolve_selector(
-                &registry,
-                &template.benchmark,
-                &analytics_core::DateRange {
-                    start: folds[0].warmup_start,
-                    end: folds.last().unwrap().actual.test.end,
-                },
-            ) {
-                Ok(id) => request.benchmark = id,
-                Err(e) => frozen["benchmark_identity_issue"] = json!(e.to_string()),
-            };
-            request.identity_registry = Some(registry);
-        }
-        Err(e) => {
-            frozen["identity_issues"] =
-                json!([{"code":"identity_directory_missing_or_invalid","message":e.to_string()}]);
-        }
-    }
-    request.pool_signature = signature(&frozen)?;
-    request.pool = Some(pool);
-    request.universe_id = template.pool_version.clone();
-    atomic_json(&w.resolve(&run.output).join("pool.json"), &frozen)?;
-    context.report("检查研究输入与公司行动")?;
-    analytics_ml::backtest::run_with_context(&request, context)?;
+    let r = research_request(w, run, template, market, actions, audit_only)?;
+    context.report("检查训练输入；训练完成后按需回测")?;
+    analytics_ml::backtest::run_with_context(&r, context)?;
     w.results(run)
 }
 
@@ -1345,16 +1396,7 @@ pub fn research_requirements_with_actions(
     let mut dataset =
         analytics_storage::daily::DailyDataset::open(w.resolve(selected_market.path))?;
     let folds = t.schedule.resolve(&dataset.calendar)?;
-    let (mut pool, mut frozen) = w.resolve_pool(&t.pool_version, market)?;
-    let selected_registry = w.identities(&t.identity_version);
-    let registry_error = selected_registry.as_ref().err().map(|e| e.to_string());
-    let registry = selected_registry.ok();
-    let identity_issues = match &registry {
-        Some(r) => identities::resolve_pool(r, &mut pool),
-        None => json!([{"code":"identity_directory_missing_or_invalid","message":registry_error}]),
-    };
-    frozen["identity_version"] = json!(t.identity_version);
-    frozen["identity_issues"] = identity_issues.clone();
+    let (pool, frozen) = w.resolve_pool(&t.pool_version, market)?;
     let lo = folds
         .iter()
         .map(|f| f.warmup_start)
@@ -1362,19 +1404,7 @@ pub fn research_requirements_with_actions(
         .ok_or("empty schedule")?;
     let hi = folds.last().unwrap().actual.test.end;
     dataset.restrict_reads(analytics_core::DateRange { start: lo, end: hi })?;
-    if let Some(r) = &registry {
-        dataset.bind_registry(r.clone())?;
-    }
-    let benchmark = match &registry {
-        Some(r) => identities::resolve_selector(
-            r,
-            &t.benchmark,
-            &analytics_core::DateRange { start: lo, end: hi },
-        )
-        .unwrap_or_else(|_| t.benchmark.clone()),
-        None => t.benchmark.clone(),
-    };
-    let benchmark_identity = json!({"status":if analytics_core::security::is_security_id(&benchmark){"passed"}else{"failed"},"selector":t.benchmark,"security_id":benchmark,"message":if analytics_core::security::is_security_id(&benchmark){"resolved without joining securities"}else{"benchmark identity/range unresolved"}});
+    let benchmark = t.benchmark.clone();
     let mut symbols: std::collections::BTreeSet<_> = pool
         .intervals
         .iter()
@@ -1409,33 +1439,21 @@ pub fn research_requirements_with_actions(
     };
     let mut dependencies = std::collections::BTreeMap::new();
     for id in &symbols {
-        let record = registry.as_ref().and_then(|r| r.securities.get(id));
-        let history = analytics_core::DateRange {
-            start: record.map_or(lo, |r| lo.max(r.lifetime.start)),
-            end: record.map_or(hi, |r| hi.min(r.lifetime.end)),
-        };
+        let history = analytics_core::DateRange { start: lo, end: hi };
         let member = pool.intervals.get(id).cloned().unwrap_or_default();
-        let execution = member
-            .iter()
-            .any(|r| r.end >= folds[0].actual.test.start && r.start <= hi);
-        dependencies.insert(id,json!({"security_id":if record.is_some(){Some(id)}else{None},"required_history":history,"membership":member,"purpose":if *id==benchmark{"benchmark"}else if execution{"features_and_account"}else if pool.intervals.contains_key(id){"historical_cross_section"}else{"successor_account"},"identity_status":if record.is_some(){"passed"}else{"failed"}}));
+        dependencies.insert(id,json!({"instrument":id,"required_history":history,"membership":member,"purpose":if *id==benchmark{"benchmark"}else{"features_and_account"}}));
     }
     let mut preview_pool = pool.clone();
     preview_pool.intervals.retain(|_, rs| {
         rs.retain(|r| r.end >= lo && r.start <= hi);
         !rs.is_empty()
     });
-    let qualification_book = actions
-        .and_then(|id| version(w, id, "actions").ok())
-        .and_then(|v| ActionBundle::read(&w.resolve(v.path)).ok());
     let quality = analytics_ml::backtest::quality::qualify(
         &dataset,
         &preview_pool,
-        registry.as_ref(),
         &t.quality_policy,
         &analytics_core::DateRange { start: lo, end: hi },
         &t.config.factor_ids,
-        qualification_book.as_ref(),
     )?;
     let sample_readiness = analytics_ml::backtest::preview_samples_with_policy(
         &dataset,
@@ -1444,6 +1462,6 @@ pub fn research_requirements_with_actions(
         &t.quality_policy,
     )?;
     Ok(
-        json!({"quality":quality,"dependencies":dependencies,"benchmark_identity":benchmark_identity,"successor_check":successor_check,"resolved_folds":folds,"sample_readiness":sample_readiness,"securities":symbols,"history_start":lo,"execution_end":hi,"pool":frozen,"schema_version":1,"identity_issues":identity_issues,"identity_registry":registry,"benchmark":benchmark,"unknown_cross_section_before":pool.coverage.start}),
+        json!({"quality":quality,"dependencies":dependencies,"successor_check":successor_check,"resolved_folds":folds,"sample_readiness":sample_readiness,"securities":symbols,"history_start":lo,"execution_end":hi,"pool":frozen,"schema_version":3,"source_map":dataset.source_map(),"benchmark":benchmark,"unknown_cross_section_before":pool.coverage.start}),
     )
 }

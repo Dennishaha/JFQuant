@@ -84,7 +84,6 @@ ScalarValue::Float64的JSON使用有限数值或字符串NaN/Infinity/-Infinity�
 
 ## 日期生效股票池
 
-`pool` 提供 `PoolDefinition / PoolExpression / PoolAdjustment / PoolMembership / PoolExitPolicy`，格式版本2。研究证券使用独立SEC身份；SH/SZ/BJ加六位代码仅为日期化定位符；组合支持并集、交集、差集。人工增删从生效交易日起持续，周末调整顺延到下一交易日，同一交易日的增删冲突拒绝。引用源必须覆盖所需日期；空集合是有效状态，不扩展到全市场。
 
 ```mermaid
 flowchart LR
@@ -123,12 +122,11 @@ flowchart LR
 
 ## 为什么需要本组件
 
-表达研究约束而非供应商接口。证券身份、成员日期、事件权益和账户规则必须在联网、GUI和模型之外独立验证。同一个600018先后对应不同证券，因此交易代码只能是日期化定位符；永久证券身份保证持仓承继不会变成行情拼接。
+表达研究约束而非供应商接口。证券来源映射、成员日期、事件权益和账户规则必须在联网、GUI和模型之外独立验证。同一个600018先后对应不同证券，必须在快照中明确例外区间；例外来源映射保证旧证券行情不会混接，实际承继只通过公司行动执行。
 
-设计依据：2026-10-14接受的证券身份与完整准入计划、组件接口及测试。未在代码或证据中确认的历史取舍不推定为既有设计理由；来源、法规或数据格式变化时重新评估。
+设计依据：2026-10-14接受的当前组件职责、可复现实验与用户研究需求、组件接口及测试。未在代码或证据中确认的历史取舍不推定为既有设计理由；来源、法规或数据格式变化时重新评估。
 
 
-普通分红送转的Distribution可显式提供allocation。实际账户出现零碎股时按登记证据取整或现金补偿，补偿按给定到账日结算；公开研究遇到非整数送转比例且无有效规则时在训练前阻断。合并关系目录只确认主体与比例，event_id未裁定不会补猜权益日期。该限制避免先训练、后因无法解释股数而失去完整账户结果。
 
 ## 三级研究模式：为什么允许筛选
 
@@ -136,7 +134,7 @@ flowchart LR
 
 第二档保持原成员，纯缺失传播null；第三档派生每日合格成员，不改原始成员或证据。不能看到后来缺价而倒删早期股票。账户仍采用原价、整数股、T+1和连续权益；未裁定冲突、损坏、基准缺项及剩余必要依赖仍阻断。默认有效因子比例0表示至少一项有效，最低有标签样本1只表示可执行，不表示样本在统计上充分。所选因子整列无有效值不会被自动删除。
 
-公共类型在[research_quality.rs](src/research_quality.rs)：ResearchStrictness、ResearchQualityPolicy、ProblemKind、ProblemDisposition及QualityDecision。策略校验与筛选门槛在core，clap类型留在CLI。AdmissionReport格式2保留passed/failed/not_run，另外记录处理方式；只有纯缺失的keep_null可在第二档非阻断，损坏和未执行不能改写为通过。枚举提供中文label/description供App统一显示。验收：`cargo nextest run -p analytics-core`。
+公共类型在[research_quality.rs](src/research_quality.rs)：ResearchStrictness、ResearchQualityPolicy、ProblemKind、ProblemDisposition及QualityDecision。策略校验与筛选门槛在core，clap类型留在CLI。AdmissionReport格式4保留passed/failed/not_run，另外记录处理方式；只有纯缺失的keep_null可在第二档非阻断，损坏和未执行不能改写为通过。枚举提供中文label/description供App统一显示。验收：`cargo nextest run -p analytics-core`。
 
 ```mermaid
 flowchart LR
@@ -144,7 +142,26 @@ flowchart LR
   C --> U[原股票池或每日合格池]
   U --> F[因子与nullable输入]
   F --> M[按折样本掩码]
-  M --> G[剩余依赖与账户门禁]
+  M --> G[训练剩余依赖门禁]
   G -->|通过| T[冻结签名后训练]
   G -->|未通过| E[原因及处理清单]
 ```
+
+## 2026-10-14：直接代码读取与分阶段研究
+
+为什么调整：普通市场代码无需先登记身份；独立目录、审核和权威名录下载增加了研究前置负担。特殊历史代码仍需在快照内明确区间，不能将旧证券行情或权益接到另一证券。训练使用价量和标签，到账／交付资料只在实际账户执行时检查。
+
+当前格式：模板6、需求3、准入4、股票池3、公司行动4、规范行情5、系数3、采集6、服务9、研究结果11；快照内来源映射1、训练产物1。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
+
+```mermaid
+flowchart LR
+  D[数据快照与少量来源例外] --> M[批量价量掩码与标签边界]
+  M --> T[训练与独立模型产物]
+  T --> P[测试期预测]
+  P --> E[实际订单和持仓检查]
+  E --> R[完整结果或未完成原因]
+```
+
+验收：nextest覆盖来源日期边界、三档掩码、训练／回测分离及模型保留；Clippy、Rustdoc、格式、组件文档和包内CLI共同检查。生成数据、模型、运行记录和安装包不提交。另一台Apple Silicon/macOS14实机验收继续待完成。
+
+`PoolMembership`格式3直接保存SH/SZ/BJ数据代码及特殊历史键。来源例外由[source_map.rs](src/source_map.rs)限定日期，代码冲突只影响所需日期；不创建独立身份目录或审核任务。

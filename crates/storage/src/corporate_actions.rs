@@ -61,7 +61,7 @@ pub struct EventCoverage {
 #[serde(deny_unknown_fields)]
 pub struct ActionBundle {
     /// Explicit acquisition locators and their proved/requested date scope.
-    pub source_bindings: BTreeMap<String, analytics_core::security::SecurityLocator>,
+    pub source_bindings: BTreeMap<String, analytics_core::source_map::SourceLocator>,
     /// Per-security/category historical completeness, separate from download success.
     pub coverage: BTreeMap<String, Vec<EventCoverage>>,
     /// JSON schema version.
@@ -82,7 +82,7 @@ pub struct ActionBundle {
 impl ActionBundle {
     /// Source selector for supplemental requests; opaque IDs are never sliced into stock codes.
     pub fn source_symbol<'a>(&'a self, id: &'a str) -> io::Result<&'a str> {
-        if analytics_core::security::is_security_id(id) {
+        if self.source_bindings.contains_key(id) {
             let l = self
                 .source_bindings
                 .get(id)
@@ -199,12 +199,12 @@ impl ActionBundle {
     }
 
     fn validate_identity(&self) -> io::Result<()> {
-        if self.schema_version != 3
+        if self.schema_version != 4
             || (self.downloader != "JFQuant analytics-storage corporate-actions"
                 && self.downloader != "JFQuant analytics-workflow synthetic-demo-v1")
         {
             return Err(invalid(
-                "unsupported_data_format: action bundle requires format 3 and known source",
+                "unsupported_data_format: action bundle requires format 4 and known source",
             ));
         }
         for claims in self.coverage.values() {
@@ -494,12 +494,12 @@ fn fetch_histories(symbols: &[String], output: &Path, resume: bool) -> io::Resul
     }
     let mut unique = BTreeSet::new();
     for id in symbols {
-        classify(id).map_err(invalid)?;
+        analytics_core::source_map::validate_key(id).map_err(invalid)?;
         if !unique.insert(id) {
             return Err(invalid("duplicate requested symbol"));
         }
     }
-    let owner = serde_json::json!({"schema_version":3,"downloader":"JFQuant analytics-storage company-actions","symbols":symbols});
+    let owner = serde_json::json!({"schema_version":4,"downloader":"JFQuant analytics-storage company-actions","symbols":symbols});
     if resume && output.exists() {
         let saved: Value =
             serde_json::from_slice(&fs::read(output.join("owner.json"))?).map_err(invalid)?;
@@ -529,6 +529,8 @@ fn fetch_histories(symbols: &[String], output: &Path, resume: bool) -> io::Resul
                     let i = index.fetch_add(1, Ordering::Relaxed);
                     let Some(symbol) = symbols.get(i) else { break };
                     let result: io::Result<Vec<CorporateAction>> = (|| {
+                        // A special historical key without a provider code fails only this shard.
+                        classify(symbol).map_err(invalid)?;
                         if resume && let Ok(checkpoint) = read_checkpoint(output, symbol) {
                             return Ok(checkpoint);
                         }
@@ -565,7 +567,7 @@ fn fetch_histories(symbols: &[String], output: &Path, resume: bool) -> io::Resul
     });
     task_context_check()?;
     let mut bundle = ActionBundle {
-        schema_version: 3,
+        schema_version: 4,
         source_bindings: Default::default(),
         coverage: Default::default(),
         downloader: "JFQuant analytics-storage corporate-actions".into(),
@@ -728,7 +730,7 @@ pub fn enrich_public(
     output: &Path,
 ) -> io::Result<ActionBundle> {
     source.validate_identity()?;
-    if source.schema_version != 3
+    if source.schema_version != 4
         || source.downloader != "JFQuant analytics-storage corporate-actions"
     {
         return Err(invalid("invalid source bundle"));
@@ -870,7 +872,7 @@ pub fn fetch_details(
     end: Date,
 ) -> io::Result<ActionBundle> {
     source.validate_identity()?;
-    if start > end || source.schema_version != 3 {
+    if start > end || source.schema_version != 4 {
         return Err(invalid("invalid detail range/bundle"));
     }
     checkpoints::prepare(
@@ -981,7 +983,7 @@ pub fn repair_from_evidence(
     output: &Path,
 ) -> io::Result<ActionBundle> {
     source.validate_identity()?;
-    if source.schema_version != 3
+    if source.schema_version != 4
         || source.downloader != "JFQuant analytics-storage corporate-actions"
     {
         return Err(invalid("invalid source bundle"));
@@ -1193,6 +1195,32 @@ fn save_checkpoint(root: &Path, symbol: &str, actions: &[CorporateAction]) -> io
 mod checkpoint_tests {
     use super::*;
     #[test]
+    fn historical_alias_does_not_stop_verified_ordinary_shards_or_send_wrong_code() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("stage");
+        let symbols = vec!["SHT00018".into(), "SH600000".into()];
+        let c = analytics_core::task::TaskContext::new(
+            analytics_core::task::TaskContext::default().id,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            |_| {},
+        );
+        assert!(
+            c.execute(|| fetch_public_resumable(&symbols, &root))
+                .is_err()
+        );
+        fs::write(
+            root.join("raw/SH600000-history.json"),
+            br#"{"success":true,"result":{"pages":1,"count":0,"data":[]}}"#,
+        )
+        .unwrap();
+        fs::write(root.join("raw/SH600000-settlement.json"), br#"{"fhyx":[]}"#).unwrap();
+        save_checkpoint(&root, "SH600000", &[]).unwrap();
+        let b = fetch_public_resumable(&symbols, &root).unwrap();
+        assert!(b.queried_symbols.contains("SH600000"));
+        assert!(b.failures.contains_key("SHT00018"));
+        assert!(!root.join("raw/SHT00018-history.json").exists());
+    }
+    #[test]
     fn cancelled_history_keeps_owned_stage_and_resumes_verified_symbols_offline() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("stage");
@@ -1230,7 +1258,7 @@ mod tests {
     #[test]
     fn malformed_bundle_is_rejected_before_worker_urls_or_evidence_paths() {
         let mut bundle = ActionBundle {
-            schema_version: 3,
+            schema_version: 4,
             source_bindings: Default::default(),
             coverage: Default::default(),
             downloader: "JFQuant analytics-storage corporate-actions".into(),

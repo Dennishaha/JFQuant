@@ -505,6 +505,11 @@ pub fn apply_event(state: &mut AppState, event: &WorkerEvent) {
             state.platform.runs = runs.clone();
             state.platform.details = outcome.details.clone();
             state.platform.selected_run = Some(record.id);
+            if outcome.details["status"] == "trained"
+                || outcome.details["training_artifact"]["status"] == "trained"
+            {
+                state.platform.training_job = record.id.to_string();
+            }
             if let Some(data) = &outcome.data {
                 if data.kind == "market" {
                     state.platform.market = data.id.clone();
@@ -520,12 +525,6 @@ pub fn apply_event(state: &mut AppState, event: &WorkerEvent) {
                 state.platform.pool_editor =
                     serde_json::to_string_pretty(&outcome.details["definition"])
                         .unwrap_or_default();
-            }
-            if let Some(id) = outcome.details["id"]
-                .as_str()
-                .filter(|id| id.starts_with("identity-"))
-            {
-                state.platform.template.identity_version = id.into();
             }
             if let Some(id) = outcome.details["demo_actions"].as_str() {
                 state.platform.actions = id.into();

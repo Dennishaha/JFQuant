@@ -70,7 +70,7 @@ fn synthetic_annual_recipe_runs_native_model_and_dated_real_share_account() {
         .begin(c.id, "synthetic research", snapshot(&w, &request).unwrap())
         .unwrap();
     let result = execute(&w, &request, &run, &c).unwrap();
-    assert_eq!(result.details["schema_version"], 9);
+    assert_eq!(result.details["schema_version"], 11);
     assert!(
         result.details["aggregate"]["total_return"]
             .as_f64()
@@ -101,31 +101,6 @@ fn synthetic_annual_recipe_runs_native_model_and_dated_real_share_account() {
     assert!(!report.contains("本项目独立下载行情"));
     w.finish(&mut run, RunStatus::Succeeded, None).unwrap();
     assert_eq!(w.runs().unwrap()[0].status, RunStatus::Succeeded);
-}
-#[test]
-fn incomplete_action_input_blocks_before_factor_cache_or_model_creation() {
-    let tmp = tempfile::tempdir().unwrap();
-    let w = Workspace::open(tmp.path()).unwrap();
-    let (m, a, t) = synthetic(&w);
-    let path = w.resolve(&a.path);
-    let mut book = ActionBundle::read(&path).unwrap();
-    book.actions[0].pay_date = None;
-    fs::write(&path, serde_json::to_vec(&book).unwrap()).unwrap();
-    let a = w.register(&path).unwrap();
-    let request = WorkflowRequest::Research {
-        template: Box::new(t),
-        market: m.id,
-        actions: a.id,
-        audit_only: false,
-    };
-    let c = context();
-    let run = w
-        .begin(c.id, "blocked research", snapshot(&w, &request).unwrap())
-        .unwrap();
-    assert!(execute(&w, &request, &run, &c).is_err());
-    assert!(!w.resolve(&run.output).join("factor-cache").exists());
-    assert!(!w.resolve(&run.output).join("summary.json").exists());
-    assert_eq!(w.results(&run).unwrap()["ready"], false);
 }
 
 #[test]
@@ -250,7 +225,7 @@ fn pools_are_immutable_portable_and_reject_past_coverage_gaps() {
     let w = Workspace::open(dir.path()).unwrap();
     let (market, _, _) = demo::create(&w).unwrap();
     let mut definition = PoolDefinition {
-        schema_version: 2,
+        schema_version: 3,
         name: "CSI500 fixture".into(),
         coverage: DateRange {
             start: "2007-01-02".parse().unwrap(),
@@ -335,7 +310,8 @@ fn unexplained_historical_security_codes_are_readiness_issues_not_training_failu
         .unwrap();
     let out = execute(&w, &request, &r, &c).unwrap();
     assert_eq!(out.details["ready"], false);
-    assert!(out.details["reason"].as_str().unwrap().contains("SHT00018"));
+    assert!(out.details["market_issues"].get("SHT00018").is_some());
+    assert!(out.details["factor_basis_issues"].get("SHT00018").is_some());
     assert!(!w.resolve(&r.output).join("factor-cache").exists());
 }
 
@@ -447,7 +423,7 @@ fn historical_adjustment_terms_do_not_require_old_settlement_dates_but_execution
         .begin(c.id, "historical terms", snapshot(&w, &request).unwrap())
         .unwrap();
     let out = execute(&w, &request, &r, &c).unwrap();
-    assert_eq!(out.details["schema_version"], 9);
+    assert_eq!(out.details["schema_version"], 11);
     assert_eq!(out.details["annual_reports"][0]["year"], 2010);
     t = demo::create_canonical(&w).unwrap().2;
     let c = context();
@@ -465,8 +441,7 @@ fn historical_adjustment_terms_do_not_require_old_settlement_dates_but_execution
         )
         .unwrap();
     let out = execute(&w, &request, &r, &c).unwrap();
-    assert_eq!(out.details["ready"], false);
-    assert!(out.details.to_string().contains("pay date"));
+    assert_eq!(out.details["ready"], true);
     assert!(!w.resolve(&r.output).join("factor-cache").exists());
 }
 
@@ -504,7 +479,7 @@ fn source_adjusted_quotes_are_audit_only_and_report_provenance_is_required() {
         )
         .unwrap();
     let out = execute(&w, &request, &r, &c).unwrap();
-    assert_eq!(out.details["schema_version"], 9);
+    assert_eq!(out.details["schema_version"], 11);
     let input = &out.details["execution"]["price_inputs"]["securities"]
         [demo::fixture_security_id("SH600000")];
     let frozen = if input["source"].is_object() {
@@ -722,80 +697,6 @@ fn current_date_schedule_rejects_old_year_parameters_and_previews_actual_windows
 }
 
 #[test]
-fn identity_packages_are_immutable_portable_and_bound_to_research_outputs() {
-    let root = tempfile::tempdir().unwrap();
-    let w = Workspace::open(root.path()).unwrap();
-    let (_, _, t) = demo::create(&w).unwrap();
-    let v = w.identity_version(&t.identity_version).unwrap();
-    let export = root.path().join("export");
-    w.export_identities(&v.id, &export).unwrap();
-    let other = tempfile::tempdir().unwrap();
-    let moved = Workspace::open(other.path()).unwrap();
-    let imported = moved
-        .import_identities(&export.join("registry.json"))
-        .unwrap();
-    assert_eq!(v.signature, imported.signature);
-    assert_eq!(v.id, imported.id);
-    let mut record = moved.identities(&v.id).unwrap();
-    record.reason = "new audited revision".into();
-    atomic_json(&export.join("registry.json"), &record).unwrap();
-    let revision = moved
-        .import_identities(&export.join("registry.json"))
-        .unwrap();
-    assert_ne!(revision.id, v.id);
-    assert_eq!(
-        moved.identities(&v.id).unwrap().reason,
-        "complete independently generated acceptance fixture"
-    );
-}
-
-#[test]
-fn missing_event_categories_have_explicit_checks_and_never_create_factor_cache() {
-    let dir = tempfile::tempdir().unwrap();
-    let w = Workspace::open(dir.path()).unwrap();
-    let (m, a, t) = demo::create(&w).unwrap();
-    let path = w.resolve(a.path);
-    let mut book = ActionBundle::read(&path).unwrap();
-    for claims in book.coverage.values_mut() {
-        claims.retain(|c| c.category == "distribution");
-    }
-    atomic_json(&path, &book).unwrap();
-    let a = w.register(&path).unwrap();
-    let request = WorkflowRequest::Research {
-        template: Box::new(t),
-        market: m.id,
-        actions: a.id,
-        audit_only: true,
-    };
-    let c = context();
-    let run = w
-        .begin(
-            c.id,
-            "incomplete category audit",
-            snapshot(&w, &request).unwrap(),
-        )
-        .unwrap();
-    let result = execute(&w, &request, &run, &c).unwrap();
-    assert_eq!(result.details["ready"], false);
-    assert!(
-        result.details["adjustment_issues"]
-            .to_string()
-            .contains("merger")
-    );
-    let admission: analytics_core::admission::AdmissionReport =
-        serde_json::from_slice(&fs::read(w.resolve(&run.output).join("admission.json")).unwrap())
-            .unwrap();
-    assert!(!admission.ready());
-    assert!(
-        admission
-            .checks
-            .iter()
-            .any(|c| c.status == analytics_core::admission::CheckStatus::NotRun)
-    );
-    assert!(!w.resolve(run.output).join("factor-cache").exists());
-}
-
-#[test]
 fn a_selected_all_null_feature_blocks_before_publishing_cache_or_training() {
     let dir = tempfile::tempdir().unwrap();
     let w = Workspace::open(dir.path()).unwrap();
@@ -826,39 +727,235 @@ fn a_selected_all_null_feature_blocks_before_publishing_cache_or_training() {
     assert!(!w.resolve(run.output).join("fold-0000").exists());
 }
 
-#[test]
-fn unknown_benchmark_does_not_hide_independent_settlement_failures() {
-    let d = tempfile::tempdir().unwrap();
-    let w = Workspace::open(d.path()).unwrap();
-    let (m, a, mut t) = demo::create(&w).unwrap();
-    t.benchmark = "SEC-ffffffffffffffffffffffffffffffff".into();
-    let path = w.resolve(a.path);
-    let mut book = ActionBundle::read(&path).unwrap();
-    book.actions[0].pay_date = None;
-    atomic_json(&path, &book).unwrap();
-    let a = w.register(&path).unwrap();
-    let request = WorkflowRequest::Research {
-        template: Box::new(t),
-        market: m.id,
-        actions: a.id,
-        audit_only: true,
-    };
+fn execute_stage(w: &Workspace, request: WorkflowRequest) -> (RunRecord, Result<WorkflowOutcome>) {
     let c = context();
     let run = w
-        .begin(
-            c.id,
-            "independent benchmark audit",
-            snapshot(&w, &request).unwrap(),
-        )
+        .begin(c.id, &request.label(), snapshot(w, &request).unwrap())
         .unwrap();
-    let out = execute(&w, &request, &run, &c).unwrap();
-    assert_eq!(out.details["ready"], false);
-    assert!(
-        !out.details["settlement_issues"]
-            .as_object()
-            .unwrap()
-            .is_empty()
+    let out = execute(w, &request, &run, &c);
+    (run, out)
+}
+#[test]
+fn independent_training_survives_settlement_gap_and_repaired_backtest_does_not_refit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let w = Workspace::open(tmp.path()).unwrap();
+    let (m, a, t) = demo::create(&w).unwrap();
+    let path = w.resolve(&a.path);
+    let mut book = ActionBundle::read(&path).unwrap();
+    book.actions.iter_mut().for_each(|a| a.pay_date = None);
+    atomic_json(&path, &book).unwrap();
+    let bad = w.register(&path).unwrap();
+    let (run, out) = execute_stage(
+        &w,
+        WorkflowRequest::TrainResearch {
+            template: Box::new(t),
+            market: m.id,
+            actions: bad.id.clone(),
+        },
     );
-    assert_eq!(out.details["checks"]["benchmark"], "failed");
-    assert!(!w.resolve(run.output).join("factor-cache").exists());
+    out.unwrap();
+    let root = w.resolve(&run.output);
+    let original = fs::read(root.join("fold-0000/model.txt")).unwrap();
+    assert!(root.join("training.json").exists());
+    assert!(!root.join("summary.json").exists());
+    assert_eq!(w.results(&run).unwrap()["status"], "trained");
+    let (bt, result) = execute_stage(
+        &w,
+        WorkflowRequest::BacktestResearch {
+            training: run.id,
+            actions: bad.id,
+        },
+    );
+    let result = result.unwrap();
+    assert_eq!(result.details["backtest_status"], "completed");
+    assert!(w.resolve(bt.output).join("order_events.jsonl").exists());
+    assert_eq!(
+        fs::read(root.join("fold-0000/model.txt")).unwrap(),
+        original
+    );
+    book.actions
+        .iter_mut()
+        .for_each(|a| a.pay_date = Some("2009-01-05".parse().unwrap()));
+    atomic_json(&path, &book).unwrap();
+    let fixed = w.register(&path).unwrap();
+    let (_, result) = execute_stage(
+        &w,
+        WorkflowRequest::BacktestResearch {
+            training: run.id,
+            actions: fixed.id.clone(),
+        },
+    );
+    assert_eq!(result.unwrap().details["backtest_status"], "completed");
+    assert_eq!(
+        fs::read(root.join("fold-0000/model.txt")).unwrap(),
+        original
+    );
+    book.actions[0].cash_per_share = 0.2;
+    atomic_json(&path, &book).unwrap();
+    let changed = w.register(&path).unwrap();
+    let (_, out) = execute_stage(
+        &w,
+        WorkflowRequest::BacktestResearch {
+            training: run.id,
+            actions: changed.id,
+        },
+    );
+    assert!(
+        out.unwrap_err()
+            .to_string()
+            .contains("training_price_basis_changed")
+    );
+}
+#[test]
+fn actual_holding_gap_stops_backtest_and_preserves_completed_models() {
+    let tmp = tempfile::tempdir().unwrap();
+    let w = Workspace::open(tmp.path()).unwrap();
+    let (m, a, t) = demo::create(&w).unwrap();
+    let path = w.resolve(&a.path);
+    let mut book = ActionBundle::read(&path).unwrap();
+    // Coverage permits a purchase, but fails after the account has actually acquired shares.
+    for claims in book.coverage.values_mut() {
+        for c in claims {
+            c.dates.end = "2009-01-03".parse().unwrap();
+        }
+    }
+    atomic_json(&path, &book).unwrap();
+    let a = w.register(&path).unwrap();
+    let (run, out) = execute_stage(
+        &w,
+        WorkflowRequest::Research {
+            template: Box::new(t),
+            market: m.id,
+            actions: a.id,
+            audit_only: false,
+        },
+    );
+    assert!(
+        out.unwrap_err()
+            .to_string()
+            .contains("held account dependencies")
+    );
+    let p = w.resolve(&run.output);
+    assert!(p.join("training.json").exists());
+    assert!(!p.join("summary.json").exists());
+    assert!(p.join("partial_daily.json").exists());
+    assert_eq!(
+        w.results(&run).unwrap()["training_artifact"]["status"],
+        "trained"
+    );
+}
+#[test]
+fn removed_identity_requests_and_templates_are_rejected() {
+    assert!(serde_json::from_value::<WorkflowRequest>(json!({"operation":"prepare_identities","template":{},"market":"x","actions":null,"update_sources":false})).is_err());
+    let t = ResearchTemplate::default();
+    let mut value = serde_json::to_value(t).unwrap();
+    value["identity_version"] = json!("old");
+    assert!(serde_json::from_value::<ResearchTemplate>(value).is_err());
+}
+
+#[test]
+fn absent_unheld_execution_coverage_retains_cash_and_reports_no_valid_trades() {
+    let tmp = tempfile::tempdir().unwrap();
+    let w = Workspace::open(tmp.path()).unwrap();
+    let (m, a, t) = demo::create(&w).unwrap();
+    let p = w.resolve(a.path);
+    let mut book = ActionBundle::read(&p).unwrap();
+    book.coverage.clear();
+    atomic_json(&p, &book).unwrap();
+    let a = w.register(&p).unwrap();
+    let (run, out) = execute_stage(
+        &w,
+        WorkflowRequest::Research {
+            template: Box::new(t),
+            market: m.id,
+            actions: a.id,
+            audit_only: false,
+        },
+    );
+    let result = out.unwrap().details;
+    assert_eq!(result["backtest_status"], "no_valid_trades");
+    assert_eq!(result["aggregate"]["total_return"], 0.0);
+    let events = fs::read_to_string(w.resolve(run.output).join("order_events.jsonl")).unwrap();
+    assert!(events.contains("execution_data_missing"));
+}
+#[test]
+fn damaged_training_descriptor_or_model_is_rejected_without_prediction_or_refitting() {
+    let tmp = tempfile::tempdir().unwrap();
+    let w = Workspace::open(tmp.path()).unwrap();
+    let (m, a, t) = demo::create(&w).unwrap();
+    let (run, out) = execute_stage(
+        &w,
+        WorkflowRequest::TrainResearch {
+            template: Box::new(t),
+            market: m.id,
+            actions: a.id.clone(),
+        },
+    );
+    out.unwrap();
+    let folder = w.resolve(&run.output);
+    let descriptor = folder.join("training.json");
+    let original = fs::read(&descriptor).unwrap();
+    let mut artifact: Value = serde_json::from_slice(&original).unwrap();
+    artifact["models"] = json!([]);
+    atomic_json(&descriptor, &artifact).unwrap();
+    let (bt, out) = execute_stage(
+        &w,
+        WorkflowRequest::BacktestResearch {
+            training: run.id,
+            actions: a.id.clone(),
+        },
+    );
+    assert!(
+        out.unwrap_err()
+            .to_string()
+            .contains("training_artifact_damaged")
+    );
+    assert!(!w.resolve(bt.output).join("summary.json").exists());
+    fs::write(descriptor, original).unwrap();
+    fs::write(folder.join("fold-0000/model.txt"), "bad model bytes").unwrap();
+    let (_, out) = execute_stage(
+        &w,
+        WorkflowRequest::BacktestResearch {
+            training: run.id,
+            actions: a.id,
+        },
+    );
+    assert!(
+        out.unwrap_err()
+            .to_string()
+            .contains("training_artifact_damaged")
+    );
+}
+
+#[test]
+fn relocated_workspace_reuses_models_from_verified_relative_market_version() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("before");
+    let w = Workspace::open(&root).unwrap();
+    let (m, a, t) = demo::create(&w).unwrap();
+    let (run, out) = execute_stage(
+        &w,
+        WorkflowRequest::TrainResearch {
+            template: Box::new(t),
+            market: m.id,
+            actions: a.id.clone(),
+        },
+    );
+    out.unwrap();
+    let original = fs::read(w.resolve(&run.output).join("fold-0000/model.txt")).unwrap();
+    let moved = tmp.path().join("after");
+    fs::rename(root, &moved).unwrap();
+    let w = Workspace::open(&moved).unwrap();
+    let (_, out) = execute_stage(
+        &w,
+        WorkflowRequest::BacktestResearch {
+            training: run.id,
+            actions: a.id,
+        },
+    );
+    assert_eq!(out.unwrap().details["backtest_status"], "completed");
+    assert_eq!(
+        original,
+        fs::read(w.resolve(run.output).join("fold-0000/model.txt")).unwrap()
+    );
 }

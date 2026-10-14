@@ -93,7 +93,7 @@ class ProviderContracts(unittest.TestCase):
                 [sys.executable, "-I", "-B", "-m", "jfquant_collectors"],
                 input=json.dumps(
                     {
-                        "version": 4,
+                        "version": 6,
                         "operation": "market",
                         "expected_collector_signature": "wrong",
                         "cache_dir": str(cache),

@@ -10,6 +10,7 @@
 |---|---|
 | [lib.rs](lib.rs) | nullable `MarketRow`、日期拆分、查询/导出请求、`ScalarValue`、有序特征、manifest、训练请求/产物 |
 | [market_rules.rs](market_rules.rs) | `MarketRulesPreset`、账户佣金、公费、板块数量规则、`FeeBreakdown`；最新费率统一用于全区间 |
+| [source_map.rs](source_map.rs) | 快照内少量例外定位与日期冲突校验；普通市场代码直接作为数据键 |
 | [execution.rs](execution.rs) | `CorporateAction::validate`、`ShareLedger::begin_day/end_day/fill/nav`；现金、整数股、T+1、应收权益 |
 | [task.rs](task.rs) | `TaskContext` 和作用域安装/恢复；任务 ID、取消标记、进度回调 |
 | [scalar_float.rs](scalar_float.rs) | Float64 JSON 中有限数值及 NaN/Infinity/-Infinity 标记；SQL Null 保持独立 |
@@ -47,7 +48,6 @@ RUSTDOCFLAGS="-D warnings" cargo doc -p analytics-core --no-deps
 
 ## 日期生效股票池
 
-`pool` 提供 `PoolDefinition / PoolExpression / PoolAdjustment / PoolMembership / PoolExitPolicy`，格式版本2。研究证券使用独立SEC身份；SH/SZ/BJ加六位代码仅为日期化定位符；组合支持并集、交集、差集。人工增删从生效交易日起持续，周末调整顺延到下一交易日，同一交易日的增删冲突拒绝。引用源必须覆盖所需日期；空集合是有效状态，不扩展到全市场。
 
 ```mermaid
 flowchart LR
@@ -71,19 +71,9 @@ CorporateAction::validate_adjustment_terms与validate分别校验历史调整条
 
 ## 为什么需要本组件
 
-让规则可以用手算案例独立检验。这里的类型不读取磁盘或联网。security将身份与代码分开，admission用明确的通过、失败、未执行状态，execution只记真实股数与现金；这些边界让错误在训练前解释清楚。金额计算当前使用浮点数，原始十进制证据保留在事件来源层。
 
-设计依据：2026-10-14接受的证券身份与完整准入计划、组件接口及测试。未在代码或证据中确认的历史取舍不推定为既有设计理由；来源、法规或数据格式变化时重新评估。
+设计依据：2026-10-14接受的当前组件职责、可复现实验与用户研究需求、组件接口及测试。未在代码或证据中确认的历史取舍不推定为既有设计理由；来源、法规或数据格式变化时重新评估。
 
-
-## 证券与准入类型
-
-security::SecurityRegistry/SecurityRecord/SecurityLocator/IdentityEvidence表达独立证券、日期化来源和可审核引用。相同代码在不同有效区间可属于不同SEC身份；同日歧义拒绝。代码变更保留身份和持仓，ShareLedger使用交易日对应代码计费。
-
-admission::AdmissionReport/AdmissionCheck/CheckStatus将检查结果与是否授权训练分开；空列表、failed或not_run均不能通过。实际字节验证在storage，版本及任务在workflow，core不执行网络或读取文件。
-
-
-普通分红送转的Distribution可显式提供allocation。实际账户出现零碎股时按登记证据取整或现金补偿，补偿按给定到账日结算；公开研究遇到非整数送转比例且无有效规则时在训练前阻断。合并关系目录只确认主体与比例，event_id未裁定不会补猜权益日期。该限制避免先训练、后因无法解释股数而失去完整账户结果。
 
 ## 三级研究模式：为什么允许筛选
 
@@ -91,7 +81,7 @@ admission::AdmissionReport/AdmissionCheck/CheckStatus将检查结果与是否授
 
 第二档保持原成员，纯缺失传播null；第三档派生每日合格成员，不改原始成员或证据。不能看到后来缺价而倒删早期股票。账户仍采用原价、整数股、T+1和连续权益；未裁定冲突、损坏、基准缺项及剩余必要依赖仍阻断。默认有效因子比例0表示至少一项有效，最低有标签样本1只表示可执行，不表示样本在统计上充分。所选因子整列无有效值不会被自动删除。
 
-[research_quality.rs](research_quality.rs)负责三档、阈值和结构化处理；[admission.rs](admission.rs)负责事实状态与最终门禁。缺失、冲突、损坏、执行依赖有不同枚举，业务不能从错误文本猜分类。当前准入格式2冻结实际策略和逐日期处理记录；公式版本不属于准入格式版本。
+[research_quality.rs](research_quality.rs)负责三档、阈值和结构化处理；[admission.rs](admission.rs)负责事实状态与最终门禁。缺失、冲突、损坏、执行依赖有不同枚举，业务不能从错误文本猜分类。当前准入格式4冻结实际策略和逐日期处理记录；公式版本不属于准入格式版本。
 
 ```mermaid
 flowchart LR
@@ -99,7 +89,28 @@ flowchart LR
   C --> U[原股票池或每日合格池]
   U --> F[因子与nullable输入]
   F --> M[按折样本掩码]
-  M --> G[剩余依赖与账户门禁]
+  M --> G[训练剩余依赖门禁]
   G -->|通过| T[冻结签名后训练]
   G -->|未通过| E[原因及处理清单]
 ```
+
+## 2026-10-14：直接代码读取与分阶段研究
+
+为什么调整：普通市场代码无需先登记身份；独立目录、审核和权威名录下载增加了研究前置负担。特殊历史代码仍需在快照内明确区间，不能将旧证券行情或权益接到另一证券。训练使用价量和标签，到账／交付资料只在实际账户执行时检查。
+
+当前格式：模板6、需求3、准入4、股票池3、公司行动4、规范行情5、系数3、采集6、服务9、研究结果11；快照内来源映射1、训练产物1。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
+
+```mermaid
+flowchart LR
+  D[数据快照与少量来源例外] --> M[批量价量掩码与标签边界]
+  M --> T[训练与独立模型产物]
+  T --> P[测试期预测]
+  P --> E[实际订单和持仓检查]
+  E --> R[完整结果或未完成原因]
+```
+
+验收：nextest覆盖来源日期边界、三档掩码、训练／回测分离及模型保留；Clippy、Rustdoc、格式、组件文档和包内CLI共同检查。生成数据、模型、运行记录和安装包不提交。另一台Apple Silicon/macOS14实机验收继续待完成。
+
+## 来源映射的边界
+
+`SourceMap`不是必填证券名录，缺文件等价于空exceptions。只有特殊历史别名、代码变更或复用才登记`exchange_symbol`、`kind`、`coverage`和provider/symbol/coverage/evidence。SH600018普通路径不读取SHT00018文件；SHT00018没有旧文件时保持缺失。exchange定位解析对应日期费用，qlib定位读取原文件，非重叠旧新期间不得自动延长。跨数据键同日复用一个供应商定位会拒绝。

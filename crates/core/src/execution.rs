@@ -173,7 +173,7 @@ struct SpecialRight {
 pub struct ShareLedger {
     /// Worker-local identity directory for dated fees; serialized artifacts freeze it separately.
     #[serde(skip)]
-    pub security_registry: Option<crate::security::SecurityRegistry>,
+    pub source_map: crate::source_map::SourceMap,
     /// Spendable cash, excluding dividend receivables.
     pub cash: f64,
     /// Integer listed positions.
@@ -193,21 +193,60 @@ pub struct ShareLedger {
     closed: bool,
 }
 impl ShareLedger {
+    /// Securities with actual positions or pending entitlements; used by execution-only checks.
+    pub fn required_instruments(&self) -> BTreeSet<String> {
+        self.positions
+            .keys()
+            .cloned()
+            .chain(
+                self.rights
+                    .iter()
+                    .filter(|r| {
+                        !r.cash_paid
+                            || !r.stock_listed
+                            || (r.action.terms.allocation().is_some_and(|a| {
+                                matches!(a, crate::actions::Allocation::CashInLieu { .. })
+                            }) && !r.fractional_paid)
+                    })
+                    .map(|r| r.action.instrument.clone()),
+            )
+            .chain(
+                self.special
+                    .iter()
+                    .filter(|r| match &r.action.terms {
+                        crate::actions::EventTerms::RightsIssue {
+                            subscription_end, ..
+                        } => {
+                            if r.submitted {
+                                !r.listed
+                                    || !r.refunded
+                                    || (r.fractional_cash > 0. && !r.fraction_paid)
+                            } else {
+                                self.date.is_none_or(|d| d <= *subscription_end)
+                            }
+                        }
+                        crate::actions::EventTerms::Conversion { .. } => {
+                            !r.applied
+                                || !r.paid
+                                || !r.listed
+                                || (r.fractional_cash > 0. && !r.fraction_paid)
+                        }
+                        crate::actions::EventTerms::Delisting { .. } => !r.paid,
+                        _ => false,
+                    })
+                    .map(|r| r.action.instrument.clone()),
+            )
+            .collect()
+    }
     fn exchange_symbol(&self, id: &str) -> Result<String> {
-        if crate::security::is_security_id(id) {
-            let r = self
-                .security_registry
-                .as_ref()
-                .ok_or_else(|| invalid("identity directory missing for order"))?;
-            Ok(r.exchange_symbol(
+        Ok(self
+            .source_map
+            .exchange_symbol(
                 id,
                 self.date.ok_or_else(|| invalid("trading day not opened"))?,
             )
             .map_err(|e| invalid(&e))?
             .into())
-        } else {
-            Ok(id.into())
-        }
     }
 
     /// Process dated mandatory events and first-day cash-limited subscriptions atomically.
@@ -553,7 +592,7 @@ impl ShareLedger {
             return Err(invalid("invalid initial cash or dividend withholding rate"));
         }
         Ok(Self {
-            security_registry: None,
+            source_map: Default::default(),
             cash,
             positions: BTreeMap::new(),
             dividend_withholding_rate,

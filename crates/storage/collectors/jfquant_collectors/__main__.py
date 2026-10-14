@@ -1,4 +1,4 @@
-"""One supervised task per process. stdout is exclusively JSON Lines protocol v4."""
+"""One supervised task per process. stdout is exclusively JSON Lines protocol v6."""
 
 import contextlib
 import hashlib

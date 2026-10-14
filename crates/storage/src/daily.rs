@@ -24,7 +24,7 @@ use std::{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DailyBar {
-    /// Internal security identifier.
+    /// Snapshot data code; ordinary symbols need no identity directory.
     pub instrument_id: String,
     /// Exchange-local trading date.
     pub trade_date: Date,
@@ -53,7 +53,7 @@ pub struct DailyBar {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DailyManifest {
-    /// Canonical daily format version, 3.
+    /// Canonical daily format version, 5.
     pub schema_version: u32,
     /// Actual exchange trading calendar.
     pub calendar: Vec<Date>,
@@ -75,11 +75,16 @@ pub struct DailyDataset {
     /// Trading calendar.
     pub calendar: Vec<Date>,
     kind: DailyKind,
-    registry: Option<analytics_core::security::SecurityRegistry>,
+    source_map: analytics_core::source_map::SourceMap,
     read_range: Option<DateRange>,
+    field_cache: std::cell::RefCell<BTreeMap<(String, String), DailyField>>,
+    bar_cache: std::cell::RefCell<BTreeMap<String, Arc<Vec<DailyBar>>>>,
+    adjustment_cache: std::cell::RefCell<BTreeMap<String, AdjustmentRecord>>,
+    #[cfg(test)]
+    physical_reads: std::cell::Cell<usize>,
 }
 struct CanonicalInputs<'a> {
-    bars: Vec<DailyBar>,
+    bars: Arc<Vec<DailyBar>>,
     adjustment: AdjustmentRecord,
     anchor: &'a AdjustmentAnchor,
 }
@@ -91,86 +96,62 @@ fn invalid(s: impl std::fmt::Display) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, s.to_string())
 }
 impl DailyDataset {
-    /// Install a verified directory on the computation worker, without changing source files.
-    pub fn bind_registry(
+    /// Install the selected snapshot's exceptional bindings; ordinary codes need none.
+    pub fn bind_source_map(
         &mut self,
-        r: analytics_core::security::SecurityRegistry,
+        map: analytics_core::source_map::SourceMap,
     ) -> io::Result<()> {
-        r.validate().map_err(invalid)?;
-        self.registry = Some(r);
+        map.validate().map_err(invalid)?;
+        self.source_map = map;
         Ok(())
     }
-    /// Limit source bindings to this study's required dates; original records are unchanged.
+    /// Snapshot-local mapping frozen by caches and models.
+    pub fn source_map(&self) -> &analytics_core::source_map::SourceMap {
+        &self.source_map
+    }
+    /// Limit reads to the requested study, without rewriting original files.
     pub fn restrict_reads(&mut self, range: DateRange) -> io::Result<()> {
         range.validate().map_err(invalid)?;
         self.read_range = Some(range);
         Ok(())
     }
-    /// Dated market locator used solely for fee and board rules.
+    /// Resolve only execution-date market rules.
     pub fn exchange_symbol(&self, id: &str, date: Date) -> io::Result<String> {
-        if analytics_core::security::is_security_id(id) {
-            Ok(self
-                .registry
-                .as_ref()
-                .ok_or_else(|| invalid("identity directory missing"))?
-                .exchange_symbol(id, date)
-                .map_err(invalid)?
-                .into())
-        } else {
-            analytics_core::pool::validate_exchange_symbol(id).map_err(invalid)?;
-            Ok(id.into())
-        }
+        self.source_map
+            .exchange_symbol(id, date)
+            .map(str::to_owned)
+            .map_err(invalid)
     }
-    /// Required dates clipped to a proved security lifecycle, never to available quotes.
+    /// Clip exceptional source history to its known scope; normal records use the request.
     pub fn security_range(&self, id: &str, start: Date, end: Date) -> io::Result<DateRange> {
-        if analytics_core::security::is_security_id(id) {
-            let record = self
-                .registry
-                .as_ref()
-                .and_then(|r| r.securities.get(id))
-                .ok_or_else(|| invalid("identity missing for dependency dates"))?;
-            let r = DateRange {
-                start: start.max(record.lifetime.start),
-                end: end.min(record.lifetime.end),
-            };
-            r.validate().map_err(invalid)?;
-            Ok(r)
-        } else {
-            Ok(DateRange { start, end })
-        }
+        let r = self
+            .source_map
+            .exceptions
+            .get(id)
+            .map_or(DateRange { start, end }, |e| DateRange {
+                start: start.max(e.coverage.start),
+                end: end.min(e.coverage.end),
+            });
+        r.validate().map_err(invalid)?;
+        Ok(r)
     }
     fn validate_read_key(&self, id: &str) -> io::Result<()> {
-        if validate_instrument(id).is_ok() {
-            return Ok(());
-        }
-        if self.registry.as_ref().is_some_and(|r| {
-            r.securities.values().any(|s| {
-                s.locators
-                    .iter()
-                    .any(|l| l.provider == "qlib" && l.symbol == id)
-            })
-        }) {
-            return Ok(());
-        }
-        Err(invalid(format!("unresolved source symbol {id}")))
+        validate_instrument(id).map_err(invalid)
     }
     fn needs_binding(&self, id: &str) -> bool {
-        analytics_core::security::is_security_id(id)
-            && match &self.kind {
-                DailyKind::Qlib(_) => true,
-                DailyKind::Parquet(m) => !m.instruments.contains(id),
-            }
+        self.source_map.exceptions.get(id).is_some_and(|e| {
+            e.locators
+                .iter()
+                .any(|l| l.provider == "qlib" && l.symbol != id)
+        }) && matches!(self.kind, DailyKind::Qlib(_))
     }
-    fn locators(&self, id: &str) -> io::Result<Vec<analytics_core::security::SecurityLocator>> {
-        let r = self
-            .registry
-            .as_ref()
-            .ok_or_else(|| invalid("identity directory missing"))?;
-        let record = r
-            .securities
+    fn locators(&self, id: &str) -> io::Result<Vec<analytics_core::source_map::SourceLocator>> {
+        let e = self
+            .source_map
+            .exceptions
             .get(id)
-            .ok_or_else(|| invalid("unknown security identity"))?;
-        let ls: Vec<_> = record
+            .ok_or_else(|| invalid("source_binding_missing"))?;
+        let ls: Vec<_> = e
             .locators
             .iter()
             .filter(|l| {
@@ -185,10 +166,35 @@ impl DailyDataset {
         if ls.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("{id}: source binding missing"),
+                "source_binding_missing",
             ));
         }
         Ok(ls)
+    }
+    fn qlib_field(&self, q: &QlibDataset, id: &str, name: &str) -> io::Result<DailyField> {
+        let key = (id.to_owned(), name.to_owned());
+        if let Some(f) = self.field_cache.borrow().get(&key) {
+            return Ok(f.clone());
+        }
+        let f = q.field(id, name)?;
+        #[cfg(test)]
+        self.physical_reads.set(self.physical_reads.get() + 1);
+        self.field_cache.borrow_mut().insert(key, f.clone());
+        Ok(f)
+    }
+    fn unbound(&self) -> io::Result<Self> {
+        Ok(Self {
+            root: self.root.clone(),
+            calendar: self.calendar.clone(),
+            kind: DailyKind::Qlib(QlibDataset::open(&self.root)?),
+            source_map: Default::default(),
+            read_range: self.read_range.clone(),
+            field_cache: Default::default(),
+            bar_cache: Default::default(),
+            adjustment_cache: Default::default(),
+            #[cfg(test)]
+            physical_reads: Default::default(),
+        })
     }
     fn bound_field(&self, id: &str, name: &str) -> io::Result<DailyField> {
         self.bound_field_policy(id, name, false)
@@ -201,15 +207,13 @@ impl DailyDataset {
     ) -> io::Result<DailyField> {
         let mut values = vec![None; self.calendar.len()];
         let mut assigned = vec![false; values.len()];
+        let direct = self.unbound()?;
         for l in self.locators(id)? {
-            if analytics_core::security::is_security_id(&l.symbol) {
-                return Err(invalid("source locator cannot be an opaque ID"));
-            }
             let result = match name {
-                "__raw_volume" => self.raw_volume(&l.symbol),
-                "__factors" => self.adjustment_factors(&l.symbol),
-                _ if name.starts_with("__raw_") => self.raw_field(&l.symbol, &name[6..]),
-                _ => self.field(&l.symbol, name),
+                "__raw_volume" => direct.raw_volume(&l.symbol),
+                "__factors" => direct.adjustment_factors(&l.symbol),
+                _ if name.starts_with("__raw_") => direct.raw_field(&l.symbol, &name[6..]),
+                _ => direct.field(&l.symbol, name),
             };
             let f = self.nullable_absence(result, allow_missing)?;
             for (i, d) in self.calendar.iter().enumerate() {
@@ -228,17 +232,24 @@ impl DailyDataset {
     /// Open the current canonical format or the supported Qlib binary format.
     pub fn open(root: impl AsRef<Path>) -> io::Result<Self> {
         let root = root.as_ref().canonicalize()?;
+        let mapping = root.join("source_map.json");
+        let source_map: analytics_core::source_map::SourceMap = if mapping.exists() {
+            serde_json::from_slice(&fs::read(mapping)?).map_err(invalid)?
+        } else {
+            Default::default()
+        };
+        source_map.validate().map_err(invalid)?;
         if root.join("daily_manifest.json").exists() {
             let value: serde_json::Value =
                 serde_json::from_slice(&fs::read(root.join("daily_manifest.json"))?)
                     .map_err(invalid)?;
-            if value["schema_version"] != 4 {
+            if value["schema_version"] != 5 {
                 return Err(invalid(
-                    "unsupported_data_format: canonical daily schema 4 required; reacquire data without migration",
+                    "unsupported_data_format: canonical daily schema 5 required; reacquire data without migration",
                 ));
             }
             let m: DailyManifest = serde_json::from_value(value).map_err(invalid)?;
-            if m.schema_version != 4
+            if m.schema_version != 5
                 || m.calendar.is_empty()
                 || m.calendar.windows(2).any(|w| w[0] >= w[1])
                 || !matches!(
@@ -261,8 +272,13 @@ impl DailyDataset {
             }
             Ok(Self {
                 root,
-                registry: None,
+                source_map: source_map.clone(),
                 read_range: None,
+                field_cache: Default::default(),
+                bar_cache: Default::default(),
+                adjustment_cache: Default::default(),
+                #[cfg(test)]
+                physical_reads: Default::default(),
                 calendar: m.calendar.clone(),
                 kind: DailyKind::Parquet(m),
             })
@@ -270,8 +286,13 @@ impl DailyDataset {
             let q = QlibDataset::open(&root)?;
             Ok(Self {
                 root,
-                registry: None,
+                source_map: source_map.clone(),
                 read_range: None,
+                field_cache: Default::default(),
+                bar_cache: Default::default(),
+                adjustment_cache: Default::default(),
+                #[cfg(test)]
+                physical_reads: Default::default(),
                 calendar: q.calendar.clone(),
                 kind: DailyKind::Qlib(q),
             })
@@ -284,28 +305,46 @@ impl DailyDataset {
             DailyKind::Parquet(m) => m.price_basis == "unadjusted",
         }
     }
+    fn bars(&self, id: &str) -> io::Result<Arc<Vec<DailyBar>>> {
+        if let Some(bars) = self.bar_cache.borrow().get(id) {
+            return Ok(bars.clone());
+        }
+        let bars = Arc::new(read_bars(
+            &self.root.join("bars").join(format!("{id}.parquet")),
+        )?);
+        #[cfg(test)]
+        self.physical_reads.set(self.physical_reads.get() + 1);
+        self.bar_cache.borrow_mut().insert(id.into(), bars.clone());
+        Ok(bars)
+    }
+    fn adjustment_record(&self, id: &str) -> io::Result<AdjustmentRecord> {
+        if let Some(record) = self.adjustment_cache.borrow().get(id) {
+            return Ok(record.clone());
+        }
+        let record = AdjustmentRecord::read(&self.root, id)?;
+        #[cfg(test)]
+        self.physical_reads.set(self.physical_reads.get() + 1);
+        self.adjustment_cache
+            .borrow_mut()
+            .insert(id.into(), record.clone());
+        Ok(record)
+    }
     fn canonical_inputs(&self, id: &str) -> io::Result<CanonicalInputs<'_>> {
         self.validate_read_key(id)?;
         let DailyKind::Parquet(manifest) = &self.kind else {
             return Err(invalid("expected canonical daily data"));
         };
-        let adjustment = AdjustmentRecord::read(&self.root, id)?;
-        if analytics_core::security::is_security_id(id) {
-            let record = self
-                .registry
-                .as_ref()
-                .and_then(|r| r.securities.get(id))
-                .ok_or_else(|| invalid("identity missing for canonical bars"))?;
-            if (record.kind == "price_index")
+        let adjustment = self.adjustment_record(id)?;
+        if let Some(e) = self.source_map.exceptions.get(id)
+            && (e.kind == "price_index")
                 != matches!(adjustment.basis, AdjustmentBasis::PriceIndex { .. })
-            {
-                return Err(invalid("security type conflicts with coefficient basis"));
-            }
+        {
+            return Err(invalid("asset type conflicts with coefficient basis"));
         }
         if let AdjustmentBasis::Unavailable { reason } = &adjustment.basis {
             return Err(invalid(reason));
         }
-        let bars = read_bars(&self.root.join("bars").join(format!("{id}.parquet")))?;
+        let bars = self.bars(id)?;
         let first = bars
             .iter()
             .find(|b| b.close.is_some())
@@ -330,19 +369,7 @@ impl DailyDataset {
                 return Err(invalid("invalid normalized adjustment coefficient"));
             }
         }
-        for b in &bars {
-            if analytics_core::security::is_security_id(id) {
-                let record = &self.registry.as_ref().unwrap().securities[id];
-                if !record.locators.iter().any(|l| {
-                    l.symbol == adjustment.source_symbol
-                        && l.coverage.start <= b.trade_date
-                        && b.trade_date <= l.coverage.end
-                }) {
-                    return Err(invalid(
-                        "canonical quote date/source outside verified identity binding",
-                    ));
-                }
-            }
+        for b in bars.iter() {
             if b.instrument_id != id {
                 return Err(invalid("instrument identity mismatch"));
             }
@@ -379,14 +406,26 @@ impl DailyDataset {
     pub fn validate_factor_basis(&self, id: &str) -> io::Result<()> {
         if self.needs_binding(id) {
             for l in self.locators(id)? {
-                self.validate_factor_basis(&l.symbol)?;
+                self.unbound()?.validate_factor_basis(&l.symbol)?;
             }
             return Ok(());
         }
         self.validate_read_key(id)?;
         if let DailyKind::Qlib(q) = &self.kind {
-            let values = q.field(id, "factor")?;
-            if values.values.iter().flatten().any(|f| *f <= 0.)
+            let values = self.qlib_field(q, id, "factor")?;
+            if values
+                .values
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| {
+                    self.read_range.as_ref().is_none_or(|r| {
+                        self.calendar
+                            .get(values.start + *i)
+                            .is_some_and(|d| r.contains(*d))
+                    })
+                })
+                .filter_map(|(_, v)| *v)
+                .any(|f| f <= 0.)
                 || !values.values.iter().flatten().any(|f| *f > 0.)
             {
                 return Err(invalid(
@@ -404,14 +443,10 @@ impl DailyDataset {
     /// Prevent a real snapshot from being labelled with synthetic coefficient provenance,
     /// or a fixture from silently acquiring public coefficients.
     pub fn validate_coefficient_origin(&self, id: &str, synthetic: bool) -> io::Result<()> {
-        if let Some(r) = &self.registry
-            && r.synthetic_fixture != synthetic
-        {
-            return Err(invalid("identity/public fixture provenance mismatch"));
-        }
         if self.needs_binding(id) {
             for l in self.locators(id)? {
-                self.validate_coefficient_origin(&l.symbol, synthetic)?;
+                self.unbound()?
+                    .validate_coefficient_origin(&l.symbol, synthetic)?;
             }
             return Ok(());
         }
@@ -419,7 +454,7 @@ impl DailyDataset {
         if matches!(self.kind, DailyKind::Qlib(_)) {
             return Ok(());
         }
-        let record = AdjustmentRecord::read(&self.root, id)?;
+        let record = self.adjustment_record(id)?;
         let is_synthetic = match &record.basis {
             AdjustmentBasis::Explicit { source, .. } => {
                 *source == crate::adjustment::FactorSource::SyntheticFixture
@@ -440,7 +475,8 @@ impl DailyDataset {
             let mut dates = vec![];
             for l in self.locators(id)? {
                 dates.extend(
-                    self.adjustment_change_dates(&l.symbol)?
+                    self.unbound()?
+                        .adjustment_change_dates(&l.symbol)?
                         .into_iter()
                         .filter(|d| l.coverage.start <= *d && *d <= l.coverage.end),
                 );
@@ -452,7 +488,7 @@ impl DailyDataset {
         self.validate_read_key(id)?;
         match &self.kind {
             DailyKind::Qlib(_) => Ok(Vec::new()),
-            DailyKind::Parquet(_) => match AdjustmentRecord::read(&self.root, id)?.basis {
+            DailyKind::Parquet(_) => match self.adjustment_record(id)?.basis {
                 AdjustmentBasis::Explicit { points, .. } => points
                     .windows(2)
                     .filter_map(|w| {
@@ -478,9 +514,9 @@ impl DailyDataset {
         }
         self.validate_read_key(id)?;
         match &self.kind {
-            DailyKind::Qlib(q) => q.field(id, "factor"),
+            DailyKind::Qlib(q) => self.qlib_field(q, id, "factor"),
             DailyKind::Parquet(_) => {
-                let record = AdjustmentRecord::read(&self.root, id)?;
+                let record = self.adjustment_record(id)?;
                 Ok(DailyField {
                     start: 0,
                     values: self
@@ -500,8 +536,8 @@ impl DailyDataset {
         self.validate_read_key(id)?;
         match &self.kind {
             DailyKind::Qlib(q) => {
-                let v = q.field(id, "volume")?;
-                let f = q.field(id, "factor")?;
+                let v = self.qlib_field(q, id, "volume")?;
+                let f = self.qlib_field(q, id, "factor")?;
                 Ok(DailyField {
                     start: 0,
                     values: (0..self.calendar.len())
@@ -510,9 +546,9 @@ impl DailyDataset {
                 })
             }
             DailyKind::Parquet(_) => {
-                let bars = read_bars(&self.root.join("bars").join(format!("{id}.parquet")))?;
+                let bars = self.bars(id)?;
                 let mut values = vec![None; self.calendar.len()];
-                for b in bars {
+                for b in bars.iter() {
                     if b.instrument_id != id {
                         return Err(invalid("instrument identity mismatch"));
                     }
@@ -530,18 +566,17 @@ impl DailyDataset {
     pub fn is_price_index(&self, id: &str) -> io::Result<bool> {
         if self.needs_binding(id) {
             let ls = self.locators(id)?;
-            return Ok(
-                self.registry.as_ref().unwrap().securities[id].kind == "price_index"
-                    && ls
-                        .iter()
-                        .all(|l| self.is_price_index(&l.symbol).unwrap_or(false)),
-            );
+            let direct = self.unbound()?;
+            return Ok(self.source_map.is_price_index(id)
+                && ls
+                    .iter()
+                    .all(|l| direct.is_price_index(&l.symbol).unwrap_or(false)));
         }
         self.validate_read_key(id)?;
         match &self.kind {
-            DailyKind::Qlib(_) => Ok(matches!(id, "SH000300" | "SH000905")),
+            DailyKind::Qlib(_) => Ok(self.source_map.is_price_index(id)),
             DailyKind::Parquet(_) => Ok(matches!(
-                AdjustmentRecord::read(&self.root, id)?.basis,
+                self.adjustment_record(id)?.basis,
                 AdjustmentBasis::PriceIndex { .. }
             )),
         }
@@ -556,8 +591,8 @@ impl DailyDataset {
             if self.needs_binding(id) {
                 let ls = self.locators(id)?;
                 let source_ids = ls.iter().map(|l| l.symbol.clone()).collect();
-                let source = self.price_inputs(&source_ids)?;
-                let receipt = serde_json::json!({"identity":self.registry.as_ref().unwrap().securities[id],"bindings":ls,"source":source});
+                let source = self.unbound()?.price_inputs(&source_ids)?;
+                let receipt = serde_json::json!({"source_mapping":self.source_map.exceptions[id],"bindings":ls,"source":source});
                 let mut value = receipt.clone();
                 value["sha256"] = serde_json::json!(format!(
                     "sha256:{:x}",
@@ -583,7 +618,7 @@ impl DailyDataset {
                     serde_json::json!({"basis":"qlib_stored_factor","anchor_mode":"first_stored_factor","anchor":{"trade_date":self.calendar[factors.start+offset],"factor":value.to_string()},"precision":"float32","sha256":format!("sha256:{:x}",Sha256::digest(fs::read(path)?))})
                 }
                 DailyKind::Parquet(m) => {
-                    let record = AdjustmentRecord::read(&self.root, id)?;
+                    let record = self.adjustment_record(id)?;
                     let mut basis = serde_json::to_value(&record.basis).map_err(invalid)?;
                     if let Some(points) = basis.as_object_mut().and_then(|o| o.remove("points")) {
                         basis["point_count"] =
@@ -717,12 +752,25 @@ impl DailyDataset {
         }
         self.validate_read_key(id)?;
         if let DailyKind::Qlib(q) = &self.kind {
-            let field = q.field(id, name)?;
-            if field.values.iter().flatten().any(|value| match name {
-                "open" | "high" | "low" | "close" | "vwap" | "factor" => *value <= 0.,
-                "volume" | "amount" => *value < 0.,
-                _ => false,
-            }) {
+            let field = self.qlib_field(q, id, name)?;
+            if field
+                .values
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| {
+                    self.read_range.as_ref().is_none_or(|r| {
+                        self.calendar
+                            .get(field.start + *i)
+                            .is_some_and(|d| r.contains(*d))
+                    })
+                })
+                .filter_map(|(_, v)| v.as_ref())
+                .any(|value| match name {
+                    "open" | "high" | "low" | "close" | "vwap" | "factor" => *value <= 0.,
+                    "volume" | "amount" => *value < 0.,
+                    _ => false,
+                })
+            {
                 return Err(invalid(format!(
                     "{id} {name}: invalid nonpositive price/coefficient or negative volume/amount"
                 )));
@@ -739,7 +787,7 @@ impl DailyDataset {
                 }
             }
         } else {
-            for b in inputs.bars {
+            for b in inputs.bars.iter() {
                 if b.trade_date < inputs.anchor.trade_date {
                     continue;
                 }
@@ -779,8 +827,8 @@ impl DailyDataset {
         self.validate_read_key(id)?;
         match &self.kind {
             DailyKind::Qlib(q) => {
-                let p = q.field(id, name)?;
-                let f = q.field(id, "factor")?;
+                let p = self.qlib_field(q, id, name)?;
+                let f = self.qlib_field(q, id, "factor")?;
                 Ok(DailyField {
                     start: 0,
                     values: (0..self.calendar.len())
@@ -792,9 +840,9 @@ impl DailyDataset {
                 if !self.has_raw_prices() {
                     return Err(invalid("unverified raw execution price basis"));
                 }
-                let bars = read_bars(&self.root.join("bars").join(format!("{id}.parquet")))?;
+                let bars = self.bars(id)?;
                 let mut values = vec![None; self.calendar.len()];
-                for b in bars {
+                for b in bars.iter() {
                     if b.instrument_id != id {
                         return Err(invalid("instrument identity mismatch"));
                     }
@@ -1036,7 +1084,7 @@ mod tests {
     }
     fn record(points: &[(&str, &str)], end: Date) -> AdjustmentRecord {
         AdjustmentRecord {
-            schema_version: 2,
+            schema_version: 3,
             instrument_id: "SH600000".into(),
             source_symbol: "SH600000".into(),
             basis: AdjustmentBasis::Explicit {
@@ -1067,7 +1115,7 @@ mod tests {
             .map(|a| BTreeMap::from([("SH600000".into(), a)]))
             .unwrap_or_default();
         let m = DailyManifest {
-            schema_version: 4,
+            schema_version: 5,
             calendar: bars.iter().map(|b| b.trade_date).collect(),
             universes: BTreeMap::new(),
             instruments: BTreeSet::from(["SH600000".into()]),
@@ -1081,6 +1129,33 @@ mod tests {
         )
         .unwrap();
         DailyDataset::open(root).unwrap()
+    }
+    #[test]
+    fn canonical_fields_are_read_once_per_security_independent_of_days() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut bars = vec![bar(); 30];
+        for (i, b) in bars.iter_mut().enumerate() {
+            b.trade_date = "2020-01-02".parse::<Date>().unwrap() + chrono::Duration::days(i as i64);
+        }
+        let data = dataset(
+            tmp.path(),
+            &bars,
+            &record(&[("1900-01-01", "2")], bars.last().unwrap().trade_date),
+        );
+        for _ in 0..3 {
+            for name in [
+                "open", "high", "low", "close", "volume", "amount", "vwap", "factor",
+            ] {
+                assert_eq!(data.field("SH600000", name).unwrap().values.len(), 30);
+            }
+            data.raw_field("SH600000", "close").unwrap();
+            data.raw_volume("SH600000").unwrap();
+        }
+        assert_eq!(
+            data.physical_reads.get(),
+            2,
+            "one coefficient record and one bar file"
+        );
     }
     #[test]
     fn malformed_raw_prices_and_empty_shards_fail_before_writing_but_nulls_remain() {
@@ -1135,6 +1210,7 @@ mod tests {
         assert_eq!(data.field("SH600000", "close").unwrap().get(0), Some(10.));
         b.instrument_id = "SZ000001".into();
         write_bars(&d.path().join("bars/SH600000.parquet"), &[b]).unwrap();
+        let data = DailyDataset::open(d.path()).unwrap();
         assert!(data.raw_field("SH600000", "close").is_err());
         assert!(data.raw_volume("SH600000").is_err());
     }
@@ -1181,6 +1257,7 @@ mod tests {
         zero.amount = Some(0.);
         bars[2] = zero;
         write_bars(&d.path().join("bars/SH600000.parquet"), &bars).unwrap();
+        let data = DailyDataset::open(d.path()).unwrap();
         assert_eq!(data.field("SH600000", "vwap").unwrap().get(2), None);
         assert_eq!(data.field("SH600000", "volume").unwrap().get(2), Some(0.));
     }

@@ -11,7 +11,7 @@ from pathlib import Path
 def validate_summary(summary):
     """Presentation sanity checks; formal imports use the Rust result validator."""
     if (
-        summary.get("schema_version") != 9
+        summary.get("schema_version") != 11
         or summary.get("execution", {}).get("mode") != "raw_integer_shares"
     ):
         raise ValueError(
@@ -39,7 +39,7 @@ def validate_summary(summary):
     mode = policy.get("strictness")
     if (
         mode not in {"strict", "allow_missing", "qualified_only"}
-        or admission.get("schema_version") != 2
+        or admission.get("schema_version") != 4
     ):
         raise ValueError("unsupported_result_format: missing quality policy/admission")
     if admission.get("policy") != policy or not admission.get("checks"):

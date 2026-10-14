@@ -17,7 +17,7 @@ where
     if owner_path.exists() {
         let saved: Value = serde_json::from_slice(&fs::read(&owner_path)?)?;
         if saved != owner {
-            return Err("preparation checkpoint request/identity mismatch".into());
+            return Err("preparation checkpoint request/source mismatch".into());
         }
     } else {
         atomic_json(&owner_path, &owner)?;
@@ -68,11 +68,11 @@ where
         .filter(|(_, o)| o["status"] != "passed")
         .map(|(id, o)| json!({"security":id,"result":o}))
         .collect();
-    let result = json!({"schema_version":1,"ready":false,"published":false,"candidate_only":true,"outcomes":outcomes,"failures":failures,"reason":"acquisition success does not prove identity or complete event-category admission"});
+    let result = json!({"schema_version":1,"ready":false,"published":false,"candidate_only":true,"outcomes":outcomes,"failures":failures,"reason":"acquisition success does not prove complete execution event-category coverage"});
     atomic_json(&root.join("candidates.json"), &result)?;
     Ok(result)
 }
-/// Acquire source candidates using explicit dated identities where available.
+/// Acquire source candidates using snapshot-local dated source exceptions where needed.
 pub(crate) fn prepare(
     w: &Workspace,
     run: &RunRecord,
@@ -83,8 +83,8 @@ pub(crate) fn prepare(
 ) -> Result<Value> {
     let owner = resume.unwrap_or(run.id);
     let root = w.resolve(format!(".jfquant/staging/research-actions-{owner}"));
-    let registry: Option<analytics_core::security::SecurityRegistry> =
-        serde_json::from_value(requirements["identity_registry"].clone())?;
+    let mapping: analytics_core::source_map::SourceMap =
+        serde_json::from_value(requirements["source_map"].clone())?;
     collect_independent(
         &root,
         requirements,
@@ -99,25 +99,22 @@ pub(crate) fn prepare(
                     .as_str()
                     .map_or_else(|| requirements["execution_end"].clone(), |s| json!(s)),
             )?;
-            let (code, start, end) = if analytics_core::security::is_security_id(id) {
-                let r = registry.as_ref().ok_or("identity directory missing")?;
-                let s = &r.securities[id];
-                let provider = if announcements { "cninfo" } else { "akshare" };
-                let locator = s
+            let provider = if announcements { "cninfo" } else { "akshare" };
+            let (code, start, end) = if let Some(e) = mapping.exceptions.get(id) {
+                let l = e
                     .locators
                     .iter()
                     .find(|l| {
                         l.provider == provider && l.coverage.start <= end && l.coverage.end >= start
                     })
-                    .ok_or("source locator/issuer evidence unavailable")?;
+                    .ok_or("source_binding_missing")?;
                 (
-                    locator.symbol.clone(),
-                    start.max(locator.coverage.start),
-                    end.min(locator.coverage.end),
+                    l.symbol.clone(),
+                    start.max(l.coverage.start),
+                    end.min(l.coverage.end),
                 )
             } else {
-                analytics_core::pool::validate_exchange_symbol(id)?;
-                (id.to_string(), start, end)
+                (id.to_owned(), start, end)
             };
             analytics_core::pool::validate_exchange_symbol(&code)?;
             if announcements {
@@ -133,7 +130,7 @@ pub(crate) fn prepare(
                 };
                 analytics_storage::collector::collect_announcements(&request, path, context)?;
                 Ok(
-                    json!({"status":"passed","kind":"announcement_candidates","path":path,"security_id":id,"identity_verified":registry.as_ref().is_some_and(|r|r.securities.contains_key(id))}),
+                    json!({"status":"passed","kind":"announcement_candidates","path":path,"instrument":id}),
                 )
             } else {
                 let b = analytics_storage::corporate_actions::fetch_public_resumable(
@@ -144,7 +141,7 @@ pub(crate) fn prepare(
                     return Err(format!("source failures: {:?}", b.failures).into());
                 }
                 Ok(
-                    json!({"status":"passed","kind":"distribution_candidates","path":path,"security_id":id,"provider_symbol":code,"required_dates":{"start":start,"end":end},"all_event_categories_verified":false}),
+                    json!({"status":"passed","kind":"distribution_candidates","path":path,"instrument":id,"provider_symbol":code,"required_dates":{"start":start,"end":end},"all_event_categories_verified":false}),
                 )
             }
         },
@@ -157,7 +154,7 @@ mod tests {
     #[test]
     fn one_unknown_symbol_does_not_stop_other_shards_and_resume_rehashes() {
         let dir = tempfile::tempdir().unwrap();
-        let request = json!({"securities":["SHT00018","SH600000"],"identity_version":"fixture-v1"});
+        let request = json!({"securities":["SHT00018","SH600000"],"schema_version":3});
         let context = TaskContext::current();
         let mut calls = vec![];
         let first = collect_independent(
@@ -166,7 +163,7 @@ mod tests {
             |id, path| {
                 calls.push(id.to_owned());
                 if id == "SHT00018" {
-                    return Err("unresolved_identity".into());
+                    return Err("source_code_unavailable".into());
                 }
                 fs::create_dir_all(path)?;
                 fs::write(path.join("body.json"), "verified source")?;

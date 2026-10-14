@@ -10,7 +10,6 @@
 //! Parquet directory -> ParquetCatalog -> Vec<DatasetFile> -> engine / factor
 //! ```
 #![warn(missing_docs)]
-pub mod security;
 
 pub mod acquisition;
 pub mod collector;

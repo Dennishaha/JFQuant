@@ -44,13 +44,13 @@ cargo nextest run -p analytics-desktop -E 'test(service_client_tasks)'
 
 新子命令应在同一临时工作区比较命令与公共 API；测试应证明用户可见结果或错误，不只镜像参数转换。真实公开公司行动的缺项必须被拒绝，不能为让测试成功猜支付日/上市日。另一台 Mac 的安装验收属于 [打包验收](../../app/packaging/README.md)，不能由这些进程测试代替。
 
-新增日期覆盖测试从CLI提交任意训练/回测和无验证集设置，等待后与公共Schedule核对，并验证残缺日期参数退出2。原App/API/CLI一致性测试使用当前模板5、公司行动3及结果9，保留原股数/费用断言；旧请求/旧结果仍不得执行或改写源文件。
+新增日期覆盖测试从CLI提交任意训练/回测和无验证集设置，等待后与公共Schedule核对，并验证残缺日期参数退出2。原App/API/CLI一致性测试使用当前模板6、公司行动4及结果11，保留原股数/费用断言；旧请求/旧结果仍不得执行或改写源文件。
 
 ## 为什么需要本组件
 
 验证用户可见协议而非只测试内部函数。进程级测试检查JSON、退出码、任务持续运行、取消和App并发访问。身份变更和旧格式拒绝必须从正式命令证明，防止底层接口正确但命令入口绕过准入。
 
-设计依据：2026-10-14接受的证券身份与完整准入计划、组件接口及测试。未在代码或证据中确认的历史取舍不推定为既有设计理由；来源、法规或数据格式变化时重新评估。
+设计依据：2026-10-14接受的当前组件职责、可复现实验与用户研究需求、组件接口及测试。未在代码或证据中确认的历史取舍不推定为既有设计理由；来源、法规或数据格式变化时重新评估。
 
 ## 三级研究模式：为什么允许筛选
 
@@ -66,7 +66,31 @@ flowchart LR
   C --> U[原股票池或每日合格池]
   U --> F[因子与nullable输入]
   F --> M[按折样本掩码]
-  M --> G[剩余依赖与账户门禁]
+  M --> G[训练剩余依赖门禁]
   G -->|通过| T[冻结签名后训练]
   G -->|未通过| E[原因及处理清单]
 ```
+
+## 2026-10-14：直接代码读取与分阶段研究
+
+为什么调整：普通市场代码无需先登记身份；独立目录、审核和权威名录下载增加了研究前置负担。特殊历史代码仍需在快照内明确区间，不能将旧证券行情或权益接到另一证券。训练使用价量和标签，到账／交付资料只在实际账户执行时检查。
+
+当前格式：模板6、需求3、准入4、股票池3、公司行动4、规范行情5、系数3、采集6、服务9、研究结果11；快照内来源映射1、训练产物1。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
+
+```bash
+jfquant --workspace "$JFQUANT_WORKSPACE" research train --template recipe.json --market MARKET_ID --actions HISTORY_ACTIONS_ID
+jfquant --workspace "$JFQUANT_WORKSPACE" jobs wait TRAIN_JOB_ID --timeout 60
+jfquant --workspace "$JFQUANT_WORKSPACE" research backtest --training TRAIN_JOB_ID --actions EXECUTION_ACTIONS_ID
+jfquant --workspace "$JFQUANT_WORKSPACE" jobs results BACKTEST_JOB_ID
+```
+
+```mermaid
+flowchart LR
+  D[数据快照与少量来源例外] --> M[批量价量掩码与标签边界]
+  M --> T[训练与独立模型产物]
+  T --> P[测试期预测]
+  P --> E[实际订单和持仓检查]
+  E --> R[完整结果或未完成原因]
+```
+
+验收：nextest覆盖来源日期边界、三档掩码、训练／回测分离及模型保留；Clippy、Rustdoc、格式、组件文档和包内CLI共同检查。生成数据、模型、运行记录和安装包不提交。另一台Apple Silicon/macOS14实机验收继续待完成。

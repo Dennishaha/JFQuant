@@ -106,7 +106,7 @@ jfquant jobs wait TASK_UUID
 
 `corporate_actions::fetch_public`独立请求东方财富RPT_SHAREBONUS_DET已实施历史和F10 PageAjax到账日期。`enrich_public`用新浪历史表补退市股票和显式红股上市日。`fetch_details`按明确日期区间下载新浪详情，只把纯现金方案“红利起始日”用于到账日，混合送转方案的通用“到账日”不推断为现金发放日；股票只用明确“上市日”。`fetch_pay_dates`再按阿思达克现金行中单独标明的“派送日”补混合方案现金日，要求股票代码、登记日、除权日与分红金额一致，不把其送股行派送日当现金日。所有请求由本项目Rust调用curl、最多4个worker；每次发布新版本，仅允许恢复身份匹配的未完成暂存目录，保存原始响应与SHA256，派生目录验证并复制原有证据。不读取其他项目缓存，也不执行第三方采集代码。
 
-接口：`ActionBundle::read / require_coverage`，schema_version=3；downloader固定身份、downloaded_at UTC、queried_symbols、actions、failures和raw_sha256。事件格式遵循core `CorporateAction`；JSON拒绝未知字段。原始每10股数量转换成每旧股，缺失pay_date/listing_date保留null，失败与空历史分开；校验数量/分页、股票身份和日期。公开来源相互冲突记录到failures，不能静默选一边。coverage.json、details_coverage.json和payment_coverage.json列出缺字段及失败；“下载成功”不代表“可执行回测”。源HTML若改版或编码异常则拒绝。
+接口：`ActionBundle::read / require_coverage`，schema_version=4；downloader固定来源映射、downloaded_at UTC、queried_symbols、actions、failures和raw_sha256。事件格式遵循core `CorporateAction`；JSON拒绝未知字段。原始每10股数量转换成每旧股，缺失pay_date/listing_date保留null，失败与空历史分开；校验数量/分页、股票身份和日期。公开来源相互冲突记录到failures，不能静默选一边。coverage.json、details_coverage.json和payment_coverage.json列出缺字段及失败；“下载成功”不代表“可执行回测”。源HTML若改版或编码异常则拒绝。
 
 ```mermaid
 flowchart TD
@@ -170,16 +170,16 @@ ActionBundle另允许显式身份`JFQuant analytics-workflow synthetic-demo-v1`�
 
 ## 双源采集与统一日行情
 
-`collector::CollectionRequest / Provider / collect / collect_actions` 使用包内 CPython 3.12，AKShare 1.19.1、yfinance 1.7.0，依赖和发行包 SHA256 在组件旁锁定。Rust 服务监督单任务子进程，JSON Lines 协议4承载进度、证券分片、完成或稳定错误；取消、超时和异常均回收进程。owner、证券文件及证据哈希匹配后才恢复，成功证券不重复下载。详见 [采集包](./collectors/README.md)。
+`collector::CollectionRequest / Provider / collect / collect_actions` 使用包内 CPython 3.12，AKShare 1.19.1、yfinance 1.7.0，依赖和发行包 SHA256 在组件旁锁定。Rust 服务监督单任务子进程，JSON Lines 协议6承载进度、证券分片、完成或稳定错误；取消、超时和异常均回收进程。owner、证券文件及证据哈希匹配后才恢复，成功证券不重复下载。详见 [采集包](./collectors/README.md)。
 
-`daily::DailyDataset` 同时读取 Qlib 和规范 Parquet，提供交易日历、历史成员、归一化因子字段及独立 `raw_field`。规范格式4含 `daily_manifest.json` 和 `bars/SHxxxxxx.parquet`；实际价格、后复权价格、股数及人民币成交额分别保存，缺失值保留 null。`field` 采用固定价量重基准规则，`raw_field` 只接收已经验证的原价。Yahoo 标为 `split_adjusted_candidate`，不能用于严格撮合。
+`daily::DailyDataset` 同时读取 Qlib 和规范 Parquet，提供交易日历、历史成员、归一化因子字段及独立 `raw_field`。规范格式5含 `daily_manifest.json` 和 `bars/SHxxxxxx.parquet`；实际价格、后复权价格、股数及人民币成交额分别保存，缺失值保留 null。`field` 采用固定价量重基准规则，`raw_field` 只接收已经验证的原价。Yahoo 标为 `split_adjusted_candidate`，不能用于严格撮合。
 
 ```mermaid
 flowchart TD
   REQUEST["公共采集请求：来源、证券、日期"] --> CHILD["内置Python：白名单AKShare / yfinance"]
   CHILD --> EVIDENCE["HTTP响应体与结构化表格分开留证"]
   CHILD --> SHARD["逐证券数据分片"]
-  EVIDENCE --> CHECK["Rust身份、单位、日期与哈希校验"]
+  EVIDENCE --> CHECK["Rust来源映射、单位、日期与哈希校验"]
   SHARD --> CHECK
   CHECK --> STAGING["已验证检查点 / 未完成内容不发布"]
   STAGING --> SNAPSHOT["原子发布不可变Parquet版本"]
@@ -196,13 +196,13 @@ flowchart TD
 
 采集进程必须先通过 `ready` 代码/SDK/解释器版本握手，Rust才接受证券分片；错误运行环境不会先写出检查点再在完成阶段失败。
 
-## 显式系数与规范行情4
+## 显式系数与规范行情5
 
-adjustment模块定义AdjustmentSource、AdjustmentRecord、AdjustmentBasis和AdjustmentAnchor。规范行情4保存adjustments/ID.json、原价bars和首个原价收盘锚点；DailyDataset提供adjustment_factors、raw_volume、price_inputs及来源校验。研究价量由原价与F/F0生成，供应商后复权仅留证。Qlib当前读取保持，规范1不转换。接口与复现见[采集包](collectors/README.md)。
+adjustment模块定义AdjustmentSource、AdjustmentRecord、AdjustmentBasis和AdjustmentAnchor。规范行情5保存adjustments/ID.json、原价bars和首个原价收盘锚点；DailyDataset提供adjustment_factors、raw_volume、price_inputs及来源校验。研究价量由原价与F/F0生成，供应商后复权仅留证。Qlib当前读取保持，规范1不转换。接口与复现见[采集包](collectors/README.md)。
 
-## 公司行动3与公告证据
+## 公司行动4与公告证据
 
-ActionBundle仅接收格式3；规范行情为4，采集协议4。旧动作/规范行情/检查点不转换，Qlib当前读取保持。ordinary的公共金额是实际持有人权益；EventTerms的Reference独立核验除权。特殊事件或仅供历史核验的Historical条款都须有实施证据；后者不能进入实际账户。
+ActionBundle仅接收格式4；规范行情为5，采集协议6。旧动作/规范行情/检查点不转换，Qlib当前读取保持。ordinary的公共金额是实际持有人权益；EventTerms的Reference独立核验除权。特殊事件或仅供历史核验的Historical条款都须有实施证据；后者不能进入实际账户。
 
 新增内置announcements采集：固定CNINFO查询及static.cninfo.com.cn PDF路径，验证分页、证券、日期、状态和附件身份；pypdf5.9.0锁定在依赖中，记录PDF、逐页提取文本哈希和候选字段。预案、风险提示及无法确定实施身份的文档不能直接修订。扫描PDF无文本时保留待复核，不OCR猜数值。
 
@@ -212,7 +212,7 @@ corporate_actions::review::RevisionRequest包含原哈希、完整替换事件�
 
 下载成功不足以证明研究输入可靠。供应商字段、单位、证券身份和历史覆盖都可能不一致。存储层保留原文、哈希和结构化候选，分别核验来源与转换；公司行动按事件类别证明覆盖，不能用分红接口成功代表全部事件。
 
-设计依据：2026-10-14接受的证券身份与完整准入计划、组件接口及测试。未在代码或证据中确认的历史取舍不推定为既有设计理由；来源、法规或数据格式变化时重新评估。
+设计依据：2026-10-14接受的当前组件职责、可复现实验与用户研究需求、组件接口及测试。未在代码或证据中确认的历史取舍不推定为既有设计理由；来源、法规或数据格式变化时重新评估。
 
 ## 三级研究模式：为什么允许筛选
 
@@ -220,7 +220,6 @@ corporate_actions::review::RevisionRequest包含原哈希、完整替换事件�
 
 第二档保持原成员，纯缺失传播null；第三档派生每日合格成员，不改原始成员或证据。不能看到后来缺价而倒删早期股票。账户仍采用原价、整数股、T+1和连续权益；未裁定冲突、损坏、基准缺项及剩余必要依赖仍阻断。默认有效因子比例0表示至少一项有效，最低有标签样本1只表示可执行，不表示样本在统计上充分。所选因子整列无有效值不会被自动删除。
 
-DailyDataset::research_field(id,name,allow_missing)仅将ErrorKind::NotFound转换为空向量，PermissionDenied、InvalidData及解析/证据错误继续返回。复权factor仍须独立核验；模型missing不能证明原价可靠。Qlib和规范Parquet复用同一nullable界面，Qlib另外拒绝非正价格/系数和负成交量/金额。文件格式仍为规范行情4、系数2、公司行动3，读取策略不改写源文件。验收包含三档的Qlib/Parquet合成对照。
 
 ```mermaid
 flowchart LR
@@ -228,9 +227,28 @@ flowchart LR
   C --> U[原股票池或每日合格池]
   U --> F[因子与nullable输入]
   F --> M[按折样本掩码]
-  M --> G[剩余依赖与账户门禁]
+  M --> G[训练剩余依赖门禁]
   G -->|通过| T[冻结签名后训练]
   G -->|未通过| E[原因及处理清单]
 ```
 
 日期化读取补充：restrict_reads只选择与研究必需日期相交的供应商绑定，不改目录或文件。research_field/research_raw_field/research_raw_volume在放宽读取时逐绑定处理NotFound，只将该代码有效区间置null；后续代码文件缺失不会清空旧代码的有效历史。所有解析、权限和非法值错误仍阻断。回归测试覆盖后续别名缺文件、早期成员不变及完整年度账本。
+
+## 2026-10-14：直接代码读取与分阶段研究
+
+为什么调整：普通市场代码无需先登记身份；独立目录、审核和权威名录下载增加了研究前置负担。特殊历史代码仍需在快照内明确区间，不能将旧证券行情或权益接到另一证券。训练使用价量和标签，到账／交付资料只在实际账户执行时检查。
+
+当前格式：模板6、需求3、准入4、股票池3、公司行动4、规范行情5、系数3、采集6、服务9、研究结果11；快照内来源映射1、训练产物1。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
+
+来源映射位于快照source_map.json，普通证券可用空exceptions。每个例外含市场代码、资产类别、适用区间及provider/symbol/coverage定位。冲突拒绝；SHT00018只能读取自身旧文件，不自动绑定SH600018。原Qlib文件不改写；显式重新登记冻结文件内容和映射。worker内缓存字段，取消检查以证券和固定批次执行。
+
+```mermaid
+flowchart LR
+  D[数据快照与少量来源例外] --> M[批量价量掩码与标签边界]
+  M --> T[训练与独立模型产物]
+  T --> P[测试期预测]
+  P --> E[实际订单和持仓检查]
+  E --> R[完整结果或未完成原因]
+```
+
+验收：nextest覆盖来源日期边界、三档掩码、训练／回测分离及模型保留；Clippy、Rustdoc、格式、组件文档和包内CLI共同检查。生成数据、模型、运行记录和安装包不提交。另一台Apple Silicon/macOS14实机验收继续待完成。

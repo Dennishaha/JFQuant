@@ -1109,7 +1109,7 @@ fn incomplete_research_is_persisted_as_blocked_and_shown_without_old_results() {
     let (m, a, template) = analytics_workflow::testing::synthetic(&w);
     let p = w.resolve(&a.path);
     let mut book = analytics_storage::corporate_actions::ActionBundle::read(&p).unwrap();
-    book.actions[0].pay_date = None;
+    book.actions[0].cash_per_share = 99.0;
     std::fs::write(&p, serde_json::to_vec(&book).unwrap()).unwrap();
     let a = w.register(&p).unwrap();
     h.app.state.platform.template = template;
@@ -1283,7 +1283,7 @@ fn service_client_tasks_appear_in_egui_can_be_cancelled_and_share_research_resul
         })
         .unwrap();
     h.wait_for(|app| !app.state.busy() && app.state.platform.runs.iter().any(|r| r.id == task));
-    assert_eq!(h.app.state.platform.template.schema_version, 5);
+    assert_eq!(h.app.state.platform.template.schema_version, 6);
     h.app.state.panel = Panel::Research;
     h.click("执行年度研究");
     h.wait_for(|app| !app.state.busy() && app.state.platform.details.get("aggregate").is_some());
@@ -1491,16 +1491,37 @@ fn date_preview_and_manual_fold_editor_submit_shared_requests_without_training()
 }
 
 #[test]
-fn identity_review_controls_submit_public_requests_and_prevent_duplicate_clicks() {
+fn research_stage_buttons_submit_shared_tasks_without_identity_controls() {
     let (mut h, _tmp) = platform_harness(Panel::Research);
-    h.ctx.all_styles_mut(|s| s.animation_time = 0.0);
-    h.click("证券身份、别名与承继证据");
-    h.click("列出身份版本");
-    let command = h.commands.try_recv().unwrap();
+    let w = h.app.state.platform.workspace.as_ref().unwrap().clone();
+    let (m, a, t) = analytics_workflow::testing::synthetic(&w);
+    h.app.state.platform.template = t;
+    h.app.state.platform.datasets = w.datasets().unwrap();
+    h.app.state.platform.market = m.id;
+    h.app.state.platform.actions = a.id;
+    h.click("仅训练模型");
+    let command = h.commands.recv().unwrap();
     assert!(
-        matches!(command,WorkerCommand::ExecuteWorkflow{request,..} if matches!(&*request,analytics_workflow::WorkflowRequest::IdentityOperation{method,..} if method=="list"))
+        matches!(command,WorkerCommand::ExecuteWorkflow{request,..} if matches!(&*request,analytics_workflow::WorkflowRequest::TrainResearch{..}))
     );
-    h.click("列出身份版本");
-    assert!(h.commands.try_recv().is_err());
-    assert!(h.app.state.busy());
+    h.finish_recorded_task();
+    let id = uuid::Uuid::new_v4();
+    h.app.state.platform.training_job = id.to_string();
+    h.click("使用已有模型回测");
+    let command = h.commands.recv().unwrap();
+    assert!(
+        matches!(command,WorkerCommand::ExecuteWorkflow{request,..} if matches!(&*request,analytics_workflow::WorkflowRequest::BacktestResearch{training,..} if *training==id))
+    );
+}
+
+#[test]
+fn research_stage_results_distinguish_preserved_models_and_no_valid_trades() {
+    let (mut h, _tmp) = platform_harness(Panel::Research);
+    h.app.state.platform.details = serde_json::json!({"ready":false,"training_complete":true,"training_artifact":{"status":"trained"}});
+    let frame = h.frame(vec![]);
+    let text = rendered_text(&frame);
+    assert!(text.contains("已保存训练模型"), "{text}");
+    assert!(!text.contains("尚未进行训练"));
+    h.app.state.platform.details = serde_json::json!({"backtest_status":"no_valid_trades"});
+    assert!(rendered_text(&h.frame(vec![])).contains("无有效交易"));
 }

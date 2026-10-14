@@ -17,6 +17,9 @@ pub(super) fn render(output: &Path) -> Result<()> {
     let percent = |v: f64| format!("{:.2}%", v * 100.0);
     let rate = |v: f64| format!("{:.5}%", v * 100.0);
     let mut md = String::from("# JFQuant 所选股票池日期调度研究\n\n");
+    if summary["backtest_status"] == "no_valid_trades" {
+        md.push_str("**无有效交易。账户保留现金，本次结果不能用于判断策略效果。**\n\n");
+    }
     writeln!(
         md,
         "{}\n",

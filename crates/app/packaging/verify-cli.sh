@@ -17,16 +17,11 @@ run_cli jobs results "$demo_id" > "$check_root/demo.json"
 plutil -extract details.demo_template json -o "$check_root/recipe.json" "$check_root/demo.json"
 market="$(plutil -extract data.id raw -o - "$check_root/demo.json")"
 actions="$(plutil -extract details.demo_actions raw -o - "$check_root/demo.json")"
-identity="$(plutil -extract details.demo_template.identity_version raw -o - "$check_root/demo.json")"
-run_cli identities show "$identity" > "$check_root/identity-submission.json"
-identity_task="$(plutil -extract task_id raw -o - "$check_root/identity-submission.json")"
-run_cli jobs wait "$identity_task" --timeout 30 > "$check_root/identity-result.json"
-[ "$(plutil -extract results.details.schema_version raw -o - "$check_root/identity-result.json")" = 1 ]
 run_cli research run --template "$check_root/recipe.json" --market "$market" --actions "$actions" > "$check_root/research-submission.json"
 research_id="$(plutil -extract task_id raw -o - "$check_root/research-submission.json")"
 run_cli jobs wait "$research_id" --timeout 60 > "$check_root/research.json"
 run_cli jobs results "$research_id" > "$check_root/online-results.json"
-[ "$(plutil -extract schema_version raw -o - "$check_root/online-results.json")" = 9 ]
+[ "$(plutil -extract schema_version raw -o - "$check_root/online-results.json")" = 11 ]
 [ "$(plutil -extract execution.mode raw -o - "$check_root/online-results.json")" = raw_integer_shares ]
 "$app/Contents/Resources/python/bin/python3" -I -B - "$check_root/online-results.json" <<'PY'
 import hashlib
@@ -51,7 +46,7 @@ for strictness in strict allow_missing qualified_only; do
   quality_id="$(plutil -extract task_id raw -o - "$check_root/quality-$strictness-submission.json")"
   run_cli jobs wait "$quality_id" --timeout 60 > "$check_root/quality-$strictness.json"
   [ "$(plutil -extract results.execution.quality_policy.strictness raw -o - "$check_root/quality-$strictness.json")" = "$strictness" ]
-  [ "$(plutil -extract results.admission.schema_version raw -o - "$check_root/quality-$strictness.json")" = 2 ]
+  [ "$(plutil -extract results.admission.schema_version raw -o - "$check_root/quality-$strictness.json")" = 4 ]
 done
 # Exercise real date controls and absence of a validation set through the same service.
 run_cli research preview --template "$check_root/recipe.json" --market "$market" \
@@ -92,3 +87,13 @@ cmp "$check_root/online-results.json" "$check_root/offline-results.json"
 [ "$(plutil -extract record.status raw -o - "$check_root/research.json")" = succeeded ]
 [ "$(plutil -extract ok raw -o - "$check_root/native.json")" = true ]
 echo "Packaged CLI research and offline results verified: $check_root"
+
+run_cli research train --template "$check_root/recipe.json" --market "$market" --actions "$actions" > "$check_root/train-submit.json"
+training_id="$(plutil -extract task_id raw -o - "$check_root/train-submit.json")"
+run_cli jobs wait "$training_id" --timeout 60 > "$check_root/train-wait.json"
+run_cli jobs results "$training_id" > "$check_root/train-results.json"
+[ "$(plutil -extract status raw -o - "$check_root/train-results.json")" = trained ]
+run_cli research backtest --training "$training_id" --actions "$actions" > "$check_root/backtest-submit.json"
+backtest_id="$(plutil -extract task_id raw -o - "$check_root/backtest-submit.json")"
+run_cli jobs wait "$backtest_id" --timeout 60 > "$check_root/backtest-wait.json"
+[ "$(plutil -extract results.schema_version raw -o - "$check_root/backtest-wait.json")" = 11 ]

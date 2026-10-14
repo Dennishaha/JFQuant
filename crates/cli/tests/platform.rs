@@ -365,8 +365,13 @@ fn cli_native_research_templates_results_and_incomplete_actions_share_strict_che
         actions,
     ]);
     let id = run["task_id"].as_str().unwrap();
-    assert_eq!(s.cli(&["jobs", "wait", id]).status.code(), Some(3));
-    assert_eq!(s.json(&["jobs", "results", id])["ready"], false);
+    assert_eq!(s.cli(&["jobs", "wait", id]).status.code(), Some(0));
+    assert!(
+        s.json(&["jobs", "results", id])["aggregate"]["blocked_orders"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
 }
 #[test]
 fn startup_race_uses_one_owner_and_crash_recovery_marks_interrupted() {
@@ -621,7 +626,7 @@ fn current_research_cli_and_api_share_results_and_reject_old_imports_without_mod
     let cli_id = value["task_id"].as_str().unwrap().parse().unwrap();
     let actual = s.client.wait(cli_id, Some(15)).unwrap();
     assert_eq!(actual["results"], expected);
-    assert_eq!(expected["schema_version"], 9);
+    assert_eq!(expected["schema_version"], 11);
     assert!(
         expected["aggregate"]
             .get("terminal_valuation_fees_cny")
@@ -872,7 +877,7 @@ fn cli_pools_and_canonical_research_share_public_backend_and_schema() {
     let demo = s.json(&["jobs", "results", id]);
     let market = demo["data"]["id"].as_str().unwrap();
     let actions = demo["details"]["demo_actions"].as_str().unwrap();
-    let definition = json!({"schema_version":2,"name":"CLI self-selected pool","coverage":{"start":"2007-01-02","end":"2010-01-12"},"expression":{"kind":"symbols","instruments":["SH600000","SH600001"]},"adjustments":[]});
+    let definition = json!({"schema_version":3,"name":"CLI self-selected pool","coverage":{"start":"2007-01-02","end":"2010-01-12"},"expression":{"kind":"symbols","instruments":["SH600000","SH600001"]},"adjustments":[]});
     std::fs::write(
         s.client.root.join("pool.json"),
         serde_json::to_vec(&definition).unwrap(),
@@ -915,7 +920,7 @@ fn cli_pools_and_canonical_research_share_public_backend_and_schema() {
     let id = run["task_id"].as_str().unwrap();
     s.json(&["jobs", "wait", id, "--timeout", "30"]);
     let result = s.json(&["jobs", "results", id]);
-    assert_eq!(result["schema_version"], 9);
+    assert_eq!(result["schema_version"], 11);
     assert_eq!(
         result["execution"]["benchmark"],
         analytics_workflow::demo::fixture_security_id("SH000905")
@@ -997,7 +1002,7 @@ fn date_overrides_preview_and_no_validation_run_share_the_public_schedule() {
         "--timeout",
         "30",
     ]);
-    assert_eq!(done["results"]["schema_version"], 9);
+    assert_eq!(done["results"]["schema_version"], 11);
     assert_eq!(done["results"]["fold_reports"][0]["validation_rows"], 0);
     let invalid = s.cli(&[
         "research",
@@ -1015,51 +1020,6 @@ fn date_overrides_preview_and_no_validation_run_share_the_public_schedule() {
 }
 
 #[test]
-fn identity_commands_use_the_shared_service_and_roundtrip_the_same_version() {
-    let s = Sandbox::new();
-    let w = Workspace::open(&s.client.root).unwrap();
-    let (_, _, t) = analytics_workflow::testing::synthetic(&w);
-    for args in [
-        vec!["identities", "show", t.identity_version.as_str()],
-        vec![
-            "identities",
-            "check",
-            t.identity_version.as_str(),
-            "--symbol",
-            "SH600000",
-            "--date",
-            "2008-01-02",
-        ],
-    ] {
-        let submission = s.json(&args);
-        let id = submission["task_id"].as_str().unwrap();
-        s.json(&["jobs", "wait", id, "--timeout", "15"]);
-        let result = s.json(&["jobs", "results", id]);
-        if args[1] == "check" {
-            assert_eq!(
-                result["details"]["security_id"],
-                analytics_workflow::demo::fixture_security_id("SH600000")
-            );
-        } else {
-            assert_eq!(result["details"]["schema_version"], 1);
-        }
-    }
-    let exported = s.json(&[
-        "identities",
-        "export",
-        &t.identity_version,
-        "identity-export",
-    ]);
-    let id = exported["task_id"].as_str().unwrap();
-    s.json(&["jobs", "wait", id, "--timeout", "15"]);
-    let imported = s.json(&["identities", "import", "identity-export/registry.json"]);
-    let id = imported["task_id"].as_str().unwrap();
-    s.json(&["jobs", "wait", id, "--timeout", "15"]);
-    let result = s.json(&["jobs", "results", id]);
-    assert_eq!(result["details"]["id"], t.identity_version);
-}
-
-#[test]
 fn stopping_idle_service_then_immediately_reconnecting_does_not_parse_empty_json() {
     let s = Sandbox::new();
     let initial = s.json(&["service", "status"]);
@@ -1067,5 +1027,35 @@ fn stopping_idle_service_then_immediately_reconnecting_does_not_parse_empty_json
     s.json(&["service", "stop"]);
     let after = s.json(&["service", "status"]);
     assert!(after["active"].is_null());
-    assert_eq!(after["protocol_version"], 7);
+    assert_eq!(after["protocol_version"], 9);
+}
+
+#[test]
+fn removed_identity_cli_is_rejected_and_research_stages_are_explicit() {
+    let s = Sandbox::new();
+    assert_eq!(s.cli(&["identities", "list"]).status.code(), Some(2));
+    for cmd in ["train", "backtest"] {
+        let out = s.cli(&["research", cmd, "--help"]);
+        assert!(out.status.success());
+    }
+    let w = Workspace::open(&s.client.root).unwrap();
+    let (m, a, t) = analytics_workflow::demo::create(&w).unwrap();
+    t.write(&w.resolve("stage-recipe.json")).unwrap();
+    let accepted = s.json(&[
+        "research",
+        "train",
+        "--template",
+        "stage-recipe.json",
+        "--market",
+        &m.id,
+        "--actions",
+        &a.id,
+    ]);
+    let id = accepted["task_id"].as_str().unwrap();
+    assert!(s.cli(&["jobs", "wait", id]).status.success());
+    assert_eq!(s.json(&["jobs", "results", id])["status"], "trained");
+    let accepted = s.json(&["research", "backtest", "--training", id, "--actions", &a.id]);
+    let id = accepted["task_id"].as_str().unwrap();
+    assert!(s.cli(&["jobs", "wait", id]).status.success());
+    assert_eq!(s.json(&["jobs", "results", id])["schema_version"], 11);
 }

@@ -6,7 +6,7 @@
 
 ## 请求与生命周期
 
-采集协议4是JSON Lines：`ready / progress / shard / action_shard / complete / error`。`adjustment_source`是必需字段；AKShare使用`sina_hfq`，yfinance使用`none`。GUI/CLI有合法默认值，`run --request`必须提供完整当前请求，旧请求不转换。
+采集协议6是JSON Lines：`ready / progress / shard / action_shard / complete / error`。`adjustment_source`是必需字段；AKShare使用`sina_hfq`，yfinance使用`none`。GUI/CLI有合法默认值，`run --request`必须提供完整当前请求，旧请求不转换。
 
 父服务保持控制管道；客户端退出不取消任务，服务断开、取消或超时回收进程。stdout只承载协议，诊断写stderr并落盘。Rust先核对代码、SDK、解释器身份再接受分片，完成时复核；每个证券分片包含原价/供应商报价及独立`adjustment`记录。owner冻结协议、转换版本、源码、依赖锁和解释器锁；恢复前重验证券、系数、结构化证据及每份HTTP响应体，不兼容旧检查点。
 
@@ -18,15 +18,15 @@ sequenceDiagram
   participant A as AKShare行情
   participant S as 新浪显式系数
   C->>W: 公共任务请求，冻结来源
-  W->>P: 协议4，工作区缓存与控制管道
+  W->>P: 协议6，工作区缓存与控制管道
   P-->>W: ready身份与版本
   W->>W: 验证后接受分片
   P->>A: 原价与供应商后复权表
   P->>S: 固定hfq.js地址，安全JSON解析
   P-->>W: 证券分片、日期系数、HTTP证据
-  W->>W: 身份、哈希、锚点、完整证券收据
+  W->>W: 来源映射、哈希、锚点、完整证券收据
   P-->>W: complete
-  W->>W: 原子发布规范格式3
+  W->>W: 原子发布规范格式5
   Note over W,P: 取消/崩溃：不发布部分版本，仅保留有效检查点
 ```
 
@@ -42,7 +42,7 @@ sequenceDiagram
 
 ## 文件与复现
 
-规范行情格式3：`market/daily_manifest.json`、`bars/ID.parquet`、`adjustments/ID.json`。manifest含实际日历、历史成员、源价格口径、固定`explicit-hfq-first-raw-close-v1;shares;cny;nulls`及`adjustment_anchors`。系数记录格式1包含证券、basis（explicit/price_index/unavailable）、源地址、观察末日和按日期升序的points；完整HTTP响应与SDK表格在raw内，二者不能互冒。
+规范行情格式5：`market/daily_manifest.json`、`bars/ID.parquet`、`adjustments/ID.json`。manifest含实际日历、历史成员、源价格口径、固定`explicit-hfq-first-raw-close-v1;shares;cny;nulls`及`adjustment_anchors`。系数记录格式3包含证券、basis（explicit/price_index/unavailable）、源地址、观察末日和按日期升序的points；完整HTTP响应与SDK表格在raw内，二者不能互冒。
 
 ```bash
 jfquant data collect --provider akshare --adjustment-source sina-hfq \
@@ -68,9 +68,9 @@ uvx ruff format --check crates/storage/collectors
 
 ## 实施公告采集
 
-announcements.py是第六个受签名白名单模块，依赖新增锁定pypdf5.9.0（共35项）。协议4的announcements操作接受同样证券和日期，固定CNINFO证券目录、搜索/PDF地址。先从官方目录核对代码、A股类别、交易所和唯一orgId，再以代码与机构ID联合查询，并核对返回身份；缺失或重复身份不猜。拒绝跨证券、重复ID、变化/截断分页、重定向、超大或加密附件。输出announcements.json及raw内PDF/文本/HTTP收据；每证券完整检查点可恢复，最终重验所有哈希。空文本、预案、风险提示和存在多候选日期保持待复核。
+announcements.py是第六个受签名白名单模块，依赖新增锁定pypdf5.9.0（共35项）。协议6的announcements操作接受同样证券和日期，固定CNINFO证券目录、搜索/PDF地址。先从官方目录核对代码、A股类别、交易所和唯一orgId，再以代码与机构ID联合查询，并核对返回身份；缺失或重复身份不猜。拒绝跨证券、重复ID、变化/截断分页、重定向、超大或加密附件。输出announcements.json及raw内PDF/文本/HTTP收据；每证券完整检查点可恢复，最终重验所有哈希。空文本、预案、风险提示和存在多候选日期保持待复核。
 
-公告元数据保存身份、公布日、源地址、解析版本、原始单位/金额引用和每字段候选，候选不会自动覆盖正式动作。Python配股表也只留证；申购期、费用、获配/退款/上市条款由实施证据补齐后通过公共修订进入账本。
+公告元数据保存来源映射、公布日、源地址、解析版本、原始单位/金额引用和每字段候选，候选不会自动覆盖正式动作。Python配股表也只留证；申购期、费用、获配/退款/上市条款由实施证据补齐后通过公共修订进入账本。
 
 `cninfo-candidates-v2`识别中文及斜杠/横线日期，并在表头/普通A股行列数严格一致时提取表格日期，保留占位符及逐字段原文。冲突候选不自动裁决；每股/每10股金额保存原单位和引用，税前/不同股东税后金额不会自动选为真实权益。2026-10-14抽查SH600000的2025年度实施公告：普通股登记2026-07-15，除息/发放2026-07-16，每股0.42元；原文也含其他股东税后0.378元，继续要求复核。证据保留在本项目target内，不提交；这是单份候选抽查，不证明历史动作完整。
 
@@ -78,11 +78,24 @@ announcements.py是第六个受签名白名单模块，依赖新增锁定pypdf5.
 
 隔离复杂供应商依赖并提供可分发的采集环境。AKShare与yfinance的Python生态方便读取公开接口，但不能承担研究准入裁定。内置运行环境和JSON Lines协议避免要求用户安装Python；Rust监督进程、限时、取消和检查点，并验证每个完整分片。
 
-设计依据：2026-10-14接受的证券身份与完整准入计划、组件接口及测试。未在代码或证据中确认的历史取舍不推定为既有设计理由；来源、法规或数据格式变化时重新评估。
+设计依据：2026-10-14接受的当前组件职责、可复现实验与用户研究需求、组件接口及测试。未在代码或证据中确认的历史取舍不推定为既有设计理由；来源、法规或数据格式变化时重新评估。
 
 
-## 独立证券与未裁定覆盖
+## 2026-10-14：直接代码读取与分阶段研究
 
-Why：单个来源失败不应使其他证券的完整证据丢失，也不能让成功响应被解释为全事件完整。协议4只将来源定位符传给库；Rust保留内部SEC身份并重验源响应。主进程逐证券捕获失败，发送shard_error后继续；存在缺分片时不发布完整快照。
+为什么调整：普通市场代码无需先登记身份；独立目录、审核和权威名录下载增加了研究前置负担。特殊历史代码仍需在快照内明确区间，不能将旧证券行情或权益接到另一证券。训练使用价量和标签，到账／交付资料只在实际账户执行时检查。
 
-公告 evidence 保存 all_announcements、pagination_complete、requested_announcement_dates及event_category_completeness=not_reviewed。元数据保留未被标题过滤的公告，供类别覆盖审核；候选正文及结构化表格不能自动证明不存在其他公司行动。日期与类别裁定由公共审计接口完成，不执行供应商返回文本。
+当前格式：模板6、需求3、准入4、股票池3、公司行动4、规范行情5、系数3、采集6、服务9、研究结果11；快照内来源映射1、训练产物1。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
+
+来源映射位于快照source_map.json，普通证券可用空exceptions。每个例外含市场代码、资产类别、适用区间及provider/symbol/coverage定位。冲突拒绝；SHT00018只能读取自身旧文件，不自动绑定SH600018。原Qlib文件不改写；显式重新登记冻结文件内容和映射。worker内缓存字段，取消检查以证券和固定批次执行。
+
+```mermaid
+flowchart LR
+  D[数据快照与少量来源例外] --> M[批量价量掩码与标签边界]
+  M --> T[训练与独立模型产物]
+  T --> P[测试期预测]
+  P --> E[实际订单和持仓检查]
+  E --> R[完整结果或未完成原因]
+```
+
+验收：nextest覆盖来源日期边界、三档掩码、训练／回测分离及模型保留；Clippy、Rustdoc、格式、组件文档和包内CLI共同检查。生成数据、模型、运行记录和安装包不提交。另一台Apple Silicon/macOS14实机验收继续待完成。

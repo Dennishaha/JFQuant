@@ -20,7 +20,7 @@ pub mod pool;
 pub mod research_quality;
 mod scalar_float;
 pub mod schedule;
-pub mod security;
+pub mod source_map;
 
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
@@ -94,6 +94,11 @@ pub struct DateRange {
 }
 
 impl DateRange {
+    /// Whether a date lies in this inclusive interval.
+    pub fn contains(&self, date: Date) -> bool {
+        self.start <= date && date <= self.end
+    }
+
     /// Returns an error when `start` is after `end`.
     pub fn validate(&self) -> Result<(), CoreError> {
         if self.start > self.end {

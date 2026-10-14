@@ -48,7 +48,7 @@ fn three_policies_distinguish_missing_input_null_propagation_and_security_exclus
     t.quality_policy.strictness = ResearchStrictness::AllowMissing;
     let (_, result) = execute_quality(&w, &m, &a, &t, false);
     let relaxed = result.unwrap().details;
-    assert_eq!(relaxed["admission"]["schema_version"], 2);
+    assert_eq!(relaxed["admission"]["schema_version"], 4);
     assert!(
         relaxed["admission"]["checks"]
             .as_array()
@@ -136,39 +136,6 @@ fn damaged_fields_and_coefficient_conflicts_block_all_modes_before_fit() {
             t.quality_policy.strictness = mode;
             let (run, result) = execute_quality(&w, &m, &a, &t, false);
             assert!(result.is_err(), "{mode:?}");
-            assert!(!w.resolve(&run.output).join("factor-cache").exists());
-            assert!(!w.resolve(run.output).join("fold-0000").exists());
-        }
-    }
-}
-
-#[test]
-fn possible_held_security_missing_quote_volume_or_payment_blocks_before_fit_in_every_mode() {
-    for case in ["payment", "close", "volume"] {
-        let temp = tempfile::tempdir().unwrap();
-        let w = Workspace::open(temp.path()).unwrap();
-        let (m, a, mut t) = demo::create(&w).unwrap();
-        let (m, a) = if case == "payment" {
-            let path = w.resolve(&a.path);
-            let mut book = ActionBundle::read(&path).unwrap();
-            book.actions[0].pay_date = None;
-            atomic_json(&path, &book).unwrap();
-            (m, w.register(&path).unwrap())
-        } else {
-            let root = w.resolve(m.path);
-            set_qlib_point(&root, "sh600000", case, 27, f32::NAN);
-            (w.register(&root).unwrap(), a)
-        };
-        for mode in [
-            ResearchStrictness::Strict,
-            ResearchStrictness::AllowMissing,
-            ResearchStrictness::QualifiedOnly,
-        ] {
-            t.quality_policy.strictness = mode;
-            let (run, result) = execute_quality(&w, &m, &a, &t, true);
-            let result = result.unwrap().details;
-            assert_eq!(result["ready"], false, "{mode:?}");
-            assert!(!result["settlement_issues"].as_object().unwrap().is_empty());
             assert!(!w.resolve(&run.output).join("factor-cache").exists());
             assert!(!w.resolve(run.output).join("fold-0000").exists());
         }
@@ -279,7 +246,7 @@ fn all_three_policies_preserve_qlib_parquet_identity_account_and_feature_parity(
 }
 
 #[test]
-fn future_event_category_gap_excludes_from_the_gap_without_changing_past() {
+fn future_event_category_gap_does_not_change_training_qualification() {
     let temp = tempfile::tempdir().unwrap();
     let w = Workspace::open(temp.path()).unwrap();
     let (m, a, mut t) = demo::create(&w).unwrap();
@@ -302,11 +269,11 @@ fn future_event_category_gap_excludes_from_the_gap_without_changing_past() {
         if b["date"].as_str().unwrap() < "2009-01-08" {
             assert_eq!(a, b);
         } else {
-            assert_eq!(a["retained"], 1);
+            assert_eq!(a["retained"], b["retained"]);
         }
     }
     let (_, result) = execute_quality(&w, &m, &a, &t, true);
-    assert_eq!(result.unwrap().details["ready"], false); // Earlier possible holdings keep later settlement requirements.
+    assert_eq!(result.unwrap().details["ready"], true);
 }
 
 #[test]
@@ -322,26 +289,44 @@ fn missing_later_source_alias_does_not_erase_earlier_qualified_history() {
         let path = entry.unwrap().path();
         fs::copy(&path, next.join(path.file_name().unwrap())).unwrap();
     }
-    let mut directory = w.identities(&t.identity_version).unwrap();
+    use analytics_core::source_map::{SourceException, SourceLocator, SourceMap};
     let id = demo::fixture_security_id("SH600000");
-    let record = directory.securities.get_mut(&id).unwrap();
-    let locator = record
-        .locators
-        .iter_mut()
-        .find(|l| l.provider == "qlib")
-        .unwrap();
-    locator.coverage.end = "2009-01-12".parse().unwrap();
-    let mut locator = locator.clone();
-    locator.symbol = "SH600002".into();
-    locator.coverage = analytics_core::DateRange {
-        start: "2010-01-02".parse().unwrap(),
+    let range = analytics_core::DateRange {
+        start: "2007-01-02".parse().unwrap(),
         end: "2010-01-12".parse().unwrap(),
     };
-    record.locators.push(locator);
-    let input = w.resolve("data/changed-alias/registry.json");
-    fs::create_dir_all(input.parent().unwrap()).unwrap();
-    atomic_json(&input, &directory).unwrap();
-    t.identity_version = w.import_identities(&input).unwrap().id;
+    let directory = SourceMap {
+        schema_version: 1,
+        exceptions: std::collections::BTreeMap::from([(
+            id.clone(),
+            SourceException {
+                exchange_symbol: id.clone(),
+                kind: "a_share".into(),
+                coverage: range.clone(),
+                locators: vec![
+                    SourceLocator {
+                        provider: "qlib".into(),
+                        symbol: id.clone(),
+                        coverage: analytics_core::DateRange {
+                            start: range.start,
+                            end: "2009-01-12".parse().unwrap(),
+                        },
+                        evidence: vec![],
+                    },
+                    SourceLocator {
+                        provider: "qlib".into(),
+                        symbol: "SH600002".into(),
+                        coverage: analytics_core::DateRange {
+                            start: "2010-01-02".parse().unwrap(),
+                            end: range.end,
+                        },
+                        evidence: vec![],
+                    },
+                ],
+            },
+        )]),
+    };
+    atomic_json(&root.join("source_map.json"), &directory).unwrap();
     let m = w.register(&root).unwrap();
     let before = research_requirements_with_actions(&w, &t, &m.id, Some(&a.id)).unwrap();
     fs::remove_file(next.join("amount.day.bin")).unwrap();
@@ -352,9 +337,9 @@ fn missing_later_source_alias_does_not_erase_earlier_qualified_history() {
     assert_eq!(&before[..33], &after[..33]);
     assert_eq!(after[33]["retained"], 1);
     let (_, result) = execute_quality(&w, &m, &a, &t, false);
-    assert_eq!(result.unwrap().details["schema_version"], 9);
+    assert_eq!(result.unwrap().details["schema_version"], 11);
     let mut dataset = analytics_storage::daily::DailyDataset::open(&root).unwrap();
-    dataset.bind_registry(directory).unwrap();
+    dataset.bind_source_map(directory).unwrap();
     dataset
         .restrict_reads(analytics_core::DateRange {
             start: "2007-01-02".parse().unwrap(),
@@ -362,38 +347,4 @@ fn missing_later_source_alias_does_not_erase_earlier_qualified_history() {
         })
         .unwrap();
     assert!(dataset.field(&id, "amount").is_ok());
-}
-
-#[test]
-fn failure_reasons_reference_the_verified_bundle_without_repeating_every_raw_document() {
-    let temp = tempfile::tempdir().unwrap();
-    let w = Workspace::open(temp.path()).unwrap();
-    let (m, a, t) = demo::create(&w).unwrap();
-    let path = w.resolve(a.path);
-    let mut book = ActionBundle::read(&path).unwrap();
-    for n in 0..100 {
-        let name = format!("unrelated-{n}.json");
-        let bytes = format!("{{\"fixture\":{n}}}").into_bytes();
-        fs::write(path.parent().unwrap().join("raw").join(&name), &bytes).unwrap();
-        book.raw_sha256
-            .insert(name, format!("sha256:{:x}", Sha256::digest(bytes)));
-    }
-    book.actions[0].pay_date = None;
-    atomic_json(&path, &book).unwrap();
-    let a = w.register(&path).unwrap();
-    let (_, result) = execute_quality(&w, &m, &a, &t, true);
-    let result = result.unwrap().details;
-    let check = result["admission"]["checks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|c| c["category"] == "settlement" && c["status"] == "failed")
-        .unwrap();
-    let evidence = check["evidence"].as_array().unwrap();
-    assert!(evidence.len() < 10);
-    assert!(
-        evidence
-            .iter()
-            .any(|e| e.as_str().unwrap().starts_with("action-bundle:sha256:"))
-    );
 }

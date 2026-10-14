@@ -48,56 +48,6 @@ pub struct CollectionRequest {
     pub universes: BTreeSet<String>,
 }
 impl CollectionRequest {
-    /// Resolve user selectors to immutable IDs while retaining the explicitly chosen provider.
-    pub fn bind_identities(
-        &mut self,
-        r: &analytics_core::security::SecurityRegistry,
-    ) -> io::Result<()> {
-        r.validate().map_err(invalid)?;
-        let provider = match self.provider {
-            Provider::Akshare => "akshare",
-            Provider::Yfinance => "yfinance",
-        };
-        let mut ids = BTreeSet::new();
-        let mut benchmarks = BTreeSet::new();
-        let mut bindings = BTreeMap::new();
-        for selector in &self.instruments {
-            let id = r
-                .resolve("exchange", selector, Some(self.start))
-                .map_err(invalid)?;
-            if r.resolve("exchange", selector, Some(self.end))
-                .map_err(invalid)?
-                != id
-            {
-                return Err(invalid("collection selector crosses securities"));
-            }
-            let record = &r.securities[id];
-            let ls: Vec<_> = record
-                .locators
-                .iter()
-                .filter(|l| {
-                    l.provider == provider
-                        && l.coverage.start <= self.start
-                        && l.coverage.end >= self.end
-                })
-                .collect();
-            if ls.len() != 1 {
-                return Err(invalid(
-                    "provider identity does not cover the requested range",
-                ));
-            }
-            bindings.insert(id.into(), ls[0].symbol.clone());
-            ids.insert(id.into());
-            if self.benchmarks.contains(selector) {
-                benchmarks.insert(id.into());
-            }
-        }
-        self.instruments = ids;
-        self.benchmarks = benchmarks;
-        self.source_bindings = bindings;
-        self.validate()
-    }
-
     /// Validate before a process is created or a checkpoint changed.
     pub fn validate(&self) -> io::Result<()> {
         if self.start > self.end
@@ -129,21 +79,17 @@ impl CollectionRequest {
         let mut used = BTreeSet::new();
         for id in &self.instruments {
             validate_instrument(id).map_err(invalid)?;
-            if analytics_core::security::is_security_id(id) {
-                let source = self.source_bindings.get(id).ok_or_else(|| {
-                    invalid("opaque ID cannot be sent to provider; explicit locator required")
-                })?;
-                analytics_core::pool::validate_exchange_symbol(source).map_err(invalid)?;
-                if !used.insert(source) {
-                    return Err(invalid(
-                        "duplicate provider locator for different securities",
-                    ));
-                }
+            let source = self.source_bindings.get(id).unwrap_or(id);
+            analytics_core::pool::validate_exchange_symbol(source).map_err(invalid)?;
+            if !used.insert(source) {
+                return Err(invalid("duplicate provider locator"));
             }
         }
-        if self.source_bindings.keys().any(|id| {
-            !self.instruments.contains(id) || !analytics_core::security::is_security_id(id)
-        }) {
+        if self
+            .source_bindings
+            .keys()
+            .any(|id| !self.instruments.contains(id))
+        {
             return Err(invalid("unexpected source binding"));
         }
         if self
@@ -156,7 +102,8 @@ impl CollectionRequest {
         Ok(())
     }
 }
-fn collector_signature() -> String {
+/// Hash of every bundled collector implementation file, frozen into acquired source packages.
+pub fn collector_signature() -> String {
     let mut hash = Sha256::new();
     for (name, bytes) in [
         (
@@ -371,7 +318,7 @@ fn collect_with_command(
     fs::create_dir_all(staging.join("market/adjustments"))?;
     fs::create_dir_all(staging.join("raw"))?;
     let owner = staging.join("owner.json");
-    let owner_value = json!({"operation":operation,"request":request,"collector_protocol":4,"normalization":NORMALIZATION,
+    let owner_value = json!({"operation":operation,"request":request,"collector_protocol":6,"normalization":NORMALIZATION,
         "collector_signature":collector_signature(),"dependencies_sha256":dependencies_signature(),
         "python_runtime_sha256":format!("sha256:{:x}",Sha256::digest(include_bytes!("../collectors/python-runtime.lock.json")))});
     if owner.exists() {
@@ -502,7 +449,7 @@ fn collect_with_command(
         log.sync_all()
     });
     let mut payload = serde_json::to_value(request).map_err(invalid)?;
-    payload["version"] = json!(4);
+    payload["version"] = json!(6);
     payload["expected_collector_signature"] = json!(collector_signature());
     payload["operation"] = json!(operation);
     let native: BTreeMap<String, String> = pending
@@ -588,7 +535,7 @@ fn collect_with_command(
                             }
                         }
                     }
-                    if msg["version"] != 4 {
+                    if msg["version"] != 6 {
                         return Err(invalid("collector_protocol_mismatch"));
                     }
                     if completed.is_some() {
@@ -789,6 +736,7 @@ fn collect_with_command(
         &staging.join("raw/complete-sources-structured.json"),
         &complete,
     )?;
+
     if receipts.keys().cloned().collect::<BTreeSet<_>>() != request.instruments {
         return Err(invalid("incomplete collection"));
     }
@@ -831,14 +779,14 @@ fn collect_with_command(
     }
     if operation == "actions" {
         let mut book = crate::corporate_actions::ActionBundle {
-            schema_version: 3,
+            schema_version: 4,
             source_bindings: request
                 .source_bindings
                 .iter()
                 .map(|(id, symbol)| {
                     (
                         id.clone(),
-                        analytics_core::security::SecurityLocator {
+                        analytics_core::source_map::SourceLocator {
                             provider: match request.provider {
                                 Provider::Akshare => "akshare",
                                 Provider::Yfinance => "yfinance",
@@ -946,7 +894,7 @@ fn collect_with_command(
         }
     }
     let manifest = DailyManifest {
-        schema_version: 4,
+        schema_version: 5,
         calendar: serde_json::from_value(complete["calendar"].clone()).map_err(invalid)?,
         universes: serde_json::from_value(complete["universes"].clone()).map_err(invalid)?,
         instruments: request.instruments.clone(),
@@ -960,6 +908,45 @@ fn collect_with_command(
         adjustment_anchors,
     };
     save(&staging.join("market/daily_manifest.json"), &manifest)?;
+    let source_map = analytics_core::source_map::SourceMap {
+        schema_version: 1,
+        exceptions: request
+            .source_bindings
+            .iter()
+            .filter(|(id, source)| id != source)
+            .map(|(id, source)| {
+                let coverage = analytics_core::DateRange {
+                    start: request.start,
+                    end: request.end,
+                };
+                (
+                    id.clone(),
+                    analytics_core::source_map::SourceException {
+                        exchange_symbol: source.clone(),
+                        kind: if request.benchmarks.contains(id) {
+                            "price_index"
+                        } else {
+                            "a_share"
+                        }
+                        .into(),
+                        coverage: coverage.clone(),
+                        locators: vec![analytics_core::source_map::SourceLocator {
+                            provider: match request.provider {
+                                Provider::Akshare => "akshare",
+                                Provider::Yfinance => "yfinance",
+                            }
+                            .into(),
+                            symbol: source.clone(),
+                            coverage,
+                            evidence: Vec::new(),
+                        }],
+                    },
+                )
+            })
+            .collect(),
+    };
+    source_map.validate().map_err(invalid)?;
+    save(&staging.join("market/source_map.json"), &source_map)?;
     crate::daily::DailyDataset::open(staging.join("market"))?;
     let mut evidence_hashes = BTreeMap::new();
     for e in fs::read_dir(staging.join("raw"))? {
@@ -973,7 +960,7 @@ fn collect_with_command(
     }
     save(
         &staging.join("jfquant_source.json"),
-        &json!({"downloader":"JFQuant analytics-storage","independent_download":true,"snapshot_verified":true,"identity_bound":!request.source_bindings.is_empty(),"provider":request.provider,"request":request,"evidence_sha256":evidence_hashes,"collector_protocol":4,"versions":complete["versions"],"collector_signature":complete["collector_signature"],"python_runtime":serde_json::from_slice::<Value>(include_bytes!("../collectors/python-runtime.lock.json")).map_err(invalid)?,"calendar_source":"akshare.tool_trade_date_hist_sina","dependencies_sha256":format!("sha256:{:x}",Sha256::digest(include_bytes!("../collectors/requirements.lock"))),"price_basis":manifest.price_basis,"normalization":manifest.normalization,"adjustment_source":request.adjustment_source,"adjustment_anchors":manifest.adjustment_anchors}),
+        &json!({"downloader":"JFQuant analytics-storage","independent_download":true,"snapshot_verified":true,"exception_bindings":!request.source_bindings.is_empty(),"provider":request.provider,"request":request,"evidence_sha256":evidence_hashes,"collector_protocol":6,"versions":complete["versions"],"collector_signature":complete["collector_signature"],"python_runtime":serde_json::from_slice::<Value>(include_bytes!("../collectors/python-runtime.lock.json")).map_err(invalid)?,"calendar_source":"akshare.tool_trade_date_hist_sina","dependencies_sha256":format!("sha256:{:x}",Sha256::digest(include_bytes!("../collectors/requirements.lock"))),"price_basis":manifest.price_basis,"normalization":manifest.normalization,"adjustment_source":request.adjustment_source,"adjustment_anchors":manifest.adjustment_anchors}),
     )?;
     Ok(staging.join("market"))
 }
@@ -1040,10 +1027,11 @@ mod supervisor_tests {
         fs::write(&script,r#"
 import sys,json,time,os,hashlib
 r=json.loads(sys.stdin.readline());mode=sys.argv[1]
+open('collector.pid','w').write(str(os.getpid()))
 versions={'akshare':'1.19.1','yfinance':'1.7.0','python':'3.12.15'}
 identity=r['expected_collector_signature'] if mode!='bad_identity' else 'wrong code'
-if mode!='missing_identity': print(json.dumps({'version':4,'event':'ready','collector_signature':identity,'versions':versions}),flush=True)
-print(json.dumps({'version':4,'event':'progress','message':'ready'}),flush=True)
+if mode!='missing_identity': print(json.dumps({'version':6,'event':'ready','collector_signature':identity,'versions':versions}),flush=True)
+print(json.dumps({'version':6,'event':'progress','message':'ready'}),flush=True)
 if mode=='timeout': time.sleep(30)
 if mode=='crash': sys.exit(1)
 if mode=='bad_protocol': print(json.dumps({'version':0,'event':'complete'}),flush=True);sys.exit(0)
@@ -1052,13 +1040,13 @@ if 'SH600000' in r['instruments']:
  open('raw/http-fixture.body','wb').write(body)
  evidence={'kind':'structured_library_response','http_receipts':[{'filename':'http-fixture.body','sha256':'sha256:'+hashlib.sha256(body).hexdigest(),'url':'https://example.test/history'}]}
  if r['operation']=='actions':
-  print(json.dumps({'version':4,'event':'action_shard','instrument':'SH600000','history_verified':True,'records':[],'evidence':evidence}),flush=True)
+  print(json.dumps({'version':6,'event':'action_shard','instrument':'SH600000','history_verified':True,'records':[],'evidence':evidence}),flush=True)
  b={'instrument_id':'SH600000','trade_date':'2020-01-02','open':10.,'high':11.,'low':9.,'close':10.,'adj_open':10.,'adj_high':11.,'adj_low':9.,'adj_close':10.,'volume':1000.,'amount':10000.}
- adjustment={'schema_version':2,'instrument_id':'SH600000','source_symbol':'SH600000','basis':{'kind':'explicit','source':'sina_hfq','source_url':'https://finance.sina.com.cn/realstock/company/sh600000/hfq.js','verified_through':r['end'],'points':[{'effective_date':'1900-01-01','factor':'2'}]}}
- if r['operation']=='market': print(json.dumps({'version':4,'event':'shard','instrument':'SH600000','bars':[b],'adjustment':adjustment,'evidence':evidence}),flush=True)
+ adjustment={'schema_version':3,'instrument_id':'SH600000','source_symbol':'SH600000','basis':{'kind':'explicit','source':'sina_hfq','source_url':'https://finance.sina.com.cn/realstock/company/sh600000/hfq.js','verified_through':r['end'],'points':[{'effective_date':'1900-01-01','factor':'2'}]}}
+ if r['operation']=='market': print(json.dumps({'version':6,'event':'shard','instrument':'SH600000','bars':[b],'adjustment':adjustment,'evidence':evidence}),flush=True)
 if mode=='partial': sys.exit(1)
-print(json.dumps({'version':4,'event':'complete','collector_signature':r['expected_collector_signature'],'calendar':['2020-01-02','2020-01-03'],'universes':{},'versions':versions}),flush=True)
-if mode=='after_complete': print(json.dumps({'version':4,'event':'progress','message':'late'}),flush=True)
+print(json.dumps({'version':6,'event':'complete','collector_signature':r['expected_collector_signature'],'calendar':['2020-01-02','2020-01-03'],'universes':{},'versions':versions}),flush=True)
+if mode=='after_complete': print(json.dumps({'version':6,'event':'progress','message':'late'}),flush=True)
 "#).unwrap();
         let mut c = Command::new(runtime().unwrap());
         c.args(["-I", "-B", "-u"]).arg(script).arg(mode);
@@ -1111,9 +1099,8 @@ if mode=='after_complete': print(json.dumps({'version':4,'event':'progress','mes
     fn opaque_ids_are_not_sent_to_the_provider_and_shards_keep_both_identities() {
         let d = tempfile::tempdir().unwrap();
         let mut r = request();
-        let id = "SEC-00000000000000000000000000000001";
+        let id = "SH600000_OLD";
         r.instruments = [id.to_string()].into();
-        assert!(r.validate().is_err());
         r.source_bindings.insert(id.into(), "SH600000".into());
         let stage = d.path().join("bound");
         collect_with_command(
@@ -1129,6 +1116,8 @@ if mode=='after_complete': print(json.dumps({'version':4,'event':'progress','mes
         assert_eq!(bars[0].instrument_id, id);
         let adjustment = AdjustmentRecord::read(&stage.join("market"), id).unwrap();
         assert_eq!(adjustment.source_symbol, "SH600000");
+        let data = crate::daily::DailyDataset::open(stage.join("market")).unwrap();
+        assert_eq!(data.exchange_symbol(id, r.start).unwrap(), "SH600000");
         assert!(!stage.join("market/bars/SH600000.parquet").exists());
     }
     #[test]

@@ -73,7 +73,7 @@ fn supplement_pay_dates(
     saved_only: bool,
 ) -> io::Result<ActionBundle> {
     source.validate_identity()?;
-    if start > end || source.schema_version != 3 {
+    if start > end || source.schema_version != 4 {
         return Err(invalid("invalid payment range/bundle"));
     }
     let symbols: Vec<_> = source
@@ -276,7 +276,7 @@ mod tests {
         let html = "(600000.SH)<div id=\"cp_pBottom\"><table><tr><td>公告日期</td><td>年度</td><td>分红</td><td>送股</td><td>股权登记日</td><td>除权除息日</td><td>派送日</td></tr><tr><td>2017/07/08</td><td>2016</td><td>¥3.700</td><td>-/-</td><td>2017/07/13</td><td>2017/07/14</td><td>2017/07/18</td></tr></table></div>";
         fs::write(root.join("raw").join(name), html).unwrap();
         let source = ActionBundle {
-            schema_version: 3,
+            schema_version: 4,
             source_bindings: Default::default(),
             coverage: Default::default(),
             downloader: "JFQuant analytics-storage corporate-actions".into(),

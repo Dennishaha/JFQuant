@@ -24,9 +24,8 @@ pub struct PlatformState {
     pub schedule_editor: String,
     pub date_editor_valid: bool,
     pub action_review_editor: String,
-    pub identity_path: String,
-    pub identity_symbol: String,
-    pub identity_date: String,
+    /// Previously completed training task ID.
+    pub training_job: String,
     pub action_review_instrument: String,
     pub action_evidence_manifest: String,
     pub datasets: Vec<DataVersion>,
@@ -69,10 +68,8 @@ impl Default for PlatformState {
             template: ResearchTemplate::builtin().expect("valid built-in recipe"),
             schedule_editor: String::new(),
             date_editor_valid: true,
+            training_job: String::new(),
             action_review_editor: String::new(),
-            identity_path: String::new(),
-            identity_symbol: "SHT00018".into(),
-            identity_date: "2005-06-01".into(),
             action_review_instrument: "SH600000".into(),
             action_evidence_manifest: String::new(),
             datasets: vec![],
@@ -387,16 +384,10 @@ pub fn data_panel(
                     let ids = |v: &str| {
                         v.split([',', '，', ' ', '\n'])
                             .filter(|s| !s.trim().is_empty())
-                            .map(|s| {
-                                if analytics_core::security::is_security_id(s.trim()) {
-                                    s.trim().to_owned()
-                                } else {
-                                    s.trim().to_ascii_uppercase()
-                                }
-                            })
+                            .map(|s| s.trim().to_ascii_uppercase())
                             .collect()
                     };
-                    let mut r = CollectionRequest {
+                    let r = CollectionRequest {
                         source_bindings: Default::default(),
                         provider: state.platform.collection_provider,
                         adjustment_source: state.platform.adjustment_source,
@@ -413,14 +404,6 @@ pub fn data_panel(
                         .map(|(_, id)| id.to_string())
                         .collect(),
                     };
-                    if !state.platform.template.identity_version.is_empty() {
-                        let w = state.platform.workspace.as_ref().ok_or("工作区尚未选择")?;
-                        r.bind_identities(
-                            &w.identities(&state.platform.template.identity_version)
-                                .map_err(|e| e.to_string())?,
-                        )
-                        .map_err(|e| e.to_string())?;
-                    }
                     r.validate().map_err(|e| e.to_string())?;
                     Ok(r)
                 };
@@ -439,20 +422,14 @@ pub fn data_panel(
                     let ids = |v: &str| {
                         v.split([',', '，', ' ', '\n'])
                             .filter(|s| !s.trim().is_empty())
-                            .map(|s| {
-                                if analytics_core::security::is_security_id(s.trim()) {
-                                    s.trim().to_owned()
-                                } else {
-                                    s.trim().to_ascii_uppercase()
-                                }
-                            })
+                            .map(|s| s.trim().to_ascii_uppercase())
                             .collect::<std::collections::BTreeSet<_>>()
                     };
                     let instruments = ids(&state.platform.collection_symbols)
                         .difference(&ids(&state.platform.collection_benchmarks))
                         .cloned()
                         .collect();
-                    let mut r = CollectionRequest {
+                    let r = CollectionRequest {
                         source_bindings: Default::default(),
                         provider: state.platform.collection_provider,
                         adjustment_source: state.platform.adjustment_source,
@@ -462,14 +439,6 @@ pub fn data_panel(
                         benchmarks: Default::default(),
                         universes: Default::default(),
                     };
-                    if !state.platform.template.identity_version.is_empty() {
-                        let w = state.platform.workspace.as_ref().ok_or("工作区尚未选择")?;
-                        r.bind_identities(
-                            &w.identities(&state.platform.template.identity_version)
-                                .map_err(|e| e.to_string())?,
-                        )
-                        .map_err(|e| e.to_string())?;
-                    }
                     r.validate().map_err(|e| e.to_string())?;
                     Ok(r)
                 };
@@ -729,22 +698,6 @@ pub fn research_panel(
             &state.platform.datasets,
         );
     });
-    ui.collapsing("证券身份、别名与承继证据",|ui|{
-        ui.label("同一交易代码可能先后属于不同证券。身份目录保存主体、有效日期和证据；历史行情缺失仍会阻止研究。");
-        ui.add_enabled_ui(enabled,|ui|{
-            ui.horizontal(|ui|{ui.label("身份目录版本");ui.text_edit_singleline(&mut state.platform.template.identity_version);});
-            ui.horizontal(|ui|{ui.label("输入JSON（采集地址／身份目录）或导出目录");ui.text_edit_singleline(&mut state.platform.identity_path);});
-            ui.horizontal(|ui|{ui.label("来源别名");ui.text_edit_singleline(&mut state.platform.identity_symbol);ui.label("有效日期");ui.text_edit_singleline(&mut state.platform.identity_date);});
-            let mut operation=None;
-            ui.horizontal(|ui|{
-                for (label,method) in [("列出身份版本","list"),("查看身份与证据","show"),("核验并登记新版本","review"),("导出完整证据包","export"),("按日期查别名","check")] {if ui.button(label).clicked(){operation=Some(method);}}
-            });
-            if let Some(method)=operation {let date=if method=="check" {match state.platform.identity_date.parse(){Ok(d)=>Some(d),Err(_)=>{state.platform.error=Some("身份查询日期无效".into());return;}}}else{None};
-                submit(state,worker,cancel_slot,WorkflowRequest::IdentityOperation{method:method.into(),id:state.platform.template.identity_version.clone(),path:PathBuf::from(state.platform.identity_path.trim()),provider:"qlib".into(),symbol:state.platform.identity_symbol.clone(),date});
-            }
-        });
-        if !state.platform.details.is_null(){ui.label("核验结果与证据明细见下方任务结果；登记后的版本ID填入研究模板。");}
-    });
     ui.collapsing("股票池、基准与日期调整", |ui| {
         ui.add_enabled_ui(enabled, |ui| {
             ui.horizontal(|ui| {
@@ -756,8 +709,8 @@ pub fn research_panel(
             ui.horizontal(|ui| {ui.label("移除持仓");ui.selectable_value(&mut state.platform.template.pool_exit_policy,PoolExitPolicy::NextTradableDay,"下一可交易日退出");ui.selectable_value(&mut state.platform.template.pool_exit_policy,PoolExitPolicy::NextRebalance,"下次正常调仓退出");});
             ui.horizontal(|ui| {
                 if ui.button("载入股票池JSON").clicked() && let Some(p)=rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file(){match fs::read_to_string(p){Ok(s)=>state.platform.pool_editor=s,Err(e)=>state.platform.error=Some(e.to_string())}}
-                if ui.button("自选池示例").clicked(){state.platform.pool_editor=serde_json::json!({"schema_version":2,"name":"自选池","coverage":{"start":state.platform.start,"end":state.platform.end},"expression":{"kind":"symbols","instruments":["SH600000","SZ000001"]},"adjustments":[]}).to_string();}
-                if ui.button("指数组合示例").clicked(){state.platform.pool_editor=serde_json::json!({"schema_version":2,"name":"沪深300与中证500并集","coverage":{"start":state.platform.start,"end":state.platform.end},"expression":{"kind":"union","inputs":[{"kind":"universe","version":state.platform.market,"universe":"csi300"},{"kind":"universe","version":state.platform.market,"universe":"csi500"}]},"adjustments":[]}).to_string();}
+                if ui.button("自选池示例").clicked(){state.platform.pool_editor=serde_json::json!({"schema_version":3,"name":"自选池","coverage":{"start":state.platform.start,"end":state.platform.end},"expression":{"kind":"symbols","instruments":["SH600000","SZ000001"]},"adjustments":[]}).to_string();}
+                if ui.button("指数组合示例").clicked(){state.platform.pool_editor=serde_json::json!({"schema_version":3,"name":"沪深300与中证500并集","coverage":{"start":state.platform.start,"end":state.platform.end},"expression":{"kind":"union","inputs":[{"kind":"universe","version":state.platform.market,"universe":"csi300"},{"kind":"universe","version":state.platform.market,"universe":"csi500"}]},"adjustments":[]}).to_string();}
             });
             ui.label("股票池定义：支持 union / intersection / difference；adjustments 按 effective_date 设置 add / remove。");
             ui.add(egui::TextEdit::multiline(&mut state.platform.pool_editor).desired_rows(6).desired_width(f32::INFINITY));
@@ -950,6 +903,45 @@ pub fn research_panel(
             Err(e) => state.platform.error = Some(e.to_string()),
         }
     }
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(ready, egui::Button::new("仅训练模型"))
+            .clicked()
+        {
+            submit(
+                state,
+                worker,
+                cancel_slot,
+                WorkflowRequest::TrainResearch {
+                    template: Box::new(state.platform.template.clone()),
+                    market: state.platform.market.clone(),
+                    actions: state.platform.actions.clone(),
+                },
+            );
+        }
+        ui.label("训练任务ID");
+        ui.text_edit_singleline(&mut state.platform.training_job);
+        if ui
+            .add_enabled(
+                enabled && !state.platform.actions.is_empty(),
+                egui::Button::new("使用已有模型回测"),
+            )
+            .clicked()
+        {
+            match state.platform.training_job.parse() {
+                Ok(training) => submit(
+                    state,
+                    worker,
+                    cancel_slot,
+                    WorkflowRequest::BacktestResearch {
+                        training,
+                        actions: state.platform.actions.clone(),
+                    },
+                ),
+                Err(_) => state.platform.error = Some("请填写已完成训练的任务ID".into()),
+            }
+        }
+    });
     show_results(ui, &state.platform.details);
 }
 pub(crate) fn status_label(s: RunStatus) -> &'static str {
@@ -1174,10 +1166,26 @@ fn show_results(ui: &mut egui::Ui, value: &Value) {
     if value.is_null() {
         return;
     }
+    let trained = value["status"] == "trained"
+        || value["training_artifact"]["status"] == "trained"
+        || value["training_complete"] == true;
+    if value["status"] == "trained" {
+        ui.label("训练已完成，模型已保存。尚未执行回测。");
+    }
     if value["ready"] == false {
         ui.colored_label(
             crate::theme::semantic(ui.ctx()).warning,
-            "数据未就绪，未进行训练与回测。",
+            if trained {
+                "回测未完成。已保存训练模型和截至失败点的账户记录。"
+            } else {
+                "训练数据未就绪，尚未进行训练与回测。"
+            },
+        );
+    }
+    if value["backtest_status"] == "no_valid_trades" {
+        ui.colored_label(
+            crate::theme::semantic(ui.ctx()).warning,
+            "无有效交易。账户保留现金，本次结果不能用于判断策略效果。",
         );
     }
     if value["input_kind"] == "synthetic_fixture" {

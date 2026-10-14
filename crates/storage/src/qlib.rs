@@ -25,6 +25,7 @@ pub struct QlibDataset {
 }
 
 /// One field's calendar-aligned observations; non-finite values remain missing.
+#[derive(Clone)]
 pub struct DailyField {
     /// First calendar index stored in the file.
     pub start: usize,

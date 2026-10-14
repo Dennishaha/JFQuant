@@ -2,8 +2,7 @@
 use crate::*;
 /// Deterministic IDs belonging only to explicitly marked synthetic inputs.
 pub fn fixture_security_id(code: &str) -> String {
-    let hash = Sha256::digest(format!("JFQuant complete synthetic security {code}"));
-    format!("SEC-{}", Uuid::from_slice(&hash[..16]).unwrap().simple())
+    code.to_owned()
 }
 /// Small independently constructed input package, not a public provider cache.
 pub fn create(w: &Workspace) -> Result<(DataVersion, DataVersion, ResearchTemplate)> {
@@ -72,49 +71,10 @@ pub fn create(w: &Workspace) -> Result<(DataVersion, DataVersion, ResearchTempla
             write(id, name, values)?;
         }
     }
-    let identity_root = w.resolve(format!("{base}/identities"));
-    fs::create_dir_all(&identity_root)?;
-    let mut directory = analytics_core::security::SecurityRegistry {
-        successions: Vec::new(),
-        schema_version: 1,
-        reason: "complete independently generated acceptance fixture".into(),
-        synthetic_fixture: true,
-        securities: Default::default(),
-        evidence: Default::default(),
-    };
     let lifetime = analytics_core::DateRange {
         start: dates[0].parse()?,
         end: dates.last().unwrap().parse()?,
     };
-    for code in ["SH600000", "SH600001", "SH000905"] {
-        let id = fixture_security_id(code);
-        directory.securities.insert(
-            id.clone(),
-            analytics_core::security::SecurityRecord {
-                security_id: id,
-                issuer: format!("synthetic issuer {code}"),
-                name: code.into(),
-                kind: if code == "SH000905" {
-                    "price_index"
-                } else {
-                    "a_share"
-                }
-                .into(),
-                lifetime: lifetime.clone(),
-                locators: ["exchange", "qlib", "akshare"]
-                    .map(|provider| analytics_core::security::SecurityLocator {
-                        provider: provider.into(),
-                        symbol: code.into(),
-                        coverage: lifetime.clone(),
-                        evidence: vec![],
-                    })
-                    .to_vec(),
-                evidence: vec![],
-            },
-        );
-    }
-    atomic_json(&identity_root.join("registry.json"), &directory)?;
-    let identities = w.import_identities(&identity_root.join("registry.json"))?;
     let dir = w.resolve(format!("{base}/actions"));
     fs::create_dir_all(dir.join("raw"))?;
     let actions = ["SH600000", "SH600001"]
@@ -133,7 +93,7 @@ pub fn create(w: &Workspace) -> Result<(DataVersion, DataVersion, ResearchTempla
         })
         .to_vec();
     let mut book = ActionBundle {
-        schema_version: 3,
+        schema_version: 4,
         source_bindings: Default::default(),
         coverage: Default::default(),
         downloader: "JFQuant analytics-workflow synthetic-demo-v1".into(),
@@ -148,7 +108,6 @@ pub fn create(w: &Workspace) -> Result<(DataVersion, DataVersion, ResearchTempla
     let m = w.register(&root)?;
     let a = w.register(&dir.join("actions.json"))?;
     let mut t = ResearchTemplate::builtin()?;
-    t.identity_version = identities.id;
     t.name = "合成演示 · 流程和股数账本验证".into();
     t.schedule = analytics_core::schedule::Schedule::Rolling {
         first: analytics_core::schedule::Fold {
@@ -275,7 +234,7 @@ pub fn create_canonical(w: &Workspace) -> Result<(DataVersion, DataVersion, Rese
             }
         };
         let record = AdjustmentRecord {
-            schema_version: 2,
+            schema_version: 3,
             instrument_id: fixture_security_id(id),
             source_symbol: id.clone(),
             basis,
@@ -288,9 +247,7 @@ pub fn create_canonical(w: &Workspace) -> Result<(DataVersion, DataVersion, Rese
             serde_json::to_vec_pretty(&record)?,
         )?;
     }
-    let mut pool = source.pool("csi500")?;
-    let directory = w.identities(&template.identity_version)?;
-    crate::identities::resolve_pool(&directory, &mut pool);
+    let pool = source.pool("csi500")?;
     let mut adjustment_anchors = std::collections::BTreeMap::new();
     for id in &ids {
         let record =
@@ -298,7 +255,7 @@ pub fn create_canonical(w: &Workspace) -> Result<(DataVersion, DataVersion, Rese
         adjustment_anchors.insert(fixture_security_id(id), record.anchor(source.calendar[0])?);
     }
     let manifest = DailyManifest {
-        schema_version: 4,
+        schema_version: 5,
         calendar: source.calendar,
         universes: std::collections::BTreeMap::from([("csi500".into(), pool)]),
         instruments: ids.iter().map(|id| fixture_security_id(id)).collect(),

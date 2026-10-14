@@ -43,7 +43,7 @@ const SUPPORTED_RESEARCH_INPUTS: [&str; 15] = [
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// Current strict integer-share research result format.
-pub const RESEARCH_SCHEMA_VERSION: u32 = 9;
+pub const RESEARCH_SCHEMA_VERSION: u32 = 11;
 
 /// A result cannot be interpreted using the current research contract.
 #[derive(Debug, thiserror::Error)]
@@ -116,7 +116,7 @@ fn validate_price_source(
         _ => return Err("missing/unsupported coefficient metadata".into()),
     };
     AdjustmentRecord {
-        schema_version: 2,
+        schema_version: 3,
         instrument_id: id.into(),
         source_symbol: input["source_symbol"].as_str().unwrap_or(id).into(),
         basis: adjustment,
@@ -133,8 +133,12 @@ pub fn validate_result(
     let validate = || -> Result<()> {
         if value["schema_version"] != RESEARCH_SCHEMA_VERSION
             || value["execution"]["mode"] != "raw_integer_shares"
+            || !matches!(
+                value["backtest_status"].as_str(),
+                Some("completed" | "no_valid_trades")
+            )
         {
-            return Err("requires research schema 9 and raw_integer_shares execution".into());
+            return Err("requires research schema 11 and raw_integer_shares execution".into());
         }
         let hash = |value: &serde_json::Value| {
             value.as_str().is_some_and(|s| {
@@ -225,17 +229,16 @@ pub fn validate_result(
         {
             return Err("sample/null policies must preserve the original universe".into());
         }
-        let directory: analytics_core::security::SecurityRegistry =
-            serde_json::from_value(execution["identity_registry"].clone())?;
-        directory.validate()?;
-        if directory.synthetic_fixture != (value["input_kind"] == "synthetic_fixture")
-            || execution["identity_signature"]
-                != format!(
-                    "sha256:{:x}",
-                    Sha256::digest(serde_json::to_vec(&Some(&directory))?)
-                )
+        let source_map: analytics_core::source_map::SourceMap =
+            serde_json::from_value(execution["source_map"].clone())?;
+        source_map.validate()?;
+        if execution["source_map_signature"]
+            != format!(
+                "sha256:{:x}",
+                Sha256::digest(serde_json::to_vec(&source_map)?)
+            )
         {
-            return Err("identity directory signature/provenance mismatch".into());
+            return Err("source-map signature mismatch".into());
         }
         if !hash(&execution["price_input_sha256"])
             || execution["price_input_sha256"]
@@ -260,35 +263,28 @@ pub fn validate_result(
             .as_object()
             .ok_or("missing price inputs")?
         {
-            if !analytics_core::security::is_security_id(id)
-                || !directory.securities.contains_key(id)
-            {
-                return Err("result price inputs require registered opaque identities".into());
-            }
+            analytics_core::pool::validate_instrument(id)?;
             if !hash(&input["sha256"]) {
                 return Err("invalid coefficient source hash".into());
             }
             if input["source"].is_object() {
-                let identity: analytics_core::security::SecurityRecord =
-                    serde_json::from_value(input["identity"].clone())?;
-                if identity.security_id != *id || !analytics_core::security::is_security_id(id) {
-                    return Err("invalid bound security identity".into());
-                }
-                let receipt = serde_json::json!({"identity":input["identity"],"bindings":input["bindings"],"source":input["source"]});
+                let mapping: analytics_core::source_map::SourceException =
+                    serde_json::from_value(input["source_mapping"].clone())?;
+                let receipt = serde_json::json!({"source_mapping":input["source_mapping"],"bindings":input["bindings"],"source":input["source"]});
                 if input["sha256"]
                     != format!("sha256:{:x}", Sha256::digest(serde_json::to_vec(&receipt)?))
                 {
-                    return Err("identity/source receipt mismatch".into());
+                    return Err("source-map receipt mismatch".into());
                 }
                 let sources = input["source"]["securities"]
                     .as_object()
                     .ok_or("missing bound source inputs")?;
-                let bindings: Vec<analytics_core::security::SecurityLocator> =
+                let bindings: Vec<analytics_core::source_map::SourceLocator> =
                     serde_json::from_value(input["bindings"].clone())?;
                 if bindings.is_empty()
                     || bindings
                         .iter()
-                        .any(|l| !identity.locators.contains(l) || !sources.contains_key(&l.symbol))
+                        .any(|l| !mapping.locators.contains(l) || !sources.contains_key(&l.symbol))
                 {
                     return Err("bound source locator mismatch".into());
                 }
@@ -515,14 +511,17 @@ impl ResearchConfig {
 }
 
 /// Reproducible calendar-year rolling research parameters.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResearchRequest {
     /// Frozen completeness and sample policy.
     pub quality_policy: ResearchQualityPolicy,
     /// Rolling/model/portfolio parameters.
     pub config: ResearchConfig,
-    /// Reviewed security identity and dated source directory.
-    pub identity_registry: Option<analytics_core::security::SecurityRegistry>,
+    /// Stop after publishing independently reusable fold models.
+    pub train_only: bool,
+    /// Existing completed training output; never calls the trainer when present.
+    pub reuse_training: Option<PathBuf>,
     /// Explicit independently downloaded qlib_bin directory.
     pub data_root: PathBuf,
     /// Ignored local research output directory.
@@ -558,7 +557,8 @@ impl ResearchRequest {
         Self {
             quality_policy: ResearchQualityPolicy::default(),
             config: ResearchConfig::default(),
-            identity_registry: None,
+            train_only: false,
+            reuse_training: None,
             data_root,
             output,
             schedule: Schedule::default(),
@@ -611,10 +611,131 @@ pub fn run_with_context(
     request: &ResearchRequest,
     context: &analytics_core::task::TaskContext,
 ) -> Result<()> {
-    context.execute(|| run_scoped(request))
+    context.execute(|| {
+        if !request.audit_only && !request.train_only && request.reuse_training.is_none() {
+            let mut training = request.clone();
+            training.train_only = true;
+            run_scoped(&training)?;
+            backtest_from_training(
+                &request.output,
+                &request.output,
+                request
+                    .corporate_actions
+                    .as_deref()
+                    .ok_or("execution event version missing")?,
+                context,
+            )
+        } else {
+            run_scoped(request)
+        }
+    })
+}
+fn file_hash(path: &Path) -> Result<String> {
+    Ok(format!("sha256:{:x}", Sha256::digest(fs::read(path)?)))
+}
+fn adjustment_basis_signature(
+    book: Option<&analytics_storage::corporate_actions::ActionBundle>,
+    start: Date,
+    end: Date,
+) -> Result<String> {
+    let events:Vec<_>=book.into_iter().flat_map(|b|&b.actions).filter(|a|a.ex_date>=start&&a.ex_date<=end).map(|a|serde_json::json!({"instrument":a.instrument,"ex_date":a.ex_date,"cash":a.cash_per_share,"shares":a.shares_per_share,"reference":a.terms.reference()})).collect();
+    Ok(format!(
+        "sha256:{:x}",
+        Sha256::digest(serde_json::to_vec(&events)?)
+    ))
+}
+/// Validate current training descriptor on every read; unsupported files are never converted.
+pub fn validate_training_artifact(artifact: &serde_json::Value) -> Result<()> {
+    if artifact["schema_version"] != 1 || artifact["status"] != "trained" {
+        return Err("unsupported_training_format".into());
+    }
+    let mut unsigned = artifact.clone();
+    let receipt = unsigned
+        .as_object_mut()
+        .ok_or("invalid training artifact")?
+        .remove("artifact_signature")
+        .ok_or("training_artifact_damaged")?;
+    if receipt
+        != format!(
+            "sha256:{:x}",
+            Sha256::digest(serde_json::to_vec(&unsigned)?)
+        )
+    {
+        return Err("training_artifact_damaged".into());
+    }
+    if artifact["formula_version"] != analytics_factor::FORMULA_VERSION
+        || artifact["feature_order"]
+            .as_array()
+            .is_none_or(|ids| ids.is_empty() || ids.iter().any(|id| id.as_str().is_none()))
+        || artifact["models"].as_array().is_none_or(Vec::is_empty)
+    {
+        return Err("training_artifact_damaged".into());
+    }
+    Ok(())
+}
+/// Execute with immutable previously trained models. Settlement fixes do not call training again.
+pub fn backtest_from_training(
+    source: &Path,
+    output: &Path,
+    actions: &Path,
+    context: &analytics_core::task::TaskContext,
+) -> Result<()> {
+    backtest_from_training_with_data(source, output, actions, None, context)
+}
+/// Resolve relocated workspaces against their verified market version, without editing artifacts.
+pub fn backtest_from_training_with_data(
+    source: &Path,
+    output: &Path,
+    actions: &Path,
+    data_root: Option<&Path>,
+    context: &analytics_core::task::TaskContext,
+) -> Result<()> {
+    let artifact: serde_json::Value =
+        serde_json::from_slice(&fs::read(source.join("training.json"))?)?;
+    validate_training_artifact(&artifact)?;
+    let mut request: ResearchRequest = serde_json::from_value(artifact["request"].clone())?;
+    if let Some(root) = data_root {
+        request.data_root = root.to_owned();
+    }
+    let dataset = DailyDataset::open(&request.data_root)?;
+    let folds = request.schedule.resolve(&dataset.calendar)?;
+    let models = artifact["models"]
+        .as_array()
+        .ok_or("missing trained models")?;
+    if models.len() != folds.len() || artifact["resolved_folds"] != serde_json::to_value(&folds)? {
+        return Err("training_artifact_damaged: incomplete fold models".into());
+    }
+    for (expected, m) in models.iter().enumerate() {
+        let i = m["fold"].as_u64().ok_or("missing fold")?;
+        if i as usize != expected {
+            return Err("training_artifact_damaged: duplicate or misplaced fold".into());
+        }
+        let p = source.join(format!("fold-{i:04}"));
+        if m["model_sha256"] != file_hash(&p.join("model.txt"))?
+            || m["manifest_sha256"] != file_hash(&p.join("manifest.json"))?
+        {
+            return Err("training_artifact_damaged".into());
+        }
+    }
+    let lo = folds.iter().map(|f| f.warmup_start).min().unwrap();
+    let hi = folds
+        .iter()
+        .map(|f| f.actual.validation.as_ref().unwrap_or(&f.actual.train).end)
+        .max()
+        .unwrap();
+    let book = analytics_storage::corporate_actions::ActionBundle::read(actions)?;
+    if artifact["adjustment_basis_signature"] != adjustment_basis_signature(Some(&book), lo, hi)? {
+        return Err("training_price_basis_changed: retraining required".into());
+    }
+    request.output = output.to_owned();
+    request.reuse_training = Some(source.to_owned());
+    request.corporate_actions = Some(actions.to_owned());
+    request.train_only = false;
+    run_with_context(&request, context)
 }
 fn run_scoped(request: &ResearchRequest) -> Result<()> {
     let context = analytics_core::task::TaskContext::current();
+    let training_source_request = request.clone();
     context.check()?;
     request.config.validate()?;
     request.quality_policy.validate()?;
@@ -671,9 +792,6 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         return Err("cannot mix synthetic and public company actions/market data".into());
     }
     let mut dataset = DailyDataset::open(&request.data_root)?;
-    if let Some(r) = &request.identity_registry {
-        dataset.bind_registry(r.clone())?;
-    }
     let mut pool = match &request.pool {
         Some(p) => p.clone(),
         None => dataset.pool(&request.universe_id)?,
@@ -696,7 +814,15 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
     let history_start = folds.iter().map(|f| f.actual.train.start).min().unwrap();
     let first_required = history_start;
     let execution_start = folds[0].actual.test.start;
-    let needed_end = folds.last().unwrap().actual.test.end;
+    let needed_end = if request.train_only || request.audit_only {
+        folds
+            .iter()
+            .map(|f| f.actual.validation.as_ref().unwrap_or(&f.actual.train).end)
+            .max()
+            .unwrap()
+    } else {
+        folds.last().unwrap().actual.test.end
+    };
     // Irrelevant former constituents are kept in the frozen source but cannot block later windows.
     let history_index = dataset
         .calendar
@@ -711,17 +837,17 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         ranges.retain(|r| r.end >= relevant_start && r.start <= needed_end);
         !ranges.is_empty()
     });
-    let quality_snapshot = quality::qualify(
+    let registry = FactorRegistry::default();
+    let quality_snapshot = quality::qualify_with_registry(
         &dataset,
         &pool,
-        request.identity_registry.as_ref(),
         &request.quality_policy,
         &DateRange {
             start: relevant_start,
             end: needed_end,
         },
         &request.config.factor_ids,
-        action_book.as_ref(),
+        &registry,
     )?;
     save(request.output.join("quality.json"), &quality_snapshot)?;
     pool = quality_snapshot.effective_pool.clone();
@@ -738,32 +864,12 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         .partition_point(|d| *d < pool.coverage.start)
         .min(dataset.calendar.len() - 1);
     let mut admission_issues = Vec::<String>::new();
-    let identity_problem = request.identity_registry.as_ref().is_none_or(|r| {
-        !r.securities.contains_key(&request.benchmark)
-            || pool
-                .intervals
-                .keys()
-                .any(|id| !r.securities.contains_key(id))
-    });
     if quality_snapshot
         .decisions
         .iter()
         .any(|d| d.disposition == ProblemDisposition::Block)
     {
-        admission_issues
-            .push("input integrity/identity checks failed; see quality decisions".into());
-    }
-    if identity_problem {
-        admission_issues.push(
-            "required pool/benchmark identities are missing from the reviewed directory".into(),
-        );
-    }
-    if pool
-        .intervals
-        .keys()
-        .any(|id| !analytics_core::security::is_security_id(id))
-    {
-        admission_issues.push("unresolved source identities in required pool".into());
+        admission_issues.push("input/source checks failed; see quality decisions".into());
     }
     if let Some(problem) = &pool_problem {
         admission_issues.push(problem.clone());
@@ -782,22 +888,6 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
             admission_issues.push(format!(
                 "{symbol}: price indices cannot be traded as A-share pool constituents"
             ));
-        }
-        if let Err(e) = dataset
-            .exchange_symbol(
-                symbol,
-                members[symbol]
-                    .first()
-                    .map_or(execution_start, |r| dataset.calendar[r.start]),
-            )
-            .and_then(|code| {
-                request
-                    .market_rules
-                    .fees(&code, OrderSide::Buy, 100_000.0)
-                    .map_err(std::io::Error::other)
-            })
-        {
-            admission_issues.push(e.to_string());
         }
     }
     let mut market_issues = BTreeMap::new();
@@ -878,169 +968,13 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
             }
         }
     }
-    let mut settlement_issues = BTreeMap::new();
-    let mut successor_issues = BTreeMap::new();
-    if let Some(book) = &action_book {
-        let required = book.required_symbols(
-            &members
-                .iter()
-                .filter(|(_, rs)| {
-                    rs.iter().any(|r| {
-                        dataset.calendar[r.end] >= execution_start
-                            && dataset.calendar[r.start] <= needed_end
-                    })
-                })
-                .map(|(id, _)| id.clone())
-                .collect(),
-            execution_start,
-            needed_end,
-        );
-        for id in &required {
-            if let Err(e) =
-                book.require_coverage(&BTreeSet::from([id.clone()]), execution_start, needed_end)
-            {
-                settlement_issues.insert(id.clone(), e.to_string());
-            }
-        }
-        for a in book.actions.iter().filter(|a| {
-            a.ex_date >= execution_start
-                && a.record_date <= needed_end
-                && required.contains(&a.instrument)
-        }) {
-            if !synthetic
-                && a.shares_per_share.fract() != 0.
-                && matches!(
-                    &a.terms,
-                    analytics_core::actions::EventTerms::Distribution {
-                        allocation: None | Some(analytics_core::actions::Allocation::Exact)
-                    }
-                )
-            {
-                settlement_issues.insert(a.instrument.clone(),"ordinary bonus shares require evidenced registrar fractional allocation before training".into());
-            }
-            if let Some(id) = a.terms.successor() {
-                if let analytics_core::actions::EventTerms::Conversion {
-                    category,
-                    ratio,
-                    allocation,
-                    ordinary_holder: true,
-                    ..
-                } = &a.terms
-                {
-                    if !synthetic
-                        && matches!(allocation, analytics_core::actions::Allocation::Exact)
-                        && analytics_core::actions::decimal(ratio).is_ok_and(|r| r.fract() != 0.)
-                    {
-                        settlement_issues.insert(
-                            a.instrument.clone(),
-                            "conversion requires evidenced fractional allocation before training"
-                                .into(),
-                        );
-                    }
-                    if *category == analytics_core::actions::ConversionKind::CodeChange {
-                        if id != a.instrument {
-                            successor_issues.insert(
-                                id.to_owned(),
-                                "code change must retain the same security identity".into(),
-                            );
-                        }
-                    } else {
-                        let expected = request.identity_registry.as_ref().and_then(|r| {
-                            r.successions
-                                .iter()
-                                .find(|l| l.predecessor == a.instrument && l.successor == id)
-                        });
-                        let kind = match category {
-                            analytics_core::actions::ConversionKind::Merger => "merger",
-                            analytics_core::actions::ConversionKind::Reduction => "reduction",
-                            analytics_core::actions::ConversionKind::ShareReform => "reform",
-                            analytics_core::actions::ConversionKind::Reorganization => {
-                                "reorganization"
-                            }
-                            analytics_core::actions::ConversionKind::CodeChange => "code_change",
-                        };
-                        if expected.is_none_or(|l| {
-                            l.kind != kind
-                                || analytics_core::actions::decimal(&l.ratio).ok()
-                                    != analytics_core::actions::decimal(ratio).ok()
-                                || l.event_id.as_ref().is_some_and(|event| event != &a.id)
-                        }) {
-                            successor_issues.insert(
-                                id.to_owned(),
-                                "succession identity/ratio/event proof missing or conflicting"
-                                    .into(),
-                            );
-                        }
-                    }
-                }
-                match dataset
-                    .raw_field(id, "close")
-                    .and_then(|field| dataset.validate_factor_basis(id).map(|_| field))
-                {
-                    Err(e) => {
-                        successor_issues.insert(id.to_string(), e.to_string());
-                    }
-                    Ok(field) => {
-                        if let analytics_core::actions::EventTerms::Conversion {
-                            listing_date: Some(listing),
-                            claim_valuation,
-                            ..
-                        } = &a.terms
-                        {
-                            let missing = dataset.calendar.iter().enumerate().any(|(i, d)| {
-                                *d >= a.ex_date
-                                    && *d < *listing
-                                    && *d <= needed_end
-                                    && field.get(i).is_none()
-                                    && !claim_valuation
-                                        .as_ref()
-                                        .is_some_and(|v| v.date <= *d && *d <= v.valid_until)
-                            });
-                            if missing {
-                                successor_issues.insert(
-                                    id.to_string(),
-                                    "successor claim lacks raw quote or dated valuation".into(),
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    } else {
-        settlement_issues.insert(
-            "corporate_actions".into(),
-            "no action snapshot selected".into(),
-        );
-    }
-    settlement_issues.extend(quality::possible_holding_issues(
-        &dataset,
-        &pool,
-        action_book.as_ref(),
-        execution_start,
-        needed_end,
-    )?);
+    // Account dependencies are checked only on actual orders, holdings and entitlements.
+    let settlement_issues = BTreeMap::<String, String>::new();
+    let successor_issues = BTreeMap::<String, String>::new();
     let benchmark_check = (|| -> Result<()> {
-        let b = dataset.raw_field(&request.benchmark, "close")?;
-        let lo = dataset
-            .calendar
-            .partition_point(|d| *d < execution_start)
-            .saturating_sub(1);
-        let hi = dataset.calendar.partition_point(|d| *d <= needed_end);
-        if (lo..hi).any(|i| b.get(i).is_none_or(|p| p <= 0.)) {
-            return Err("missing benchmark execution closes".into());
-        }
+        dataset.validate_factor_basis(&request.benchmark)?;
         Ok(())
     })();
-    if !settlement_issues.is_empty() {
-        admission_issues.push("incomplete account settlement events; see settlement_issues".into());
-    }
-    if !successor_issues.is_empty() {
-        admission_issues.push("successor data missing; see successor_issues".into());
-    }
-    if let Err(e) = &benchmark_check {
-        admission_issues.push(e.to_string());
-    }
     let sample_readiness =
         preview_samples_with_policy(&dataset, &pool, &folds, &request.quality_policy)?;
     if sample_readiness["issues"]
@@ -1071,7 +1005,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
     }
     use analytics_core::admission::{AdmissionCheck, AdmissionReport, CheckStatus};
     let mut admission = AdmissionReport {
-        schema_version: 2,
+        schema_version: 4,
         policy: request.quality_policy.clone(),
         decisions: quality_snapshot.decisions.clone(),
         checks: Vec::new(),
@@ -1079,22 +1013,6 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
     let mut add_check =
         |category: &str, security: Option<String>, failed: bool, message: String| {
             let mut evidence = vec![format!("market-source:{}", request.data_root.display())];
-            if let Some(registry) = &request.identity_registry {
-                let records: Vec<_> = match &security {
-                    Some(id) => registry.securities.get(id).into_iter().collect(),
-                    None => registry.securities.values().collect(),
-                };
-                for record in records {
-                    for key in &record.evidence {
-                        if let Some(proof) = registry.evidence.get(key) {
-                            evidence.push(format!(
-                                "identity:{key}:{}:{}",
-                                proof.original_sha256, proof.source_url
-                            ));
-                        }
-                    }
-                }
-            }
             if matches!(category, "historical_events" | "settlement" | "successor")
                 && let Some(book) = &action_book
             {
@@ -1148,12 +1066,6 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
             });
         };
     add_check(
-        "identity",
-        None,
-        identity_problem,
-        "required identities resolved independently from source codes".into(),
-    );
-    add_check(
         "membership",
         None,
         pool_problem.is_some()
@@ -1168,15 +1080,23 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
             "historical_events",
             serde_json::to_value(&adjustment_issues)?,
         ),
-        ("settlement", serde_json::to_value(&settlement_issues)?),
-        ("successor", serde_json::to_value(&successor_issues)?),
     ] {
         if let Some(map) = issues.as_object() {
             if map.is_empty() {
                 add_check(category, None, false, "required inputs checked".into());
             } else {
                 for (id, issue) in map {
-                    add_check(category, Some(id.clone()), true, issue.to_string());
+                    let message = if let Some(items) = issue.as_array() {
+                        format!(
+                            "{} input issues; first: {}",
+                            items.len(),
+                            serde_json::to_string(&items.iter().take(3).collect::<Vec<_>>())
+                                .unwrap_or_default()
+                        )
+                    } else {
+                        issue.to_string()
+                    };
+                    add_check(category, Some(id.clone()), true, message);
                 }
             }
         }
@@ -1257,7 +1177,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
             if factor_basis_issues.is_empty() && adjustment_issues.is_empty() {
                 Vec::new()
             } else {
-                FactorRegistry::default()
+                registry
                     .all()
                     .filter(|s| {
                         !matches!(
@@ -1271,7 +1191,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
             };
         save(
             request.output.join("execution_readiness.json"),
-            &serde_json::json!({"schema_version":2,"quality":quality_snapshot,"admission":admission,"ready":false,"reason":admission_issues.join("; "),"issues":admission_issues,"required_start":first_required,"pool_coverage":pool.coverage,"verified_raw_prices":dataset.has_raw_prices(),"market_issues":market_issues,"factor_basis_issues":factor_basis_issues,"adjustment_issues":adjustment_issues,"settlement_issues":settlement_issues,"successor_issues":successor_issues,"checks":{"schedule":"passed","membership":if pool_problem.is_some(){"failed"}else{"passed"},"factor_basis":if factor_basis_issues.is_empty(){"passed"}else{"failed"},"historical_events":if action_book.is_none(){"not_run"}else if adjustment_issues.is_empty(){"passed"}else{"failed"},"account_events":if action_book.is_none(){"not_run"}else if settlement_issues.is_empty(){"passed"}else{"failed"},"benchmark":if benchmark_check.is_ok(){"passed"}else{"failed"}},"resolved_folds":folds,"sample_readiness":sample_readiness,"affected_factor_ids":affected_factor_ids}),
+            &serde_json::json!({"schema_version":4,"quality":quality_snapshot,"admission":admission,"ready":false,"reason":admission_issues.join("; "),"issues":admission_issues,"required_start":first_required,"pool_coverage":pool.coverage,"verified_raw_prices":dataset.has_raw_prices(),"market_issues":market_issues,"factor_basis_issues":factor_basis_issues,"adjustment_issues":adjustment_issues,"settlement_issues":settlement_issues,"successor_issues":successor_issues,"checks":{"schedule":"passed","membership":if pool_problem.is_some(){"failed"}else{"passed"},"factor_basis":if factor_basis_issues.is_empty(){"passed"}else{"failed"},"historical_events":if action_book.is_none(){"not_run"}else if adjustment_issues.is_empty(){"passed"}else{"failed"},"account_events":"not_run","benchmark":if benchmark_check.is_ok(){"passed"}else{"failed"}},"resolved_folds":folds,"sample_readiness":sample_readiness,"affected_factor_ids":affected_factor_ids}),
         )?;
         return if request.audit_only {
             Ok(())
@@ -1292,7 +1212,6 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         "sha256:{:x}",
         Sha256::digest(serde_json::to_vec(&price_inputs)?)
     );
-    let registry = FactorRegistry::default();
     let supported_inputs = SUPPORTED_RESEARCH_INPUTS;
     let mut excluded = BTreeMap::new();
     let mut ids = Vec::new();
@@ -1348,14 +1267,22 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
             "open-next-2,pit-mask,warmup756,explicit-price-input-v2"
         ))?)
     );
+    let historical_basis_signature =
+        adjustment_basis_signature(action_book.as_ref(), relevant_start, needed_end)?;
     let mut execution = serde_json::json!({"mode":"raw_integer_shares",
         "quality_policy":request.quality_policy,"quality":quality_snapshot,"quality_sha256":format!("sha256:{:x}",Sha256::digest(serde_json::to_vec(&quality_snapshot)?)),
         "fee_application":"latest_only_for_all_dates", "market_rules":request.market_rules, "initial_cash_cny":request.initial_cash_cny,
         "price_limit_buffer":0.005,
 
-        "identity_registry":request.identity_registry,"identity_signature":format!("sha256:{:x}",Sha256::digest(serde_json::to_vec(&request.identity_registry)?)),"corporate_action_sha256":action_hash,"dividend_withholding_rate":request.dividend_withholding_rate,
+        "source_map":dataset.source_map(),"source_map_signature":format!("sha256:{:x}",Sha256::digest(serde_json::to_vec(dataset.source_map())?)),"corporate_action_sha256":action_hash,"dividend_withholding_rate":request.dividend_withholding_rate,
         "price_inputs":price_inputs,"price_input_sha256":price_input_sha256,"pool":pool,"pool_signature":pool_signature,"benchmark":request.benchmark,"pool_exit_policy":request.pool_exit_policy,
         "research_config":request.config,"schedule":request.schedule,"action_policy":request.action_policy,"resolved_folds":folds,"dividend_tax_convention":"explicit fixed research rate; default gross; not personal FIFO holding-period tax"});
+    if let Some(source) = &request.reuse_training {
+        let artifact: serde_json::Value =
+            serde_json::from_slice(&fs::read(source.join("training.json"))?)?;
+        validate_training_artifact(&artifact)?;
+        execution["training_provenance"] = serde_json::json!({"training_signature":artifact["training_signature"],"models":artifact["models"].as_array().ok_or("missing model receipts")?.iter().map(|m|serde_json::json!({"fold":m["fold"],"model_sha256":m["model_sha256"]})).collect::<Vec<_>>(),"feature_order":artifact["feature_order"]});
+    }
     let mut run_signature = format!(
         "sha256:{:x}",
         Sha256::digest(serde_json::to_vec(&(
@@ -1388,54 +1315,11 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         dataset.calendar[first_member],
         ids.len()
     );
-    {
-        let validation = (|| -> Result<()> {
-            let book = action_book.as_ref().ok_or("raw execution requires a registered corporate-action snapshot; download using jfquant data actions and complete missing settlement dates")?;
-            let start = execution_start;
-            let end = needed_end;
-            let symbols = pool
-                .intervals
-                .iter()
-                .filter(|(_, rs)| rs.iter().any(|r| r.end >= start && r.start <= end))
-                .map(|(id, _)| id.clone())
-                .collect();
-            let benchmark = dataset.raw_field(&request.benchmark, "close")?;
-            let lo = dataset
-                .calendar
-                .partition_point(|d| *d < start)
-                .saturating_sub(1);
-            let hi = dataset.calendar.partition_point(|d| *d <= end);
-            let missing: Vec<_> = (lo..hi)
-                .filter(|day| benchmark.get(*day).is_none_or(|p| p <= 0.0))
-                .map(|day| dataset.calendar[day])
-                .collect();
-            if !missing.is_empty() {
-                return Err(format!(
-                    "data_not_ready: benchmark {} missing execution closes {:?}",
-                    request.benchmark, missing
-                )
-                .into());
-            }
-            raw_portfolio::validate_actions(&dataset, book, &symbols, start, end)
-        })();
-        let action_coverage=action_book.as_ref().map(|book| {
-            let start=execution_start;
-            let end=needed_end;
-            let events:Vec<_>=book.actions.iter().filter(|a|a.ex_date>=start && a.record_date<=end).collect();
-            serde_json::json!({"range_events":events.len(),"missing_cash_payment_dates":events.iter().filter(|a|a.cash_per_share>0.0 && a.pay_date.is_none()).count(),
-                "missing_share_listing_dates":events.iter().filter(|a|a.shares_per_share>0.0 && a.listing_date.is_none()).count(),
-                "invalid_events":events.iter().filter(|a|a.validate().is_err()).count(),"source_failures":book.failures,
-                "issues":events.iter().filter_map(|a|a.validate().err().map(|e|serde_json::json!({"id":a.id,"instrument":a.instrument,"record_date":a.record_date,"ex_date":a.ex_date,"pay_date":a.pay_date,"listing_date":a.listing_date,"reason":e.to_string()}))).collect::<Vec<_>>()})
-        });
-        save(
-            request.output.join("execution_readiness.json"),
-            &serde_json::json!({"ready":validation.is_ok(),"resolved_folds":folds,"sample_readiness":sample_readiness,"reason":validation.as_ref().err().map(|e|e.to_string()),"corporate_action_coverage":action_coverage,"adjustment_issues":adjustment_issues,"factor_basis_issues":factor_basis_issues,"affected_factor_ids":if validation.is_ok(){Vec::<String>::new()}else{ids.clone()}}),
-        )?;
-        if !request.audit_only {
-            validation?;
-        }
-    }
-    let cache = request.output.join(".admission-factor-staging");
+    let cache = request.output.join(if request.reuse_training.is_some() {
+        ".prediction-factor-staging"
+    } else {
+        ".admission-factor-staging"
+    });
     fs::create_dir_all(&cache)?;
     for year in history_start.year()..=needed_end.year() {
         context.report(format!("因子年度 {year}"))?;
@@ -1521,22 +1405,24 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
             }
         }
     }
-    for (index, fold) in folds.iter().enumerate() {
-        let mask = data::prediction_mask(
-            &cache,
-            &fold.actual.test,
-            &ids,
-            &dataset.calendar,
-            &request.quality_policy,
-        )?;
-        sample_selections.push(save_selection(
-            request,
-            &mut admission,
-            index,
-            "prediction",
-            &fold.actual.test,
-            &mask,
-        )?);
+    if !request.train_only && !request.audit_only {
+        for (index, fold) in folds.iter().enumerate() {
+            let mask = data::prediction_mask(
+                &cache,
+                &fold.actual.test,
+                &ids,
+                &dataset.calendar,
+                &request.quality_policy,
+            )?;
+            sample_selections.push(save_selection(
+                request,
+                &mut admission,
+                index,
+                "prediction",
+                &fold.actual.test,
+                &mask,
+            )?);
+        }
     }
     let sample_selection = serde_json::json!({"schema_version":1,"policy":request.quality_policy,"selections":sample_selections});
     save(
@@ -1554,6 +1440,18 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         Sha256::digest(serde_json::to_vec(&(
             &signature,
             &execution["sample_selection_sha256"]
+        ))?)
+    );
+    let training_signature = format!(
+        "sha256:{:x}",
+        Sha256::digest(serde_json::to_vec(&(
+            &signature,
+            &request.config.training,
+            &request.schedule,
+            &folds,
+            &historical_basis_signature,
+            dataset.source_map(),
+            &ids
         ))?)
     );
     run_signature = format!(
@@ -1595,7 +1493,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
     if !feature_issues.is_empty() {
         save(
             request.output.join("execution_readiness.json"),
-            &serde_json::json!({"schema_version":2,"admission":admission,"quality":quality_snapshot,"sample_selection":execution["sample_selection"],"ready":false,"reason":"factor/sample eligibility failed before training","feature_issues":feature_issues,"resolved_folds":folds}),
+            &serde_json::json!({"schema_version":4,"admission":admission,"quality":quality_snapshot,"sample_selection":execution["sample_selection"],"ready":false,"reason":"factor/sample eligibility failed before training","feature_issues":feature_issues,"resolved_folds":folds}),
         )?;
         return if request.audit_only {
             Ok(())
@@ -1606,11 +1504,15 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
     if request.audit_only {
         save(
             request.output.join("execution_readiness.json"),
-            &serde_json::json!({"schema_version":2,"ready":admission.ready(),"quality":quality_snapshot,"sample_selection":execution["sample_selection"],"admission":admission,"resolved_folds":folds,"sample_readiness":sample_readiness}),
+            &serde_json::json!({"schema_version":4,"ready":admission.ready(),"quality":quality_snapshot,"sample_selection":execution["sample_selection"],"admission":admission,"resolved_folds":folds,"sample_readiness":sample_readiness,"backtest_checks":{"status":"not_run","reason":"账户检查在实际订单、持仓和权益执行时进行"}}),
         )?;
         return Ok(());
     }
-    let published = request.output.join("factor-cache");
+    let published = request.output.join(if request.reuse_training.is_some() {
+        "prediction-factor-cache"
+    } else {
+        "factor-cache"
+    });
     if published.exists() {
         return Err("existing factor cache must not be replaced".into());
     }
@@ -1644,21 +1546,29 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
             }
             None => data::empty_matrix(ids.len()),
         };
-        let test = data::prediction_range_with_policy(
-            &cache,
-            &f.test,
-            &ids,
-            &dataset.calendar,
-            &request.quality_policy,
-        )?;
-        let test_matrix = data::matrix_range_with_policy(
-            &cache,
-            &f.test,
-            &ids,
-            &dataset.calendar,
-            &request.quality_policy,
-        )?
-        .matrix;
+        let test = if request.train_only {
+            None
+        } else {
+            Some(data::prediction_range_with_policy(
+                &cache,
+                &f.test,
+                &ids,
+                &dataset.calendar,
+                &request.quality_policy,
+            )?)
+        };
+        let test_matrix = if request.train_only {
+            data::empty_matrix(ids.len())
+        } else {
+            data::matrix_range_with_policy(
+                &cache,
+                &f.test,
+                &ids,
+                &dataset.calendar,
+                &request.quality_policy,
+            )?
+            .matrix
+        };
         let split = TrainingSplit {
             train,
             validation: valid,
@@ -1666,7 +1576,14 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         };
         let output = request.output.join(format!("fold-{fold_index:04}"));
         fs::create_dir_all(&output)?;
-        context.report(format!("训练年度 {year}"))?;
+        context.report(format!(
+            "{}年度 {year}",
+            if request.reuse_training.is_some() {
+                "预测/回测"
+            } else {
+                "训练"
+            }
+        ))?;
         let parameters = request.config.training.parameters.clone();
         let training_request = TrainRequest {
             factor_ids: ids.clone(),
@@ -1680,48 +1597,57 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
                 None
             },
         };
-        let (tx, rx) = mpsc::channel();
-        let training_context = context.clone();
-        let progress_thread = std::thread::spawn(move || {
-            while let Ok(event) = rx.recv() {
-                let _ = training_context.report(format!("{event:?}"));
-            }
-        });
-        let artifact_result = LightGbmTrainer.train_split(
-            &training_request,
-            &split,
-            &output,
-            tx,
-            context.cancel.clone(),
-        );
-        let _ = progress_thread.join();
-        let artifact = artifact_result?;
-        context.check()?;
+        let (model_path, _manifest_path) = if let Some(source) = &request.reuse_training {
+            let fold = source.join(format!("fold-{fold_index:04}"));
+            (fold.join("model.txt"), fold.join("manifest.json"))
+        } else {
+            let (tx, rx) = mpsc::channel();
+            let training_context = context.clone();
+            let progress_thread = std::thread::spawn(move || {
+                while let Ok(event) = rx.recv() {
+                    let _ = training_context.report(format!("{event:?}"));
+                }
+            });
+            let artifact_result = LightGbmTrainer.train_split(
+                &training_request,
+                &split,
+                &output,
+                tx,
+                context.cancel.clone(),
+            );
+            let _ = progress_thread.join();
+            let artifact = artifact_result?;
+            context.check()?;
+            let mut manifest: serde_json::Value =
+                serde_json::from_slice(&fs::read(&artifact.manifest_path)?)?;
+            manifest["formula_version"] = formula_version.clone().into();
+            manifest["input_snapshot_hash"] = signature.clone().into();
+            manifest["training_signature"] = training_signature.clone().into();
+            manifest["research_execution"] = execution.clone();
+            manifest["rolling_fold"] = serde_json::json!({"fold_index":fold_index,"schedule":resolved,"purged_label_boundary":true});
+            save(&artifact.manifest_path, &manifest)?;
+            (artifact.model_path, artifact.manifest_path)
+        };
+        if request.train_only {
+            continue;
+        }
         let train_rows = split.train.rows;
         let validation_rows = split.validation.rows;
-        let mut manifest: serde_json::Value =
-            serde_json::from_slice(&fs::read(&artifact.manifest_path)?)?;
-        manifest["formula_version"] = formula_version.clone().into();
-        manifest["input_snapshot_hash"] = signature.clone().into();
-        manifest["research_execution"] = execution.clone();
-        manifest["rolling_fold"] = serde_json::json!({"fold_index":fold_index,"schedule":resolved,"purged_label_boundary":true});
-        save(&artifact.manifest_path, &manifest)?;
+        let test = test.expect("prediction phase");
         let scores = if test.meta.rows.is_empty() {
             Vec::new()
         } else {
-            LightGbmPredictor {
-                model_path: artifact.model_path,
-            }
-            .predict_dense(
-                &test.features.iter().map(|v| *v as f64).collect::<Vec<_>>(),
-                test.meta.rows.len(),
-                ids.len(),
-                false,
-            )?
-            .predictions
-            .into_iter()
-            .map(|row| row[0])
-            .collect::<Vec<_>>()
+            LightGbmPredictor { model_path }
+                .predict_dense(
+                    &test.features.iter().map(|v| *v as f64).collect::<Vec<_>>(),
+                    test.meta.rows.len(),
+                    ids.len(),
+                    false,
+                )?
+                .predictions
+                .into_iter()
+                .map(|row| row[0])
+                .collect::<Vec<_>>()
         };
         drop(split);
         let (ic_rows, ic_scores): (Vec<_>, Vec<_>) = test
@@ -1735,7 +1661,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
             .map(|(row, score)| (row.clone(), *score))
             .unzip();
         let (ic, rank_ic) = portfolio::information_coefficients(&ic_rows, &ic_scores);
-        let days = raw_portfolio::simulate(
+        let days_result = raw_portfolio::simulate(
             &mut raw_state,
             &test.meta,
             &scores,
@@ -1743,7 +1669,17 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
             action_book.as_ref().expect("validated action book"),
             request,
             &f.test,
-        )?;
+        );
+        let days = match days_result {
+            Ok(days) => days,
+            Err(e) => {
+                save(
+                    request.output.join("execution_readiness.json"),
+                    &serde_json::json!({"schema_version":4,"ready":false,"training_complete":true,"backtest_complete":false,"reason":e.to_string(),"completed_fold_reports":reports}),
+                )?;
+                return Err(e);
+            }
+        };
         let test_days: Vec<_> = days
             .iter()
             .filter(|d| d.date >= f.test.start.to_string())
@@ -1801,6 +1737,19 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         fs::write(output.join("predictions.csv"), csv)?;
         reports.push(report);
         save(request.output.join("fold_reports.json"), &reports)?;
+    }
+    if request.train_only {
+        let models:Vec<_>=(0..folds.len()).map(|i|{let folder=request.output.join(format!("fold-{i:04}"));Ok(serde_json::json!({"fold":i,"model_sha256":file_hash(&folder.join("model.txt"))?,"manifest_sha256":file_hash(&folder.join("manifest.json"))?}))}).collect::<Result<_>>()?;
+        let mut original = training_source_request;
+        original.train_only = false;
+        original.reuse_training = None;
+        let mut training = serde_json::json!({"schema_version":1,"status":"trained","request":original,"factor_signature":signature,"models":models,"adjustment_basis_signature":adjustment_basis_signature(action_book.as_ref(),relevant_start,needed_end)?,"training_signature":training_signature,"source_map":dataset.source_map(),"resolved_folds":folds,"formula_version":formula_version,"feature_order":ids});
+        training["artifact_signature"] = serde_json::json!(format!(
+            "sha256:{:x}",
+            Sha256::digest(serde_json::to_vec(&training)?)
+        ));
+        save(request.output.join("training.json"), &training)?;
+        return Ok(());
     }
     finish(
         request,
@@ -1861,7 +1810,7 @@ fn finish(
     save(
         request.output.join("summary.json"),
         &serde_json::json!({
-            "schema_version":RESEARCH_SCHEMA_VERSION,"input_kind":if audit["source"]["synthetic_fixture"]==true{"synthetic_fixture"}else{"public_market"},"method":"JFQuant native GTJA date-scheduled research",
+            "schema_version":RESEARCH_SCHEMA_VERSION,"backtest_status":if days.iter().any(|d|d.turnover>0.){"completed"}else{"no_valid_trades"},"input_kind":if audit["source"]["synthetic_fixture"]==true{"synthetic_fixture"}else{"public_market"},"method":"JFQuant native GTJA date-scheduled research",
             "fold_reports":reports,"annual_reports":annual,"aggregate":aggregate,"source":audit["source"],
             "formula_version":audit["formula_version"],"signature":run_signature,"factor_signature":factor_signature,
             "admission":serde_json::from_slice::<serde_json::Value>(&fs::read(request.output.join("admission.json"))?)?,"sample_selection":serde_json::from_slice::<serde_json::Value>(&fs::read(request.output.join("sample_selection.json"))?)?,"research_scope":if request.quality_policy.strictness==analytics_core::research_quality::ResearchStrictness::QualifiedOnly{"经数据筛选的研究股票池"}else{"原股票池"},

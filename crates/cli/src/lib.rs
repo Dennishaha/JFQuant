@@ -40,8 +40,6 @@ pub enum Command {
     #[command(subcommand)]
     Pools(PoolCommand),
     #[command(subcommand)]
-    Identities(IdentityCommand),
-    #[command(subcommand)]
     Query(QueryCommand),
     #[command(subcommand)]
     Factors(FactorCommand),
@@ -77,8 +75,6 @@ pub enum DataCommand {
         path: PathBuf,
     },
     Collect {
-        #[arg(long)]
-        identity_version: Option<String>,
         #[arg(long, value_enum, default_value = "market")]
         kind: CollectionKind,
         #[arg(long, value_enum, default_value = "akshare")]
@@ -166,37 +162,6 @@ pub enum CollectionProvider {
 pub enum CollectionAdjustment {
     SinaHfq,
     None,
-}
-#[derive(Debug, Subcommand)]
-pub enum IdentityCommand {
-    Capture {
-        #[arg(long)]
-        request: PathBuf,
-    },
-    List,
-    Show {
-        id: String,
-    },
-    Check {
-        id: String,
-        #[arg(long, default_value = "exchange")]
-        provider: String,
-        #[arg(long, default_value = "")]
-        symbol: String,
-        #[arg(long)]
-        date: Option<String>,
-    },
-    Import {
-        path: PathBuf,
-    },
-    Export {
-        id: String,
-        output: PathBuf,
-    },
-    Review {
-        #[arg(long)]
-        request: PathBuf,
-    },
 }
 #[derive(Debug, Subcommand)]
 pub enum PoolCommand {
@@ -448,6 +413,26 @@ pub enum ResearchCommand {
         #[arg(long)]
         actions: String,
     },
+    Train {
+        #[arg(long)]
+        template: PathBuf,
+        #[arg(long)]
+        schedule: Option<PathBuf>,
+        #[command(flatten)]
+        dates: DateOptions,
+        #[command(flatten)]
+        quality: QualityOptions,
+        #[arg(long)]
+        market: String,
+        #[arg(long)]
+        actions: String,
+    },
+    Backtest {
+        #[arg(long)]
+        training: Uuid,
+        #[arg(long)]
+        actions: String,
+    },
     Run {
         #[arg(long)]
         template: PathBuf,
@@ -600,7 +585,6 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
                 })
             }
             DataCommand::Collect {
-                identity_version,
                 kind,
                 provider,
                 adjustment_source,
@@ -646,12 +630,7 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
                     request.benchmarks.clear();
                     request.universes.clear();
                 }
-                if let Some(id) = identity_version {
-                    let w = Workspace::open(&client.root).map_err(invalid)?;
-                    request
-                        .bind_identities(&w.identities(&id).map_err(invalid)?)
-                        .map_err(invalid)?;
-                }
+
                 request.validate().map_err(invalid)?;
                 workflow(match kind {
                     CollectionKind::Market => WorkflowRequest::CollectMarket { request, resume },
@@ -702,74 +681,6 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
                 resume: None,
             }),
         },
-        Command::Identities(command) => {
-            let (method, id, path, provider, symbol, date) = match command {
-                IdentityCommand::Capture { request } => (
-                    "capture",
-                    String::new(),
-                    request,
-                    String::new(),
-                    String::new(),
-                    None,
-                ),
-                IdentityCommand::List => (
-                    "list",
-                    String::new(),
-                    PathBuf::new(),
-                    String::new(),
-                    String::new(),
-                    None,
-                ),
-                IdentityCommand::Show { id } => (
-                    "show",
-                    id,
-                    PathBuf::new(),
-                    String::new(),
-                    String::new(),
-                    None,
-                ),
-                IdentityCommand::Check {
-                    id,
-                    provider,
-                    symbol,
-                    date,
-                } => (
-                    "check",
-                    id,
-                    PathBuf::new(),
-                    provider,
-                    symbol,
-                    date.map(|s| s.parse()).transpose().map_err(invalid)?,
-                ),
-                IdentityCommand::Import { path } => (
-                    "import",
-                    String::new(),
-                    path,
-                    String::new(),
-                    String::new(),
-                    None,
-                ),
-                IdentityCommand::Export { id, output } => {
-                    ("export", id, output, String::new(), String::new(), None)
-                }
-                IdentityCommand::Review { request } => (
-                    "review",
-                    String::new(),
-                    request,
-                    String::new(),
-                    String::new(),
-                    None,
-                ),
-            };
-            workflow(WorkflowRequest::IdentityOperation {
-                method: method.into(),
-                id,
-                path,
-                provider,
-                symbol,
-                date,
-            })
-        }
         Command::Pools(command) => {
             return match command {
                 PoolCommand::List | PoolCommand::Versions => client.call(Rpc::Pools),
@@ -926,6 +837,27 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
                 actions,
                 audit_only: true,
             }),
+            ResearchCommand::Train {
+                template,
+                schedule,
+                dates,
+                quality,
+                market,
+                actions,
+            } => workflow(WorkflowRequest::TrainResearch {
+                template: Box::new(research_template(
+                    &client.root,
+                    &template,
+                    schedule.as_deref(),
+                    &dates,
+                    &quality,
+                )?),
+                market,
+                actions,
+            }),
+            ResearchCommand::Backtest { training, actions } => {
+                workflow(WorkflowRequest::BacktestResearch { training, actions })
+            }
             ResearchCommand::Run {
                 template,
                 schedule,

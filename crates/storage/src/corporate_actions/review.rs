@@ -462,7 +462,7 @@ mod tests {
             source: "https://static.cninfo.com.cn/finalpage/2024-06-01/a.PDF".into(),
         };
         let book = ActionBundle {
-            schema_version: 3,
+            schema_version: 4,
             source_bindings: Default::default(),
             coverage: Default::default(),
             downloader: "JFQuant analytics-storage corporate-actions".into(),
@@ -544,7 +544,7 @@ mod coverage_tests {
         fs::create_dir_all(original.join("raw")).unwrap();
         fs::create_dir_all(evidence.join("raw")).unwrap();
         let source = ActionBundle {
-            schema_version: 3,
+            schema_version: 4,
             source_bindings: Default::default(),
             coverage: Default::default(),
             downloader: "JFQuant analytics-storage corporate-actions".into(),

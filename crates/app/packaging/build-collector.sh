@@ -24,6 +24,7 @@ fi
 uv pip sync --python "$python_root/bin/python3" --require-hashes "$collector_root/requirements.lock"
 site_root="$python_root/lib/python3.12/site-packages"
 mkdir -p "$site_root"
+rm -rf "$site_root/jfquant_collectors"
 cp -R "$collector_root/jfquant_collectors" "$site_root/"
 cp "$collector_root/requirements.lock" "$collector_root/python-runtime.lock.json" "$python_root/"
 "$python_root/bin/python3" -I -B "$repo_root/crates/app/packaging/rewrite-python.py" "$python_root"

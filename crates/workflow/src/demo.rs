@@ -93,7 +93,10 @@ pub fn create(w: &Workspace) -> Result<(DataVersion, DataVersion, ResearchTempla
         })
         .to_vec();
     let mut book = ActionBundle {
-        schema_version: 4,
+        structured_coverage: Default::default(),
+        execution_issues: Vec::new(),
+        execution_data: None,
+        schema_version: 5,
         source_bindings: Default::default(),
         coverage: Default::default(),
         downloader: "JFQuant analytics-workflow synthetic-demo-v1".into(),

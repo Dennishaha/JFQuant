@@ -2,6 +2,7 @@
 
 import datetime as dt
 import math
+import re
 import time
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -95,6 +96,100 @@ def canonical_yfinance(symbol, frame):
     return out
 
 
+def decode_sina_daily(symbol, text, start, end):
+    """Decode data with pinned AKShare code, never evaluate a remote JS response.
+
+    Sina retains some terminated securities absent from Eastmoney. Its decoded
+    volume is already shares and amount is CNY, unlike Eastmoney's lot volume.
+    """
+    from akshare.stock.cons import hk_js_decode
+    from py_mini_racer import MiniRacer
+
+    identity(symbol)
+    if len(text) > 8_000_000:
+        raise ValueError("sina_daily_response_too_large")
+    comments = r"(?:\s|/\*(?:(?!\*/)[\s\S])*\*/|//[^\n]*(?:\n|$))*"
+    match = re.fullmatch(
+        r"\s*var\s+KLC_K2_" + symbol.lower() + r'\s*=\s*"([A-Za-z0-9+/=]+)"\s*;?' + comments,
+        text,
+    )
+    if match is None:
+        raise ValueError("sina_daily_invalid_security_or_envelope")
+    with MiniRacer() as decoder:
+        decoder.eval(hk_js_decode, timeout=10000)
+        records = decoder.call("d", match.group(1), timeout=10000)
+    if not isinstance(records, list) or not records:
+        raise ValueError("sina_daily_empty_history")
+    rows, seen = [], set()
+    for record in records:
+        if not isinstance(record, dict) or not {
+            "date",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "amount",
+        }.issubset(record):
+            raise ValueError("sina_daily_truncated_fields")
+        day = date(record["date"])
+        if day is None or day in seen:
+            raise ValueError("sina_daily_missing_or_duplicate_date")
+        seen.add(day)
+        row = {"instrument_id": symbol, "trade_date": day}
+        for field in ("open", "high", "low", "close", "volume", "amount"):
+            if record[field] is not None and type(record[field]) not in (int, float):
+                raise ValueError("sina_daily_invalid_numeric_type")
+            row[field] = nullable(record[field])
+            if row[field] is not None and (
+                row[field] < 0 or (field in ("open", "high", "low", "close") and row[field] == 0)
+            ):
+                raise ValueError("sina_daily_invalid_value")
+        for field in ("open", "high", "low", "close"):
+            row["adj_" + field] = None
+        if start <= day <= end:
+            rows.append(row)
+    if [date(r["date"]) for r in records] != sorted(seen):
+        raise ValueError("sina_daily_unsorted_history")
+    if not rows:
+        raise ValueError("sina_daily_requested_history_not_covered")
+    return rows
+
+
+def sina_daily(symbol, start, end, reason="eastmoney_empty_history"):
+    import requests
+
+    identity(symbol)
+    url = (
+        "https://finance.sina.com.cn/realstock/company/"
+        + symbol.lower()
+        + "/hisdata_klc2/klc_kl.js"
+    )
+
+    def fetch():
+        response = requests.get(url, timeout=30, allow_redirects=False)
+        response.raise_for_status()
+        if response.status_code != 200:
+            raise ValueError("sina_daily_unexpected_status_or_redirect")
+        if len(response.content) > 8_000_000:
+            raise ValueError("sina_daily_response_too_large")
+        return response
+
+    response = request_call(fetch)
+    rows = decode_sina_daily(symbol, response.text, start, end)
+    return rows, {
+        "kind": "structured_library_response",
+        "provider": "akshare",
+        "source": "sina.raw-compressed-v1",
+        "url": url,
+        "decoder": "akshare==1.19.1/hk_js_decode",
+        "volume_unit": "share",
+        "amount_unit": "CNY",
+        "fallback_reason": reason,
+        "decoded": rows,
+    }
+
+
 def request_call(call, **kwargs):
     """Bounded network retries. Parsing/validation exceptions are never retried."""
     for attempt in range(3):
@@ -116,6 +211,7 @@ def request_call(call, **kwargs):
 def market(request, report):
     """Single-security chunks allow bounded retry and checkpointing in the Rust supervisor."""
     import akshare as ak
+    import requests
     import yfinance as yf
 
     now = dt.datetime.now(ZoneInfo("Asia/Shanghai"))
@@ -138,6 +234,7 @@ def market(request, report):
         code = identity(symbol)
         report("progress", message="采集 " + symbol)
         if request["provider"] == "akshare":
+            evidence = None
             if symbol in indices:
                 raw = request_call(
                     ak.index_zh_a_hist,
@@ -155,17 +252,36 @@ def market(request, report):
                     "end_date": end.replace("-", ""),
                     "timeout": 30,
                 }
-                raw = request_call(ak.stock_zh_a_hist, **args, adjust="")
-                adjusted = request_call(ak.stock_zh_a_hist, **args, adjust="hfq")
-            if raw.empty or adjusted.empty:
-                raise ValueError("empty provider response: " + symbol)
-            rows = canonical_akshare(symbol, raw, adjusted)
-            evidence = {
-                "kind": "structured_library_response",
-                "provider": "akshare",
-                "raw": raw.to_json(orient="table", date_format="iso"),
-                "adjusted": adjusted.to_json(orient="table", date_format="iso"),
-            }
+                try:
+                    raw = request_call(ak.stock_zh_a_hist, **args, adjust="")
+                except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+                    report("progress", message="东方财富连接失败，尝试新浪原始日线 " + symbol)
+                    rows, evidence = sina_daily(
+                        symbol, start, end, reason="eastmoney_transport_failure"
+                    )
+                if evidence is None and raw.empty:
+                    report("progress", message="东方财富无历史，尝试新浪原始日线 " + symbol)
+                    rows, evidence = sina_daily(symbol, start, end)
+                elif evidence is None:
+                    adjusted = (
+                        raw.iloc[:0]
+                        if request.get("operation") == "quotes"
+                        else request_call(ak.stock_zh_a_hist, **args, adjust="hfq")
+                    )
+            if evidence is None:
+                if raw.empty or (request.get("operation") != "quotes" and adjusted.empty):
+                    raise ValueError("empty provider response: " + symbol)
+                # Quotes acquisition must not depend on adjusted-quote availability.
+                rows = canonical_akshare(symbol, raw, adjusted)
+                evidence = {
+                    "kind": "structured_library_response",
+                    "provider": "akshare",
+                    "source": "akshare.index_zh_a_hist"
+                    if symbol in indices
+                    else "akshare.stock_zh_a_hist",
+                    "raw": raw.to_json(orient="table", date_format="iso"),
+                    "adjusted": adjusted.to_json(orient="table", date_format="iso"),
+                }
         elif request["provider"] == "yfinance":
             if symbol.startswith("BJ"):
                 raise ValueError("Yahoo Beijing mapping is not verified")

@@ -290,6 +290,7 @@ dependencies = [
  "encoding_rs",
  "flate2",
  "parquet",
+ "rustix 1.1.5",
  "serde",
  "serde_json",
  "sha2",

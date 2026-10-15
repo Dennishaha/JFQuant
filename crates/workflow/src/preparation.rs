@@ -85,9 +85,16 @@ pub(crate) fn prepare(
     let root = w.resolve(format!(".jfquant/staging/research-actions-{owner}"));
     let mapping: analytics_core::source_map::SourceMap =
         serde_json::from_value(requirements["source_map"].clone())?;
+    let mut acquisition = requirements.clone();
+    acquisition["collector_signature"] = json!(analytics_storage::collector::collector_signature());
+    acquisition["company_action_source"] = json!(if announcements {
+        "cninfo-announcements"
+    } else {
+        "akshare.cninfo/implemented/per-ten-shares-v1"
+    });
     collect_independent(
         &root,
-        requirements,
+        &acquisition,
         |id, path| {
             let start: analytics_core::Date = serde_json::from_value(
                 requirements["dependencies"][id]["required_history"]["start"]
@@ -120,7 +127,7 @@ pub(crate) fn prepare(
             if announcements {
                 let request = analytics_storage::collector::CollectionRequest {
                     source_bindings: Default::default(),
-                    provider: Default::default(),
+                    provider: analytics_storage::collector::Provider::Akshare,
                     adjustment_source: analytics_storage::adjustment::AdjustmentSource::SinaHfq,
                     start,
                     end,
@@ -133,10 +140,18 @@ pub(crate) fn prepare(
                     json!({"status":"passed","kind":"announcement_candidates","path":path,"instrument":id}),
                 )
             } else {
-                let b = analytics_storage::corporate_actions::fetch_public_resumable(
-                    std::slice::from_ref(&code),
-                    path,
-                )?;
+                let request = analytics_storage::collector::CollectionRequest {
+                    source_bindings: Default::default(),
+                    provider: analytics_storage::collector::Provider::Akshare,
+                    adjustment_source: analytics_storage::adjustment::AdjustmentSource::SinaHfq,
+                    start,
+                    end,
+                    instruments: [code.clone()].into(),
+                    benchmarks: Default::default(),
+                    universes: Default::default(),
+                };
+                let file = analytics_storage::collector::collect_actions(&request, path, context)?;
+                let b = ActionBundle::read(&file)?;
                 if !b.failures.is_empty() {
                     return Err(format!("source failures: {:?}", b.failures).into());
                 }

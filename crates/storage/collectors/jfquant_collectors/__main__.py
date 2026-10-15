@@ -1,4 +1,4 @@
-"""One supervised task per process. stdout is exclusively JSON Lines protocol v7."""
+"""One supervised task per process. stdout is exclusively JSON Lines protocol v9."""
 
 import contextlib
 import hashlib
@@ -12,12 +12,18 @@ from pathlib import Path
 
 from . import PROTOCOL_VERSION
 from .announcements import collect as announcements
+from .cninfo import collect as cninfo_actions
 from .evidence import EvidenceCapture
 from .providers import coefficients, corporate_actions, market
+from .tdx import collect as tdx_collect
+from .tdx import reference
+from .tushare import collect as tushare_actions
+from .tushare import permissions as tushare_permissions
 
 
 def main():
-    protocol = sys.stdout
+    protocol = os.fdopen(os.dup(sys.stdout.fileno()), "w", buffering=1)
+    os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
     capture = None
     code_hash = hashlib.sha256()
     for name in (
@@ -27,6 +33,9 @@ def main():
         "evidence.py",
         "adjustment.py",
         "announcements.py",
+        "tushare.py",
+        "cninfo.py",
+        "tdx.py",
     ):
         code_hash.update(
             name.encode() + b"\0" + Path(__file__).with_name(name).read_bytes() + b"\0"
@@ -62,6 +71,9 @@ def main():
             "actions",
             "announcements",
             "coefficients",
+            "permissions",
+            "calendar",
+            "members",
         ):
             raise ValueError("unsupported collector request")
         signature = "sha256:" + code_hash.hexdigest()
@@ -71,6 +83,7 @@ def main():
             "akshare": importlib.metadata.version("akshare"),
             "yfinance": importlib.metadata.version("yfinance"),
             "python": platform.python_version(),
+            "tdxaidata": importlib.metadata.version("tdxaidata"),
         }
         report("ready", collector_signature=signature, versions=versions)
         cache = Path(request["cache_dir"])
@@ -91,9 +104,22 @@ def main():
                 "market": market,
                 "quotes": market,
                 "coefficients": coefficients,
-                "actions": corporate_actions,
+                "actions": tushare_actions
+                if request["provider"] == "tushare"
+                else cninfo_actions
+                if request["provider"] == "akshare"
+                else corporate_actions,
                 "announcements": announcements,
+                "permissions": tushare_permissions,
+                "calendar": reference,
+                "members": reference,
             }[operation]
+            if operation in ("calendar", "members"):
+                execute = reference
+            elif request["provider"] == "tdxaidata":
+                if operation not in ("market", "quotes", "coefficients", "actions"):
+                    raise ValueError("unsupported_tdxaidata_operation")
+                execute = tdx_collect
             completed = []
             failures = {}
 

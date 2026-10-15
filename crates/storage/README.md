@@ -104,9 +104,9 @@ jfquant data supplement --actions DETAILED_VERSION --method payments --start 201
 jfquant jobs wait TASK_UUID
 ```
 
-`corporate_actions::fetch_public`独立请求东方财富RPT_SHAREBONUS_DET已实施历史和F10 PageAjax到账日期。`enrich_public`用新浪历史表补退市股票和显式红股上市日。`fetch_details`按明确日期区间下载新浪详情，只把纯现金方案“红利起始日”用于到账日，混合送转方案的通用“到账日”不推断为现金发放日；股票只用明确“上市日”。`fetch_pay_dates`再按阿思达克现金行中单独标明的“派送日”补混合方案现金日，要求股票代码、登记日、除权日与分红金额一致，不把其送股行派送日当现金日。所有请求由本项目Rust调用curl、最多4个worker；每次发布新版本，仅允许恢复身份匹配的未完成暂存目录，保存原始响应与SHA256，派生目录验证并复制原有证据。不读取其他项目缓存，也不执行第三方采集代码。
+`data actions`默认走巨潮优先采集（见下文），普通分红不必手动串联补充命令。以下Rust接口保留用于显式证据补采：`corporate_actions::fetch_public`独立请求东方财富RPT_SHAREBONUS_DET已实施历史和F10 PageAjax到账日期。`enrich_public`用新浪历史表补退市股票和显式红股上市日。`fetch_details`按明确日期区间下载新浪详情，只把纯现金方案“红利起始日”用于到账日，混合送转方案的通用“到账日”不推断为现金发放日；股票只用明确“上市日”。`fetch_pay_dates`再按阿思达克现金行中单独标明的“派送日”补混合方案现金日，要求股票代码、登记日、除权日与分红金额一致，不把其送股行派送日当现金日。这些Rust补采请求由本项目调用curl、最多4个worker；每次发布新版本，仅允许恢复身份匹配的未完成暂存目录，保存原始响应与SHA256，派生目录验证并复制原有证据。不读取其他项目缓存；默认巨潮路径使用本项目内置、锁定版本的AKShare适配。
 
-接口：`ActionBundle::read / require_coverage`，schema_version=4；downloader固定来源映射、downloaded_at UTC、queried_symbols、actions、failures和raw_sha256。事件格式遵循core `CorporateAction`；JSON拒绝未知字段。原始每10股数量转换成每旧股，缺失pay_date/listing_date保留null，失败与空历史分开；校验数量/分页、股票身份和日期。公开来源相互冲突记录到failures，不能静默选一边。coverage.json、details_coverage.json和payment_coverage.json列出缺字段及失败；“下载成功”不代表“可执行回测”。源HTML若改版或编码异常则拒绝。
+接口：`ActionBundle::read / require_coverage`，schema_version=5；downloader固定来源映射、downloaded_at UTC、queried_symbols、actions、failures和raw_sha256。事件格式遵循core `CorporateAction`；JSON拒绝未知字段。原始每10股数量转换成每旧股，缺失pay_date/listing_date保留null，失败与空历史分开；校验数量/分页、股票身份和日期。公开来源相互冲突记录到failures，不能静默选一边。coverage.json、details_coverage.json和payment_coverage.json列出缺字段及失败；“下载成功”不代表“可执行回测”。源HTML若改版或编码异常则拒绝。
 
 ```mermaid
 flowchart TD
@@ -200,9 +200,9 @@ flowchart TD
 
 adjustment模块定义AdjustmentSource、AdjustmentRecord、AdjustmentBasis和AdjustmentAnchor。规范行情5保存adjustments/ID.json、原价bars和首个原价收盘锚点；DailyDataset提供adjustment_factors、raw_volume、price_inputs及来源校验。研究价量由原价与F/F0生成，供应商后复权仅留证。Qlib当前读取保持，规范1不转换。接口与复现见[采集包](collectors/README.md)。
 
-## 公司行动4与公告证据
+## 公司行动5与公告证据
 
-ActionBundle仅接收格式4；规范行情为5，采集协议7。旧动作/规范行情/检查点不转换，Qlib当前读取保持。ordinary的公共金额是实际持有人权益；EventTerms的Reference独立核验除权。特殊事件或仅供历史核验的Historical条款都须有实施证据；后者不能进入实际账户。
+ActionBundle仅接收格式5；规范行情为5，采集协议9。旧动作/规范行情/检查点不转换，Qlib当前读取保持。ordinary的公共金额是实际持有人权益；EventTerms的Reference独立核验除权。特殊事件或仅供历史核验的Historical条款都须有实施证据；后者不能进入实际账户。
 
 新增内置announcements采集：固定CNINFO查询及static.cninfo.com.cn PDF路径，验证分页、证券、日期、状态和附件身份；pypdf5.9.0锁定在依赖中，记录PDF、逐页提取文本哈希和候选字段。预案、风险提示及无法确定实施身份的文档不能直接修订。扫描PDF无文本时保留待复核，不OCR猜数值。
 
@@ -238,7 +238,7 @@ flowchart LR
 
 为什么调整：普通市场代码无需先登记身份；独立目录、审核和权威名录下载增加了研究前置负担。特殊历史代码仍需在快照内明确区间，不能将旧证券行情或权益接到另一证券。训练使用价量和标签，到账／交付资料只在实际账户执行时检查。
 
-当前格式：模板8、需求3、准入5、股票池3、公司行动4、规范行情5、系数3、采集7、服务10、研究结果12；快照内来源映射1、训练产物2。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
+当前格式：模板9、需求3、准入5、股票池3、公司行动5、规范行情5、系数3、采集7、服务11、研究结果13；快照内来源映射1、训练产物2。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
 
 来源映射位于快照source_map.json，普通证券可用空exceptions。每个例外含市场代码、资产类别、适用区间及provider/symbol/coverage定位。冲突拒绝；SHT00018只能读取自身旧文件，不自动绑定SH600018。原Qlib文件不改写；显式重新登记冻结文件内容和映射。worker内缓存字段，取消检查以证券和固定批次执行。
 
@@ -255,7 +255,7 @@ flowchart LR
 
 ## 独立系数与组合视图的理由和边界
 
-东方财富报价接口失效时，新浪日期系数仍可能可用。`collect_quotes`、`collect_coefficients`、`collect_actions`可以独立提交、取消和恢复；仅报价快照缺复权依据时仍不具备验证口径准入资格。`CoefficientBundle`格式1保存完整系数、原文和HTTP/协议证据哈希，损坏/部分分片不注册为完整系数版本。采集协议7。
+东方财富报价接口失效时，新浪日期系数仍可能可用。`collect_quotes`、`collect_coefficients`、`collect_actions`可以独立提交、取消和恢复；仅报价快照缺复权依据时仍不具备验证口径准入资格。`CoefficientBundle`格式1保存完整系数、原文和HTTP/协议证据哈希，损坏/部分分片不注册为完整系数版本。采集协议9。
 
 `MarketView`格式1明确组合原Qlib快照和独立新浪系数。原factor用于恢复原价和真实股数，新F/F0用于研究OHLC和反向成交量缩放；金额保持真实元、VWAP由真实金额/股数乘倍率。覆盖前缺系数不使用未来值。两个factor不能互换：原factor含供应商归一化比例，直接覆盖会改变撮合价及真实股数。
 
@@ -271,3 +271,63 @@ flowchart TD
   R --> E[真实账户执行]
   H[原文/解析/文件哈希] --> V
 ```
+
+## 为什么接入Tushare执行资料
+
+行情可供训练不等于资料足以维护真实股份账户。Tushare结构化`dividend`补充每股税前分红、登记、除权、派息及红股上市日期；只接纳实施记录，预案不生成权益。采集沿用固定HTTPS、独立Python子进程、哈希证据和原子发布，不需要新增SDK。`suspend_d`、`stk_limit`、`adj_factor`、`anns_d`分别保存辅助资料和端点权限；权限不足不是空响应。系数仅交叉检查，不覆盖所选行情或原factor。
+
+```mermaid
+flowchart LR
+  K[本机私有凭据文件] --> P[固定Tushare采集进程]
+  P --> E[逐证券完整查询与原始响应]
+  E --> A[公司行动5 / 执行资料1]
+  A --> I[任务内执行索引]
+  I --> C[成交 / 拒单 / 已有权益停止]
+```
+
+`credentials`使用本机私有JSON文件（格式1），目录0700、文件0600，原子替换保存，不再请求系统钥匙串授权。读取校验来源、版本、文件所有者与权限并拒绝链接；损坏内容不回显到错误。Token不进入请求文件、检查点、签名、argv或日志；子进程从私有环境取出后立即移除。带认证的响应若回显凭据，拒绝写入证据。
+
+App凭据配置通过同包jfquant的私有stdin管道执行，App与后台读取同一本机私有凭据目录；配置异步完成，Token不写任务、argv或日志。保存采用0600文件及原子替换，读取校验所有者/权限并拒绝符号链接；无钥匙串调用、授权入口或旧凭据自动读取。Tushare权限错误与频率错误可能共用40203，采集按源返回的明确频率提示区分并生成稳定原因；此分类仅用于诊断和有限重试，不能据此把失败当作无事件。
+
+## 默认巨潮分红：减少常规资料的人工作业
+
+AKShare公司行动请求现在优先调用巨潮历史分红；数据默认入口和研究补采复用相同适配器。巨潮给普通分红的登记、除权、派息事实；新浪匹配补充上市日和独立日期化系数。两者职责按字段明确区分，冲突生成问题而非静默覆盖。这样既能使用公开结构化资料，又不需要每笔普通买单都先做全类别人工证明。
+
+正常操作：`jfquant data collect --kind actions --provider akshare --start 2016-01-01 --end 2026-10-12 --instruments SH600018,SH600000,SZ000001`，仍返回任务ID。没有新增来源配置层；AKShare行情入口及Tushare显式选项保持各自用途。
+
+
+## 通达信优先的采集边界（2026-10-15）
+
+为什么：训练价量、复权系数和账户资料有不同的可用性，不能再由一个下载失败阻断全部补采。`collector::{collect,collect_quotes,collect_coefficients,collect_reference,collect_actions}`共用受监管进程和完整分片校验；独立入口显式选择来源，优先级及备用策略由workflow管理。新增`Provider::Tdxaidata`、`AdjustmentSource::TdxForward`，规范行情5与系数记录3不变。仅原Qlib或来源明确且已核对ForwardFactor规则的TDX资料可显式接受供应商训练口径；AKShare后复权报价不因此取得资格。
+
+```mermaid
+flowchart LR
+  Q[共享采集请求] --> S[隔离SDK / HTTP适配]
+  S --> E[原生或HTTP响应及哈希]
+  E --> V[原价、单位、系数、来源验证]
+  V --> D[统一DailyDataset]
+  D --> T[因子与模型输入]
+  D --> A[原价账户执行]
+```
+
+原生SDK响应与HTTP证据分型保存；不把SDK清洗后的表当原文。SDK临时目录清理、凭据脱敏和崩溃恢复由Rust负责。构建及联网边界见[采集组件](collectors/README.md)。验收：`cargo nextest run -p analytics-storage`集成44项Python离线fixture；真实账户验证与长期稳定性另行记录。
+
+
+## 为什么改用本机凭据文件（2026-10-15）
+
+CC Switch使用本地SQLite保存供应商配置，并对含凭据配置采用0600原子写入；JFQuant借鉴本地持久化及权限约束。这里只需少量数据源Key，无需再引入凭据数据库，选择每供应商一个格式1的JSON文件，避免不同来源并发保存互相覆盖。位置为macOS的`~/Library/Application Support/JFQuant/credentials/{tdxaidata,tushare}.json`；其他Unix平台为`~/.jfquant/credentials/`。
+
+文件保存的是明文Key，依靠当前用户目录0700和文件0600控制访问，不声称文件内容加密。App和CLI直接共用文件；更新程序不会改变文件权限。不属于工作区，不参与Git、研究导出、数据快照或打包，也不自动生成凭据备份。写入先创建0600临时文件、sync后原子替换；读取要求当前用户所有、普通单链接文件并限制长度，拒绝符号链接及宽权限。来源名只接受tdxaidata/tushare。
+
+为什么删除钥匙串：内部试用频繁重编译，系统程序身份变化及单次授权会导致后台仍不能读取；这已成为研究前的实际操作障碍。按用户选择删除钥匙串依赖与授权命令，不自动读取或转换旧钥匙串记录；旧项不删除，需在本机重新输入一次到正式入口。明文文件的适用边界是本机个人研究，若以后增加多人或远程托管，再重新评估集中密钥设施。
+
+```mermaid
+flowchart LR
+  P[App密码框 / CLI私有stdin] --> V[来源及Key格式校验]
+  V --> A[0600临时文件 + 原子替换]
+  A --> F[用户目录私有凭据文件]
+  F --> S[App与服务按任务读取]
+  S --> C[子进程私有环境，随后移除]
+```
+
+依据：[CC Switch配置说明](https://github.com/farion1231/cc-switch/blob/main/docs/user-manual/en/5-faq/5.1-config-files.md)、本机CC Switch `database/schema.rs`的providers.settings_config及`config.rs`的atomic_write_private实现。未读取CC Switch用户数据库或凭据。验收覆盖权限、原子替换、不同来源保留、损坏脱敏、符号链接拒绝和独立CLI进程共享；不需要OS授权。

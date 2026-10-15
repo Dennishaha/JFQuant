@@ -14,6 +14,26 @@ fn positive(p: f64) -> bool {
     p.is_finite() && p > 0.0
 }
 
+/// Account-data trust is independent of factor missing-value and training-price policies.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EventCheckPolicy {
+    /// Accept complete structured histories, retaining unknown special-category coverage warnings.
+    #[default]
+    Provider,
+    /// Require independently audited coverage for every event category.
+    Audited,
+}
+impl EventCheckPolicy {
+    /// User-facing execution policy, shared by App and CLI.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Provider => "采用供应商资料，异常停止",
+            Self::Audited => "要求全类别覆盖核验",
+        }
+    }
+}
+
 /// One implemented distribution. Missing settlement dates remain missing data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

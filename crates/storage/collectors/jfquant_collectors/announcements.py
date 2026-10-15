@@ -64,12 +64,15 @@ def extract_candidates(text, title):
     if re.search(r"预案|草案|摘要|提示性|风险提示|可能|拟|股东大会|董事会", title):
         stage = "unverified"
     labels = (
-        ("record_date", "股权登记日"),
-        ("ex_date", "除权[（(]?息[）)]?日|除权除息日|除息日"),
+        ("record_date", "股权登记日(?:为)?"),
+        ("ex_date", "(?:除权[（(]?息[）)]?日|除权除息日|除息日)(?:为)?"),
         ("pay_date", "现金红利发放日|现金红利派发日|现金红利到账日"),
-        ("listing_date", "新增无限售条件流通股上市日|红股上市日"),
+        (
+            "listing_date",
+            "新增无限售条件流通股(?:份)?上市日|红股上市日|本次所(?:送|转|送转)的无限售流通股的起始交易日(?:为)?",
+        ),
     )
-    date_pattern = r"([0-9]{4})(?:年|/|-)\s*([0-9]{1,2})(?:月|/|-)\s*([0-9]{1,2})日?"
+    date_pattern = r"([0-9]{4})\s*(?:年|/|-)\s*([0-9]{1,2})\s*(?:月|/|-)\s*([0-9]{1,2})\s*日?"
     date_candidates = {field: [] for field, _ in labels}
 
     def capture_date(field, match, quote):
@@ -99,6 +102,26 @@ def extract_candidates(text, title):
                 match = re.fullmatch(date_pattern, cells[index])
                 if re.fullmatch(label, column) and match:
                     capture_date(field, match, header + "\n" + row)
+    # SSE's six-column ordinary-share table wraps two headings across lines.
+    # Accept this exact layout, retaining the complete original block as evidence;
+    # do not infer column positions from an arbitrary list of dates in prose.
+    table_header = (
+        r"股份类别\s+股权登记日\s+最后交易日\s+除权[（(]息[）)]日\s+"
+        r"新增普通股无\s*限售条件流通\s*股份上市日\s+现金红利\s*发放日"
+    )
+    for match in re.finditer(table_header + r"\s*\n([^\n]+)", text):
+        cells = match[1].split()
+        if len(cells) != 6 or cells[0] not in ("Ａ股", "A股", "普通股"):
+            continue
+        for field, index in (
+            ("record_date", 1),
+            ("ex_date", 3),
+            ("listing_date", 4),
+            ("pay_date", 5),
+        ):
+            value = re.fullmatch(date_pattern, cells[index])
+            if value:
+                capture_date(field, value, match[0])
     dates = {}
     for field, candidates in date_candidates.items():
         values = sorted({item["value"] for item in candidates})
@@ -223,7 +246,7 @@ def collect(request, report):
                         "pdf_sha256": "sha256:" + hashlib.sha256(pdf.content).hexdigest(),
                         "text": name + ".txt",
                         "text_sha256": "sha256:" + hashlib.sha256(text.encode()).hexdigest(),
-                        "parser_version": "cninfo-candidates-v2",
+                        "parser_version": "cninfo-candidates-v3",
                         "candidates": extract_candidates(text, title),
                     }
                 )

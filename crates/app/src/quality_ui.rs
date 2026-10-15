@@ -35,6 +35,33 @@ pub(crate) fn controls(ui: &mut egui::Ui, policy: &mut ResearchQualityPolicy) {
 }
 
 pub(crate) fn reasons(ui: &mut egui::Ui, value: &Value) {
+    match value["backtest_status"].as_str() {
+        Some("execution_data_not_ready") => {
+            ui.colored_label(
+                egui::Color32::RED,
+                "回测资料未就绪：全部买单因资料问题被拒绝，不作为策略收益。",
+            );
+        }
+        Some("no_valid_trades") => {
+            ui.label("无有效交易，不作为策略效果验收。");
+        }
+        _ => {}
+    }
+    if let Ok(policy) = serde_json::from_value::<analytics_core::execution::EventCheckPolicy>(
+        value["execution"]["event_check_policy"].clone(),
+    ) {
+        ui.label(format!("账户资料检查：{}", policy.label()));
+    }
+    if let Some(warnings) = value["execution_warnings"].as_array() {
+        ui.collapsing(
+            format!("执行资料告警（{}项）", warnings.len()),
+            |ui| {
+                for warning in warnings {
+                    ui.label(warning.as_str().unwrap_or("资料未完全核验"));
+                }
+            },
+        );
+    }
     let basis = if value["price_basis"].is_string() {
         &value["price_basis"]
     } else {

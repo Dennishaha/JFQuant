@@ -339,10 +339,52 @@ impl DailyDataset {
             })
         }
     }
-    /// Only an unmodified Qlib contract can be explicitly trusted as supplier training input.
+    /// Unmodified Qlib or frozen TDX raw/ForwardFactor inputs support explicit provider trust.
+    /// AKShare HFQ quotes never acquire this capability merely by selecting an option.
     pub fn supports_provider_training(&self) -> bool {
+        if self.view.is_some() {
+            return false;
+        }
+        if matches!(self.kind, DailyKind::Qlib(_)) {
+            return true;
+        }
+        let source = self
+            .root
+            .parent()
+            .and_then(|p| fs::read(p.join("jfquant_source.json")).ok())
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+        let trusted = source.is_some_and(|s| {
+            s["snapshot_verified"] == true
+                && (s["provider"] == "tdxaidata"
+                    || s["security_sources"].as_object().is_some_and(|sources| {
+                        !sources.is_empty()
+                            && sources.values().all(|s| s["provider"] == "tdxaidata")
+                    }))
+        });
+        if !trusted {
+            return false;
+        }
+        let DailyKind::Parquet(m) = &self.kind else {
+            return false;
+        };
+        m.price_basis == "unadjusted"
+            && m.instruments.iter().all(|id| {
+                self.adjustment_record(id).is_ok_and(|r| {
+                    matches!(
+                        r.basis,
+                        crate::adjustment::AdjustmentBasis::Explicit {
+                            source: crate::adjustment::FactorSource::TdxForward,
+                            ..
+                        } | crate::adjustment::AdjustmentBasis::PriceIndex { .. }
+                    )
+                })
+            })
+    }
+    /// Composition can recover raw values only from the original Qlib contract.
+    pub fn is_original_qlib(&self) -> bool {
         self.view.is_none() && matches!(self.kind, DailyKind::Qlib(_))
     }
+
     /// Whether the format provides verified raw execution prices.
     pub fn has_raw_prices(&self) -> bool {
         match &self.kind {

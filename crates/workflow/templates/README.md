@@ -6,7 +6,7 @@
 
 | 文件 | 保存什么 | 不保存什么 |
 |---|---|---|
-| annual-rolling.json / csi300-annual.json，工作流8 | 日期、模型参数、样本策略、资金费用、组合参数、相对profile引用 | 因子列表、成员历史 |
+| annual-rolling.json / csi300-annual.json，工作流9 | 日期、模型参数、样本策略、资金费用、组合参数、相对profile引用 | 因子列表、成员历史 |
 | factors/*.json，FactorProfile1 | 单一组合、固定公式版本、有序特征、训练价格口径 | 股票池、日期、费用 |
 | targets/*.json，TargetProfile1 | 股票池版本或builtin名、基准、移除持仓策略 | 因子列表、训练参数 |
 
@@ -14,7 +14,7 @@ csi300-annual默认2012年起测，5年训练+1年验证；annual-rolling保留�
 
 ```mermaid
 flowchart TD
-  W[工作流8：日程和模型/账户参数] --> RESOLVE[解析相对profile引用]
+  W[工作流9：日程和模型/账户参数] --> RESOLVE[解析相对profile引用]
   F[因子1：GTJA191或Alpha158] --> RESOLVE
   U[标的1：池和基准] --> RESOLVE
   RESOLVE --> VALIDATE[共用参数与因子顺序校验]
@@ -38,3 +38,5 @@ jfquant research train --template research/combined.json --market MARKET_ID --fa
 相对路径以工作区解析；profile内部引用相对工作流文件。显式profile覆盖后再应用命令行组合/口径覆盖：--factor-set重置为该组合完整特征，--price-basis只改变来源口径。App相同操作调用profiles模块。默认verified/strict；provider仅允许可信原Qlib研究价量，不能用于绕过损坏、冲突或真实账户权益缺项。
 
 开发验收：`DUCKDB_DOWNLOAD_LIB=1 cargo nextest run -p analytics-workflow -p analytics-cli`。覆盖共享profile复用、标的替换不改变因子、整体目录迁移、相对引用、旧格式拒绝、错误profile不部分修改当前配置、实际原生训练。受控默认文件不包含本地数据版本，用户模板、证据、模型和运行记录不提交。
+
+执行策略保存在流程9的event_check_policy；默认provider即“采用供应商资料，异常停止”，audited即“要求全类别覆盖核验”。它不属于因子输入或股票池定义，因此两个profile格式不变。使用供应商资料的结果必须保留特殊事件覆盖未知告警。

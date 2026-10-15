@@ -7,6 +7,27 @@ from jfquant_collectors.announcements import attachment_url, collect, extract_ca
 
 
 class AnnouncementTests(unittest.TestCase):
+    def test_pdf_spaces_and_share_listing_wording_keep_exact_evidence(self):
+        text = "股权登记日：2016 年 6 月22 日\n新增无限售条件流通股份上市日：2016 年 6 月 24 日"
+        result = extract_candidates(text, "利润分配及资本公积转增股本实施公告")
+        self.assertEqual(result["dates"]["record_date"], "2016-06-22")
+        self.assertEqual(result["dates"]["listing_date"], "2016-06-24")
+        self.assertIn(result["date_candidates"]["listing_date"][0]["quote"], text)
+
+    def test_exact_wrapped_sse_table_and_szse_start_trading_date(self):
+        header = "股份类别 股权登记日 最后交易日 除权（息）日\n新增普通股无\n限售条件流通\n股份上市日\n现金红利\n发放日"
+        row = "Ａ股 2020/5/24 － 2020/5/25 2020/5/26 2020/5/25"
+        result = extract_candidates(header + "\n" + row, "权益分派实施公告")
+        self.assertEqual(result["dates"]["listing_date"], "2020-05-26")
+        result = extract_candidates(
+            header + "\n" + row.replace("2020/5/26", "－"), "权益分派实施公告"
+        )
+        self.assertIsNone(result["dates"]["listing_date"])
+        result = extract_candidates(
+            "本次所转的无限售流通股的起始交易日为 2020 年 6 月 16 日。", "权益分派实施公告"
+        )
+        self.assertEqual(result["dates"]["listing_date"], "2020-06-16")
+
     def test_table_dates_keep_dash_column_and_amount_units_with_quotes(self):
         text = (
             "股份类别 股权登记日 最后交易日 除权（息）日 现金红利发放日\n"

@@ -245,5 +245,7 @@ pub mod transport;
 /// Independent dated multiplicative adjustment coefficients.
 pub mod adjustment;
 
+pub mod credentials;
+pub mod execution_data;
 /// Immutable explicit-coefficient views over unmodified Qlib data.
 pub mod market_view;

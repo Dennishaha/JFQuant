@@ -1285,7 +1285,7 @@ fn service_client_tasks_appear_in_egui_can_be_cancelled_and_share_research_resul
         })
         .unwrap();
     h.wait_for(|app| !app.state.busy() && app.state.platform.runs.iter().any(|r| r.id == task));
-    assert_eq!(h.app.state.platform.template.schema_version, 8);
+    assert_eq!(h.app.state.platform.template.schema_version, 9);
     h.app.state.panel = Panel::Research;
     h.click("执行年度研究");
     h.wait_for(|app| !app.state.busy() && app.state.platform.details.get("aggregate").is_some());
@@ -1561,4 +1561,34 @@ fn alpha158_provider_training_without_actions_uses_shared_backend_and_split_prof
         h.app.state.platform.details["feature_order"],
         serde_json::json!(h.app.state.platform.template.config.factor_ids)
     );
+}
+#[test]
+fn credentials_are_never_in_platform_debug_output() {
+    let state = crate::platform::PlatformState {
+        tushare_token: "private-fixture-token".into(),
+        tdx_key: "private-tdx-fixture-key".into(),
+        ..Default::default()
+    };
+    let value = format!("{state:?}");
+    assert!(!value.contains("private-fixture-token"));
+    assert!(!value.contains("private-tdx-fixture-key"));
+    assert!(value.contains("[redacted]"));
+}
+
+#[test]
+fn acquisition_defaults_match_all_purpose_tdx_first_policy() {
+    let state = crate::platform::PlatformState::default();
+    assert_eq!(
+        state.collection_provider,
+        analytics_storage::collector::Provider::Tdxaidata
+    );
+    assert_eq!(
+        state.adjustment_source,
+        analytics_storage::adjustment::AdjustmentSource::TdxForward
+    );
+    let policy: analytics_workflow::refresh::SourcePolicy =
+        serde_json::from_str(&state.source_policy_editor).unwrap();
+    for sources in policy.priorities.values() {
+        assert_eq!(sources[0], state.collection_provider);
+    }
 }

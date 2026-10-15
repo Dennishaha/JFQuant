@@ -26,7 +26,7 @@ use std::{
 };
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 13;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TaskRequest {
@@ -522,6 +522,10 @@ pub fn serve(root: &Path) -> Result<()> {
         .lease()
         .map_err(|e| ServiceError::new("workspace_locked", e))?;
     workspace.recover().map_err(failure)?;
+    for directory in [".jfquant/staging", ".jfquant/runs"] {
+        analytics_storage::collector::cleanup_private_runtimes(&workspace.resolve(directory))
+            .map_err(failure)?;
+    }
     let socket = socket_path(workspace.root())?;
     if socket.exists() {
         fs::remove_file(&socket).map_err(failure)?;
@@ -741,6 +745,41 @@ impl Client {
 }
 pub fn find_binary() -> Result<PathBuf> {
     locate_binary().map_err(|e| ServiceError::new("cli_missing", e))
+}
+/// Configure through the same executable so App and CLI share private local credential files.
+/// The credential travels over a private stdin pipe; no task, argv or log contains it.
+/// Save a known provider key through the same private file store as the service.
+pub fn configure_source(provider: &str, token: &str) -> Result<()> {
+    if !matches!(provider, "tdxaidata" | "tushare") {
+        return Err(failure("credential_provider_unsupported"));
+    }
+    use std::process::Stdio;
+    let mut child = std::process::Command::new(find_binary()?)
+        .args([
+            "data",
+            "sources",
+            "configure",
+            "--provider",
+            provider,
+            "--key-stdin",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(failure)?;
+    let mut input = child
+        .stdin
+        .take()
+        .ok_or_else(|| failure("credential_input_unavailable"))?;
+    input.write_all(token.as_bytes()).map_err(failure)?;
+    drop(input);
+    if !child.wait().map_err(failure)?.success() {
+        return Err(failure(
+            "credential_store_failed: check private credential-directory permissions",
+        ));
+    }
+    Ok(())
 }
 pub fn resolve_workspace(explicit: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(p) = explicit.or_else(|| std::env::var_os("JFQUANT_WORKSPACE").map(PathBuf::from)) {

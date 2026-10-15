@@ -36,6 +36,7 @@ pub struct WorkflowDocument {
     pub target: PathBuf,
     pub schedule: analytics_core::schedule::Schedule,
     pub action_policy: analytics_core::actions::ActionPolicy,
+    pub event_check_policy: analytics_core::execution::EventCheckPolicy,
     pub quality_policy: analytics_core::research_quality::ResearchQualityPolicy,
     pub top_n: usize,
     pub rebalance_days: usize,
@@ -119,15 +120,16 @@ impl TargetProfile {
 impl WorkflowDocument {
     /// Resolve shared profiles into the single common request used by App and CLI.
     pub fn resolve(self, f: FactorProfile, u: TargetProfile) -> Result<ResearchTemplate> {
-        if self.schema_version != 8 {
+        if self.schema_version != 9 {
             return Err("unsupported_workflow_template_format".into());
         }
         let mut t = ResearchTemplate {
-            schema_version: 8,
+            schema_version: 9,
             id: self.id,
             name: self.name,
             schedule: self.schedule,
             action_policy: self.action_policy,
+            event_check_policy: self.event_check_policy,
             quality_policy: self.quality_policy,
             config: ResearchConfig {
                 top_n: self.top_n,
@@ -189,13 +191,14 @@ impl WorkflowDocument {
         persist(&parent.join(&fp), &f)?;
         persist(&parent.join(&up), &u)?;
         let d = Self {
-            schema_version: 8,
+            schema_version: 9,
             id: t.id.clone(),
             name: t.name.clone(),
             factors: fp,
             target: up,
             schedule: t.schedule.clone(),
             action_policy: t.action_policy.clone(),
+            event_check_policy: t.event_check_policy,
             quality_policy: t.quality_policy.clone(),
             top_n: t.config.top_n,
             rebalance_days: t.config.rebalance_days,

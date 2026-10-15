@@ -17,6 +17,9 @@ pub(super) fn render(output: &Path) -> Result<()> {
     let percent = |v: f64| format!("{:.2}%", v * 100.0);
     let rate = |v: f64| format!("{:.5}%", v * 100.0);
     let mut md = String::from("# JFQuant 所选股票池日期调度研究\n\n");
+    if summary["backtest_status"] == "execution_data_not_ready" {
+        md.push_str("**回测资料未就绪：全部买单因执行资料缺项被拒绝，本次不是策略收益。**\n\n");
+    }
     if summary["backtest_status"] == "no_valid_trades" {
         md.push_str("**无有效交易。账户保留现金，本次结果不能用于判断策略效果。**\n\n");
     }
@@ -52,6 +55,13 @@ pub(super) fn render(output: &Path) -> Result<()> {
         .strictness
         .label(),
         summary["research_scope"].as_str().unwrap_or("?")
+    )?;
+    let policy: analytics_core::execution::EventCheckPolicy =
+        serde_json::from_value(summary["execution"]["event_check_policy"].clone())?;
+    writeln!(
+        md,
+        "账户资料检查：{}；特殊事件覆盖告警见 execution_warnings.json。\n",
+        policy.label()
     )?;
     md.push_str("日终信号、下一开盘按不复权价格和整数股数成交，按执行快照的调仓间隔和持仓数量调整目标等权。账本跨年度连续，登记日确定权益，到账日释放现金，上市日释放红股，日终净值包含应收权益，不做年度虚拟平仓。训练/验证剔除跨截止日标签，仅验证集用于早停。\n\n");
     writeln!(
@@ -146,7 +156,7 @@ pub(super) fn render(output: &Path) -> Result<()> {
             }
         )?;
     }
-    md.push_str("\n停牌缺报价不成交并延用估值；严格模式在除权日调整停牌估值并单列权益。涨跌停仍用板块限制减0.5个百分点的保守缓冲，缺少精确涨跌停、ST、上市特例、逐笔流动性及退市清算数据；结果不是完整实盘成交复现。配股、差异化分派、换股、重整和退市按冻结事件及普通持有人策略执行；缺少参考、资格、结算、零碎股分配或估值证据时阻止执行。因子采用756日预热；SMA初值、排名并列及样本标准差为显式约定。\n\n年化按252交易日，Sharpe无风险利率取0；部分年度不冒充全年。IC标签为下一开盘至再下一开盘收益，组合按配置间隔调仓，两者期限不同。\n\n## 复核与复现\n\n- [执行、费率及税率快照](execution.json)\n- [来源和覆盖](data_audit.json)\n- [191项因子审计](factor_audit.json)\n- [完整汇总](summary.json)\n- [年度报告](annual_reports.json)\n- [逐日净值](nav.csv)\n- 各fold保留模型、manifest、预测、daily.json；同时保存整数股账本ledger.json。复现见crates/ml/README.md。\n\n费用快照核验来源：\n\n");
+    md.push_str("\n经证实停牌时缺报价不成交并沿用估值，除权日调整估值并单列权益。存在精确每日涨跌停资料时优先使用；缺失时采用板块限制减0.5个百分点的保守缓冲。日内停牌无开盘可交易依据时拒单，缺少逐笔流动性等信息，结果不是完整实盘成交复现。配股、差异化分派、换股、重整和退市按冻结事件及普通持有人策略执行；缺少参考、资格、结算、零碎股分配或估值证据时阻止执行。因子采用756日预热；SMA初值、排名并列及样本标准差为显式约定。\n\n年化按252交易日，Sharpe无风险利率取0；部分年度不冒充全年。IC标签为下一开盘至再下一开盘收益，组合按配置间隔调仓，两者期限不同。\n\n## 复核与复现\n\n- [执行、费率及税率快照](execution.json)\n- [来源和覆盖](data_audit.json)\n- [191项因子审计](factor_audit.json)\n- [完整汇总](summary.json)\n- [年度报告](annual_reports.json)\n- [逐日净值](nav.csv)\n- 各fold保留模型、manifest、预测、daily.json；同时保存整数股账本ledger.json。复现见crates/ml/README.md。\n\n费用快照核验来源：\n\n");
     for source in &rules.sources {
         writeln!(md, "- <{source}>")?;
     }

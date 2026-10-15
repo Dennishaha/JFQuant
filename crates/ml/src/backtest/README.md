@@ -11,7 +11,7 @@
 | [data.rs](data.rs) | 756交易日预热、历史成员面板、因子列、跨边界标签；年度 `.json + .bin` 缓存和矩阵拼接 |
 | [raw_portfolio.rs](raw_portfolio.rs) | 公司行动准入、每日原价与常规限价缓冲、调仓、T+1；`RawPortfolio` 跨模型年份持续 |
 | [portfolio.rs](portfolio.rs) | `DayResult/Performance`、每日IC/RankIC与收益/回撤/费用统计；没有复权碎股模拟器 |
-| [report.rs](report.rs) | 先校验schema12严格结果，再渲染report.md和nav.csv；不训练或改变策略 |
+| [report.rs](report.rs) | 先校验schema13严格结果，再渲染report.md和nav.csv；不训练或改变策略 |
 
 ```mermaid
 flowchart TD
@@ -25,7 +25,7 @@ flowchart TD
   ACCOUNT --> NEXT["下一年度模型：保留账户状态"]
   NEXT --> RAW
   ACCOUNT --> STATS["portfolio：年度与连续账户统计"]
-  STATS --> REPORT["report：schema12、年度表与净值 CSV"]
+  STATS --> REPORT["report：schema13、年度表与净值 CSV"]
 ```
 
 ## 时间、缓存和撮合语义
@@ -40,7 +40,7 @@ flowchart TD
 
 ## 结果、手算与验收
 
-完整产物表见 [ML README](../../README.md)。schema12包含双签名、公式版本、执行配置、年度报告及汇总；`validate_result`被报告、平台读取和只读导入复用。旧格式返回unsupported_result_format，不迁移或重新计费。
+完整产物表见 [ML README](../../README.md)。schema13包含双签名、公式版本、执行配置、年度报告及汇总；`validate_result`被报告、平台读取和只读导入复用。旧格式返回unsupported_result_format，不迁移或重新计费。
 
 合成平台fixture用1005元、最低5元佣金买100股；每股分红0.1元并送0.1股，之后原价9元，两个样本外年末均为110股与现金10元，累计费用5元，总收益−5/1005。跨年延迟支付/上市fixture另外验证登记后出售、到账前不可花费/出售和除权估值。
 
@@ -69,7 +69,7 @@ flowchart TD
   CHECK --> LEDGER["整数股、T+1、跨年持仓与权益"]
   POOL --> EXIT["移除后按策略启动退出，阻碍持续重试"]
   EXIT --> LEDGER
-  LEDGER --> EVENTS["pool_events.jsonl、年度账本、结果schema12"]
+  LEDGER --> EVENTS["pool_events.jsonl、年度账本、结果schema13"]
 ```
 
 移除持仓的默认策略为下一可交易日退出，可选择下次正常调仓启动退出；该退出不依赖新的预测。停牌、涨跌停及T+1阻碍会记录并重试；重新入池取消未成交退出，正常调仓避免重复卖出。退池前登记的分红和红股权益继续结算，红股上市后仍按股票池资格处理。空池保持现金和既有权益，不扩大股票池。训练/验证无有效样本失败，训练价量依据缺失时停止训练；实际持仓权益缺失时停止回测。
@@ -117,7 +117,7 @@ flowchart LR
 
 为什么调整：普通市场代码无需先登记身份；独立目录、审核和权威名录下载增加了研究前置负担。特殊历史代码仍需在快照内明确区间，不能将旧证券行情或权益接到另一证券。训练使用价量和标签，到账／交付资料只在实际账户执行时检查。
 
-当前格式：模板8、需求3、准入5、股票池3、公司行动4、规范行情5、系数3、采集7、服务10、研究结果12；快照内来源映射1、训练产物2。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
+当前格式：模板9、需求3、准入5、股票池3、公司行动5、规范行情5、系数3、采集7、服务11、研究结果13；快照内来源映射1、训练产物2。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
 
 ```mermaid
 flowchart LR
@@ -141,3 +141,9 @@ flowchart LR
 provider只改变历史训练对账的处理方式，raw_portfolio.rs不改原价、整数股、权益和估值要求；实际账户失败保留已训练模型。不同训练组合使用同一真实账户规则，不能借对照实验换成本或资金。 完整接口、why、边界和验收见[组件契约](../../README.md)。
 
 YearInputs传入实际universe_id，因子内部请求不再写死中证500；池、基准和签名始终来自解析后的TargetProfile。这个调整避免跨指数研究留下误导性元数据，不改变GTJA公式或Alpha算子。
+
+## 为什么使用执行索引
+
+原实现每笔买入调用全包扫描并要求九类证明。RawPortfolio现在持有一次构建的ExecutionIndex，按当日公开知识与实际账户依赖检查；保留供应商覆盖告警，记录稳定拒单原因。独立训练产物2保持不变，backtest_from_training_with_policy仅改变执行策略，模型与特征口径必须匹配原产物。当天无法解释的系数变化仍拦截，不放宽事件对账0.002阈值。
+
+`AdjustmentContext`把账户日期、执行索引和行情系数类型传给逐日检查。优先选冻结动作包内的独立新浪系数，按最近已生效点计算；缺历史锚点或超过验证截止日明确报错。恢复原价的Qlib字段不再被误用为该独立证据。回归覆盖Qlib字段有微动但独立系数不变，以及真实独立跳变仍被拦截。

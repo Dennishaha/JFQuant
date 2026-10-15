@@ -71,6 +71,10 @@ pub enum WorkspaceCommand {
 }
 #[derive(Debug, Subcommand)]
 pub enum DataCommand {
+    #[command(subcommand)]
+    Sources(SourceCommand),
+    Refresh(RefreshArgs),
+    TusharePermissions {},
     Compose {
         #[arg(long)]
         market: String,
@@ -83,7 +87,7 @@ pub enum DataCommand {
     Collect {
         #[arg(long, value_enum, default_value = "market")]
         kind: CollectionKind,
-        #[arg(long, value_enum, default_value = "akshare")]
+        #[arg(long, value_enum, default_value = "tdxaidata")]
         provider: CollectionProvider,
         #[arg(long, value_enum)]
         adjustment_source: Option<CollectionAdjustment>,
@@ -156,6 +160,12 @@ pub enum DataCommand {
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum CollectionKind {
+    /// CNINFO implementation documents and review candidates; not account-ready events.
+    Announcements,
+    /// Independent exchange calendar, without daily quote downloads.
+    Calendar,
+    /// Current dated members, never historical backfill.
+    Members,
     /// Quotations only; independent coefficient availability is checked separately.
     Quotes,
     /// Independent source factors, without quote downloads.
@@ -165,13 +175,71 @@ pub enum CollectionKind {
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum CollectionProvider {
+    Tdxaidata,
     Akshare,
     Yfinance,
+    Tushare,
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum CollectionAdjustment {
+    TdxForward,
     SinaHfq,
     None,
+}
+#[derive(Debug, Subcommand)]
+pub enum SourceCommand {
+    List,
+    Configure {
+        #[arg(long, value_enum)]
+        provider: CollectionProvider,
+        #[arg(long, required = true)]
+        key_stdin: bool,
+    },
+    Check {
+        #[arg(long, value_enum, default_value = "tdxaidata")]
+        provider: CollectionProvider,
+    },
+    /// Save validated source priorities, separate from factor and universe profiles.
+    Policy {
+        #[arg(long)]
+        file: PathBuf,
+    },
+}
+impl From<CollectionProvider> for analytics_storage::collector::Provider {
+    fn from(value: CollectionProvider) -> Self {
+        match value {
+            CollectionProvider::Tdxaidata => Self::Tdxaidata,
+            CollectionProvider::Akshare => Self::Akshare,
+            CollectionProvider::Yfinance => Self::Yfinance,
+            CollectionProvider::Tushare => Self::Tushare,
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, ValueEnum, Default)]
+pub enum RefreshModeValue {
+    #[default]
+    Incremental,
+    Repair,
+    Full,
+}
+#[derive(Debug, Args)]
+pub struct RefreshArgs {
+    #[arg(long)]
+    pub template: PathBuf,
+    #[arg(long)]
+    pub market: String,
+    #[arg(long)]
+    pub actions: Option<String>,
+    #[arg(long, value_enum, default_value = "incremental")]
+    pub mode: RefreshModeValue,
+    #[arg(long, value_enum)]
+    pub provider: Option<CollectionProvider>,
+    #[arg(long)]
+    pub end: Option<String>,
+    #[arg(long)]
+    pub preview: bool,
+    #[arg(long)]
+    pub resume: Option<Uuid>,
 }
 #[derive(Debug, Subcommand)]
 pub enum PoolCommand {
@@ -351,10 +419,17 @@ pub struct QualityOptions {
     pub factor_set: Option<FactorSetValue>,
     #[arg(long, value_enum)]
     pub strictness: Option<StrictnessValue>,
+    #[arg(long, value_enum)]
+    pub event_check: Option<EventCheckValue>,
     #[arg(long)]
     pub min_valid_feature_ratio: Option<f64>,
     #[arg(long)]
     pub min_labeled_rows: Option<usize>,
+}
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum EventCheckValue {
+    Provider,
+    Audited,
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum PriceBasisValue {
@@ -380,6 +455,12 @@ pub enum StrictnessValue {
 impl QualityOptions {
     fn apply(&self, t: &mut ResearchTemplate) -> std::result::Result<(), ServiceError> {
         use analytics_core::research_quality::{FactorSet, PriceBasis, ResearchStrictness};
+        if let Some(policy) = self.event_check {
+            t.event_check_policy = match policy {
+                EventCheckValue::Provider => analytics_core::execution::EventCheckPolicy::Provider,
+                EventCheckValue::Audited => analytics_core::execution::EventCheckPolicy::Audited,
+            };
+        }
         if let Some(basis) = self.price_basis {
             t.price_basis = match basis {
                 PriceBasisValue::Verified => PriceBasis::Verified,
@@ -475,6 +556,8 @@ pub enum ResearchCommand {
         actions: Option<String>,
     },
     Backtest {
+        #[arg(long, value_enum, default_value = "provider")]
+        event_check: EventCheckValue,
         #[arg(long)]
         training: Uuid,
         #[arg(long)]
@@ -633,6 +716,23 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
         .join()
         .map_err(|_| invalid("native self-check panicked"))?;
     }
+    if let Command::Data(DataCommand::Sources(SourceCommand::Configure { provider, .. })) =
+        &cli.command
+    {
+        use std::io::Read;
+        let name = match provider {
+            CollectionProvider::Tdxaidata => "tdxaidata",
+            CollectionProvider::Tushare => "tushare",
+            _ => return Err(invalid("credential_provider_unsupported")),
+        };
+        let mut token = String::new();
+        std::io::stdin()
+            .take(4096)
+            .read_to_string(&mut token)
+            .map_err(invalid)?;
+        analytics_storage::credentials::save_source(name, token.trim()).map_err(invalid)?;
+        return Ok(json!({"credential":name,"stored":true,"storage":"private_local_file"}));
+    }
     let root = analytics_workflow::service::resolve_workspace(cli.workspace)?;
     if matches!(cli.command, Command::Service(ServiceCommand::Serve)) {
         analytics_workflow::service::serve(&root)?;
@@ -648,6 +748,51 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
         Command::Service(ServiceCommand::Stop) => return client.call(Rpc::Stop),
         Command::Service(ServiceCommand::Restart) => return client.call(Rpc::Restart),
         Command::Data(command) => match command {
+            DataCommand::Sources(SourceCommand::List) => {
+                synchronous = true;
+                workflow(WorkflowRequest::SourceStatus {})
+            }
+            DataCommand::Sources(SourceCommand::Policy { file }) => {
+                workflow(WorkflowRequest::SaveSourcePolicy {
+                    policy: read(&client.root, &file)?,
+                })
+            }
+            DataCommand::Sources(SourceCommand::Check { provider }) => {
+                workflow(WorkflowRequest::CheckSource {
+                    provider: provider.into(),
+                })
+            }
+            DataCommand::Sources(SourceCommand::Configure { .. }) => {
+                unreachable!("handled before connecting")
+            }
+            DataCommand::Refresh(args) => {
+                let template = ResearchTemplate::read(&resolve(&client.root, &args.template))
+                    .map_err(invalid)?;
+                synchronous = args.preview;
+                workflow(WorkflowRequest::RefreshData {
+                    request: Box::new(analytics_workflow::refresh::RefreshRequest {
+                        template: Box::new(template),
+                        market: args.market,
+                        actions: args.actions,
+                        mode: match args.mode {
+                            RefreshModeValue::Incremental => {
+                                analytics_workflow::refresh::RefreshMode::Incremental
+                            }
+                            RefreshModeValue::Repair => {
+                                analytics_workflow::refresh::RefreshMode::Repair
+                            }
+                            RefreshModeValue::Full => {
+                                analytics_workflow::refresh::RefreshMode::Full
+                            }
+                        },
+                        provider: args.provider.map(Into::into),
+                        end: args.end.map(|s| s.parse().map_err(invalid)).transpose()?,
+                        preview: args.preview,
+                        resume: args.resume,
+                    }),
+                })
+            }
+            DataCommand::TusharePermissions {} => workflow(WorkflowRequest::TusharePermissions {}),
             DataCommand::Compose {
                 market,
                 coefficients,
@@ -682,23 +827,40 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
                 resume,
             } => {
                 use analytics_storage::adjustment::AdjustmentSource;
+                if matches!(provider, CollectionProvider::Tushare)
+                    && !matches!(kind, CollectionKind::Actions)
+                {
+                    return Err(invalid(
+                        "Tushare only supports --kind actions execution data",
+                    ));
+                }
                 let adjustment_source = match adjustment_source {
+                    Some(CollectionAdjustment::TdxForward) => AdjustmentSource::TdxForward,
                     Some(CollectionAdjustment::SinaHfq) => AdjustmentSource::SinaHfq,
                     Some(CollectionAdjustment::None) => AdjustmentSource::None,
                     None => match provider {
+                        CollectionProvider::Tdxaidata => AdjustmentSource::TdxForward,
                         CollectionProvider::Akshare => AdjustmentSource::SinaHfq,
-                        CollectionProvider::Yfinance => AdjustmentSource::None,
+                        CollectionProvider::Yfinance | CollectionProvider::Tushare => {
+                            AdjustmentSource::None
+                        }
                     },
                 };
                 let mut request = analytics_storage::collector::CollectionRequest {
                     source_bindings: Default::default(),
                     adjustment_source,
                     provider: match provider {
+                        CollectionProvider::Tdxaidata => {
+                            analytics_storage::collector::Provider::Tdxaidata
+                        }
                         CollectionProvider::Akshare => {
                             analytics_storage::collector::Provider::Akshare
                         }
                         CollectionProvider::Yfinance => {
                             analytics_storage::collector::Provider::Yfinance
+                        }
+                        CollectionProvider::Tushare => {
+                            analytics_storage::collector::Provider::Tushare
                         }
                     },
                     start: start.parse().map_err(invalid)?,
@@ -707,7 +869,10 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
                     benchmarks: benchmarks.into_iter().collect(),
                     universes: universes.into_iter().collect(),
                 };
-                if matches!(kind, CollectionKind::Actions) {
+                if matches!(
+                    kind,
+                    CollectionKind::Actions | CollectionKind::Announcements
+                ) {
                     request.instruments = request
                         .instruments
                         .difference(&request.benchmarks)
@@ -719,6 +884,21 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
 
                 request.validate().map_err(invalid)?;
                 workflow(match kind {
+                    CollectionKind::Announcements => {
+                        WorkflowRequest::CollectAnnouncements { request, resume }
+                    }
+                    CollectionKind::Calendar | CollectionKind::Members => {
+                        WorkflowRequest::CollectReference {
+                            request,
+                            kind: if matches!(kind, CollectionKind::Calendar) {
+                                "calendar"
+                            } else {
+                                "members"
+                            }
+                            .into(),
+                            resume,
+                        }
+                    }
                     CollectionKind::Coefficients => {
                         WorkflowRequest::CollectCoefficients { request, resume }
                     }
@@ -945,9 +1125,22 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
                 market,
                 actions,
             }),
-            ResearchCommand::Backtest { training, actions } => {
-                workflow(WorkflowRequest::BacktestResearch { training, actions })
-            }
+            ResearchCommand::Backtest {
+                training,
+                actions,
+                event_check,
+            } => workflow(WorkflowRequest::BacktestResearch {
+                training,
+                actions,
+                event_check_policy: match event_check {
+                    EventCheckValue::Provider => {
+                        analytics_core::execution::EventCheckPolicy::Provider
+                    }
+                    EventCheckValue::Audited => {
+                        analytics_core::execution::EventCheckPolicy::Audited
+                    }
+                },
+            }),
             ResearchCommand::Run {
                 template,
                 schedule,

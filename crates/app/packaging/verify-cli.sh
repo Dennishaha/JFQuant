@@ -8,6 +8,12 @@ cli="$app/Contents/MacOS/jfquant"
 run_cli() { env -i HOME="$check_root/home" PATH=/usr/bin:/bin "$cli" --workspace "$check_root/workspace" "$@"; }
 trap 'run_cli service stop >/dev/null 2>&1 || true' EXIT
 run_cli --help > "$check_root/help.txt"
+# Use only a fixture Key in the generated HOME. A signed bundle must share the
+# same private-file interface without OS prompts or a development environment.
+printf '%s' 'fixture-packaged-source-key' | run_cli data sources configure --provider tdxaidata --key-stdin > "$check_root/credential.json"
+[ "$(plutil -extract storage raw -o - "$check_root/credential.json")" = private_local_file ]
+[ "$(stat -f '%Lp' "$check_root/home/Library/Application Support/JFQuant/credentials")" = 700 ]
+[ "$(stat -f '%Lp' "$check_root/home/Library/Application Support/JFQuant/credentials/tdxaidata.json")" = 600 ]
 run_cli self-check --output "$check_root/native" > "$check_root/native.json"
 run_cli workspace create "$check_root/workspace" > "$check_root/workspace.json"
 run_cli research demo-parquet > "$check_root/submission.json"
@@ -17,11 +23,19 @@ run_cli jobs results "$demo_id" > "$check_root/demo.json"
 recipe="$(plutil -extract details.demo_template_path raw -o - "$check_root/demo.json")"
 market="$(plutil -extract data.id raw -o - "$check_root/demo.json")"
 actions="$(plutil -extract details.demo_actions raw -o - "$check_root/demo.json")"
+run_cli data sources list > "$check_root/sources.json"
+for role in quotes actions execution members calendar; do
+  [ "$(plutil -extract "result.results.details.policy.priorities.$role.0" raw -o - "$check_root/sources.json")" = tdxaidata ]
+done
+run_cli data refresh --template "$recipe" --market "$market" --actions "$actions" --preview > "$check_root/refresh-preview.json"
+[ "$(plutil -extract result.results.details.plan.schema_version raw -o - "$check_root/refresh-preview.json")" = 1 ]
+[ "$(plutil -extract result.results.details.account.status raw -o - "$check_root/refresh-preview.json")" = not_run ]
+"$app/Contents/Resources/python/bin/python3" -I -B -c 'import importlib.metadata; assert importlib.metadata.version("tdxaidata") == "1.2.2"'
 run_cli research run --template "$recipe" --market "$market" --actions "$actions" > "$check_root/research-submission.json"
 research_id="$(plutil -extract task_id raw -o - "$check_root/research-submission.json")"
 run_cli jobs wait "$research_id" --timeout 60 > "$check_root/research.json"
 run_cli jobs results "$research_id" > "$check_root/online-results.json"
-[ "$(plutil -extract schema_version raw -o - "$check_root/online-results.json")" = 12 ]
+[ "$(plutil -extract schema_version raw -o - "$check_root/online-results.json")" = 13 ]
 [ "$(plutil -extract execution.mode raw -o - "$check_root/online-results.json")" = raw_integer_shares ]
 "$app/Contents/Resources/python/bin/python3" -I -B - "$check_root/online-results.json" <<'PY'
 import hashlib
@@ -47,6 +61,15 @@ for strictness in strict allow_missing qualified_only; do
   run_cli jobs wait "$quality_id" --timeout 60 > "$check_root/quality-$strictness.json"
   [ "$(plutil -extract results.execution.quality_policy.strictness raw -o - "$check_root/quality-$strictness.json")" = "$strictness" ]
   [ "$(plutil -extract results.admission.schema_version raw -o - "$check_root/quality-$strictness.json")" = 5 ]
+done
+# Both account policies run through the packaged common backend; the complete demo
+# provides audited coverage, so the stricter policy can execute the same account.
+for event_check in provider audited; do
+  run_cli research run --template "$recipe" --market "$market" --actions "$actions" \
+    --event-check "$event_check" > "$check_root/event-$event_check-submission.json"
+  event_id="$(plutil -extract task_id raw -o - "$check_root/event-$event_check-submission.json")"
+  run_cli jobs wait "$event_id" --timeout 60 > "$check_root/event-$event_check.json"
+  [ "$(plutil -extract results.execution.event_check_policy raw -o - "$check_root/event-$event_check.json")" = "$event_check" ]
 done
 # Exercise real date controls and absence of a validation set through the same service.
 run_cli research preview --template "$recipe" --market "$market" \
@@ -95,7 +118,7 @@ run_cli jobs results "$training_id" > "$check_root/train-results.json"
 run_cli research backtest --training "$training_id" --actions "$actions" > "$check_root/backtest-submit.json"
 backtest_id="$(plutil -extract task_id raw -o - "$check_root/backtest-submit.json")"
 run_cli jobs wait "$backtest_id" --timeout 60 > "$check_root/backtest-wait.json"
-[ "$(plutil -extract results.schema_version raw -o - "$check_root/backtest-wait.json")" = 12 ]
+[ "$(plutil -extract results.schema_version raw -o - "$check_root/backtest-wait.json")" = 13 ]
 
 # A provider profile is explicit and supported only by a frozen original Qlib source.
 run_cli research demo > "$check_root/qlib-demo-submit.json"

@@ -1,5 +1,7 @@
 # Apple Silicon App 与 CLI 打包
 
+包内CLI凭据验收在生成的临时HOME输入fixture Key，检查正式`data sources configure --key-stdin`返回本地文件存储及0700/0600权限；不读取用户真实凭据，也不依赖程序签名或钥匙串授权。真实账户抽查单独记录，不把fixture成功当作联网可用。
+
 [上级：analytics-desktop](../README.md) · [源码](../src/README.md) · [安装说明](INSTALL.txt)
 
 本目录是开发期分发工具。目标为 Apple Silicon、macOS 14 及以上内部试用 App/DMG；包内 App 和 `jfquant` 共用 DuckDB、LightGBM、OpenMP。用户运行不用 Cargo、外部Python 或 Homebrew；包内CPython和锁定的AKShare/yfinance用于采集，原公开快照下载继续使用系统curl。
@@ -55,7 +57,7 @@ mkdir -p "$HOME/.local/bin"
 ln -s /Applications/JFQuant.app/Contents/MacOS/jfquant "$HOME/.local/bin/jfquant"
 ```
 
-符号链接需目标名尚不存在；脚本不自动修改 shell 配置，是否将 `.local/bin` 加入 PATH 由用户决定。更新程序前让旧服务任务结束，用原版本 CLI 停止空闲服务，再打开新版本；协议 7 不向旧服务降级。
+符号链接需目标名尚不存在；脚本不自动修改 shell 配置，是否将 `.local/bin` 加入 PATH 由用户决定。更新程序前让旧服务任务结束，用原版本 CLI 停止空闲服务，再打开新版本；协议 11 不向旧服务降级。
 
 ## 验收边界
 
@@ -87,7 +89,7 @@ flowchart TD
 
 打包环境只复用由同一解释器归档SHA256创建的目录；发行锁改变后重新展开。原生审核同时检查 LC_BUILD_VERSION 与 LC_VERSION_MIN_MACOSX，拒绝最低版本高于14.0.0、包外/断开符号链接和找不到的 loader/executable/rpath 依赖，忽略库自身身份。`test_packaging.py` 使用加载命令 fixture 验证上述拒绝路径，由App nextest测试集成运行，也可执行 `target/collector-build/python/bin/python3 -I -B -m unittest discover -s crates/app/packaging -p test_packaging.py`。
 
-内置adjustment.py安全读取固定新浪地址，不使用SDK的eval路径。代码签名包括六个模块，更改后先Ruff格式化，再重建环境和Rust。服务10、采集7、规范4、报告10；更新前用原版本停止空闲服务，不强杀活动研究。包内自检使用显式系数合成数据、核验价量哈希；另一台实机仍待完成。
+内置adjustment.py安全读取固定新浪地址，不使用SDK的eval路径。代码签名包括六个模块，更改后先Ruff格式化，再重建环境和Rust。服务11、采集7、规范4、报告10；更新前用原版本停止空闲服务，不强杀活动研究。包内自检使用显式系数合成数据、核验价量哈希；另一台实机仍待完成。
 
 ## 显式系数接入阶段本机复验（历史）
 
@@ -102,7 +104,7 @@ flowchart TD
 
 ## 日期调度与完整事件版本
 
-当前包同时携带服务10、模板8、公司行动4、规范行情5、采集7及研究schema12实现。pypdf5.9.0随35项hash锁依赖内置，六个采集模块签名共同核验。verify-cli.sh继续在清空开发环境下验证原生自检、当前格式合成研究、来源哈希、流水线和离线结果；另一台Apple Silicon/macOS14实机仍待完成。旧格式不转换，更新前停止空闲旧服务，不能强杀活动研究。
+当前包同时携带服务11、模板9、公司行动5、规范行情5、采集7及研究schema13实现。pypdf5.9.0随35项hash锁依赖内置，六个采集模块签名共同核验。verify-cli.sh继续在清空开发环境下验证原生自检、当前格式合成研究、来源哈希、流水线和离线结果；另一台Apple Silicon/macOS14实机仍待完成。旧格式不转换，更新前停止空闲旧服务，不能强杀活动研究。
 
 ## 2026-10-14 任意日期版最终复验
 
@@ -125,7 +127,7 @@ flowchart TD
 
 第二档保持原成员，纯缺失传播null；第三档派生每日合格成员，不改原始成员或证据。不能看到后来缺价而倒删早期股票。账户仍采用原价、整数股、T+1和连续权益；未裁定冲突、损坏、基准缺项及剩余必要依赖仍阻断。默认有效因子比例0表示至少一项有效，最低有标签样本1只表示可执行，不表示样本在统计上充分。所选因子整列无有效值不会被自动删除。
 
-verify-cli.sh在清空环境后逐一执行strict、allow_missing、qualified_only合成研究，检查实际策略与准入schema4；再执行原生流水线和服务重启后离线读取。包内CLI、App共用服务协议10及结果12。运行：`crates/app/packaging/package-macos.sh`。脚本只替换target内生成包；不能强杀活动任务，打包前确认服务空闲。另一台Apple Silicon/macOS14实机仍待验收。
+verify-cli.sh在清空环境后逐一执行strict、allow_missing、qualified_only合成研究，检查实际策略与准入schema4；再执行原生流水线和服务重启后离线读取。包内CLI、App共用服务协议13及结果13。运行：`crates/app/packaging/package-macos.sh`。脚本只替换target内生成包；不能强杀活动任务，打包前确认服务空闲。另一台Apple Silicon/macOS14实机仍待验收。
 
 ```mermaid
 flowchart LR
@@ -142,7 +144,7 @@ flowchart LR
 
 为什么调整：普通市场代码无需先登记身份；独立目录、审核和权威名录下载增加了研究前置负担。特殊历史代码仍需在快照内明确区间，不能将旧证券行情或权益接到另一证券。训练使用价量和标签，到账／交付资料只在实际账户执行时检查。
 
-当前格式：模板8、需求3、准入5、股票池3、公司行动4、规范行情5、系数3、采集7、服务10、研究结果12；快照内来源映射1、训练产物2。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
+当前格式：模板9、需求3、准入5、股票池3、公司行动5、规范行情5、系数3、采集7、服务11、研究结果13；快照内来源映射1、训练产物2。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
 
 界面移除身份管理和目录选择。研究面板提供“仅训练模型”、训练任务ID及“使用已有模型回测”；原“执行年度研究”为两阶段组合。界面展示事实状态，无有效交易和未完成回测不得当作策略收益验收通过。
 
@@ -161,14 +163,35 @@ flowchart LR
 
 246项workspace nextest全部通过、0跳过，集成20项Python采集fixture及打包fixture；Clippy和Rustdoc的warnings视为错误、doctest、Rust格式、19个Python文件的Ruff及差异检查通过。组件README的why、Mermaid及本地链接检查通过；完整检查日志位于忽略的target/split-*。
 
-本轮DMG SHA256：6cf3c66a6c111119b22b50911300b56346bc8b0ac7a2b34058a4e2bea1f97d39。深层严格签名校验通过；89个Python Mach-O对象通过arm64、macOS14目标和包内路径审核，旧采集模块不会残留在重建环境。清空开发环境后，包内CLI完成三档合成研究、独立训练及加载原模型回测、任意日期无验证研究、原生自检和流水线，服务重启后结果与在线读取相同。报告为schema12，训练产物为1，准入为4，服务为9；无有效交易和未完成回测分别显示，不冒充策略效果。
+本轮DMG SHA256：6cf3c66a6c111119b22b50911300b56346bc8b0ac7a2b34058a4e2bea1f97d39。深层严格签名校验通过；89个Python Mach-O对象通过arm64、macOS14目标和包内路径审核，旧采集模块不会残留在重建环境。清空开发环境后，包内CLI完成三档合成研究、独立训练及加载原模型回测、任意日期无验证研究、原生自检和流水线，服务重启后结果与在线读取相同。报告为schema13，训练产物为1，准入为4，服务为9；无有效交易和未完成回测分别显示，不冒充策略效果。
 
 真实沪深300三档训练均被价量/系数与事件缺项阻断，无模型时回测明确拒绝。新公司行动采集仅覆盖SH600018，不代表全池补齐；逐证券、区间、耗时及任务输出见本地.jfquant/experiments/csi300-split-stages-20261014。另一台Apple Silicon/macOS14实机验收继续待完成；本轮未提交或推送。
 
 ## 包内新契约验证
 
-verify-cli.sh从演示任务生成的工作流文件读取profile引用，验证结果12/准入5/训练2，分别训练GTJA191和Alpha158供应商口径。解释器代码签名随新增操作重建，清空环境运行不依赖开发Python。 完整接口、why、边界和验收见[组件契约](../README.md)。
+verify-cli.sh从演示任务生成的工作流文件读取profile引用，验证结果13/准入5/训练2，分别训练GTJA191和Alpha158供应商口径。解释器代码签名随新增操作重建，清空环境运行不依赖开发Python。 完整接口、why、边界和验收见[组件契约](../README.md)。
 
 Alpha158派生定义的固定Qlib MIT许可从factor/QLIB_LICENSE.txt复制进包内Licenses/Qlib-Alpha158.txt；与原生库及Python依赖许可一同分发。
 
 打包前及替换App目录前均执行bundle进程检查。为什么：活动采集子进程还会读取证书和扩展，删除旧Python树会使正在运行的请求失败，即使可执行文件已加载。发现该bundle中的App、CLI服务或Python进程就返回bundle_in_use，不强杀或取消任务。先等任务结束，再用原包CLI停止空闲服务、关闭App后重新打包。本轮已在真实活动采集期间验证拒绝；失败证券通过原owner的哈希检查点重试。
+
+
+## 为何将TDX原生库纳入递归审计
+
+SDK依赖不能留给用户在Homebrew或系统Python里补装；同时不能让原生库在签名包内写Key或缓存。构建固定tdxaidata1.2.2及哈希，运行时复制原生库到私有可写目录；打包递归修正原生安装ID/依赖，校验arm64和macOS14最低版本，收集许可证并重新签名。采集运行时增加一个原生对象，当前审计90个。
+
+```mermaid
+flowchart LR
+  L[解释器锁 / 36项依赖哈希锁] --> B[build-collector]
+  B --> R[原生路径修正]
+  R --> V[架构 / 最低系统 / 路径审计]
+  V --> S[许可证 / 签名 / App与DMG]
+```
+
+开发构建：`bash crates/app/packaging/package-macos.sh`。验证：`bash crates/app/packaging/verify-cli.sh target/distribution/JFQuant.app target/tdx-package-check`。包内CLI帮助、来源列表、免凭据刷新预览和离线研究应在清空开发环境后通过；真实TDX连接需要配置本机数据服务Key，不能由SDK导入成功推断。另一台Apple Silicon/macOS14实机验收待完成。
+
+## 2026-10-15：采集修复后的分发验收
+
+为什么重建：修复后的通达信系数归一化、巨潮候选解析v3和新浪退市原价备用必须随包内采集代码一同分发，避免GUI/CLI仍调用旧签名。服务协议13；真实研究本轮不使用Qlib快照，打包中的Qlib合成输入仅验证现有读取器和因子契约。
+
+本机275项nextest、53项Python fixture、Clippy、Rustdoc、Rust/Python格式与差异检查通过。包内在清空开发环境后完成两套因子、三档合成研究、原生自检和离线结果读取。另建独立本地工作区，包内CLI实际完成通达信SH600000/SH000300短窗口与新浪SH600068原价采集；没有依赖Cargo、系统Python或Homebrew，没有钥匙串授权。原生审计90个对象通过arm64/macOS14限制。实际行情、凭据、证据、记录、签名包及DMG保持本地产物；其他证券覆盖和完整实际账户回测不能由本次包内抽查推定。另一台Apple Silicon/macOS14实机验收仍待完成。

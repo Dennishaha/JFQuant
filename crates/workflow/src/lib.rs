@@ -11,6 +11,8 @@ pub mod pools;
 pub mod preparation;
 /// Independently saved workflow, factor and target configuration.
 pub mod profiles;
+/// Prioritized, independently resumable acquisition and refresh.
+pub mod refresh;
 /// Local service, task requests and transport client.
 #[cfg(unix)]
 pub mod service;
@@ -51,6 +53,14 @@ fn market_content_hash(root: &Path) -> Result<String> {
 }
 
 fn verify_action_evidence(path: &Path, book: &ActionBundle) -> Result<()> {
+    if book.raw_sha256.contains_key("source-evidence-sha256.json") {
+        let root = path.parent().ok_or("actions parent missing")?;
+        let expected: String =
+            serde_json::from_slice(&fs::read(root.join("raw/source-evidence-sha256.json"))?)?;
+        if expected != market_content_hash(&root.join("source-evidence"))? {
+            return Err("action acquisition evidence changed".into());
+        }
+    }
     for (name, expected) in &book.raw_sha256 {
         TaskContext::current().check()?;
         if Path::new(name)
@@ -110,6 +120,8 @@ pub struct ResearchTemplate {
     pub schedule: analytics_core::schedule::Schedule,
     /// Explicit ordinary-holder corporate action policy.
     pub action_policy: analytics_core::actions::ActionPolicy,
+    /// Account-data trust, independent of training sample quality.
+    pub event_check_policy: analytics_core::execution::EventCheckPolicy,
     /// Shared research completeness and sample policy.
     pub quality_policy: analytics_core::research_quality::ResearchQualityPolicy,
     /// Rolling and model parameters.
@@ -138,7 +150,7 @@ impl Default for ResearchTemplate {
             ..ResearchConfig::default()
         };
         Self {
-            schema_version: 8,
+            schema_version: 9,
             factor_set: Default::default(),
             price_basis: Default::default(),
             pool_version: "builtin:csi500".into(),
@@ -149,6 +161,7 @@ impl Default for ResearchTemplate {
             formula_version: analytics_factor::FORMULA_VERSION.into(),
             schedule: Default::default(),
             action_policy: Default::default(),
+            event_check_policy: Default::default(),
             quality_policy: Default::default(),
             config,
             market_rules: MarketRulesPreset::a_share_latest(),
@@ -198,7 +211,7 @@ impl ResearchTemplate {
     }
     /// Validate before saving or starting a task.
     pub fn validate(&self) -> Result<()> {
-        if self.schema_version != 8
+        if self.schema_version != 9
             || self.id.trim().is_empty()
             || self.formula_version != analytics_factor::alpha158::version(self.factor_set)
             || self.name.trim().is_empty()
@@ -653,6 +666,39 @@ impl Workspace {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkflowRequest {
+    /// Fetch bounded implementation evidence independently of model/universe preparation.
+    CollectAnnouncements {
+        /// Explicit CNINFO collection scope, using the AKShare collector boundary.
+        request: analytics_storage::collector::CollectionRequest,
+        /// Prior checkpoint for the identical source, dates and collector code.
+        resume: Option<Uuid>,
+    },
+    /// Independently acquire a calendar or a current-only constituent observation.
+    CollectReference {
+        /// Exact source and reference range.
+        request: analytics_storage::collector::CollectionRequest,
+        /// calendar or members; never historical members synthesized from a current list.
+        kind: String,
+        /// Prior owned reference checkpoint.
+        resume: Option<Uuid>,
+    },
+    /// Inspect provider capabilities and workspace priority policy.
+    SourceStatus {},
+    /// Persist a validated workspace policy separately from research recipes.
+    SaveSourcePolicy {
+        /// Ordered providers for every data purpose.
+        policy: refresh::SourcePolicy,
+    },
+    /// Bounded source probe; never starts a full universe collection.
+    CheckSource {
+        /// Explicitly selected source.
+        provider: analytics_storage::collector::Provider,
+    },
+    /// Preview or execute independently verified incremental refresh shards.
+    RefreshData {
+        /// Source range, base versions and explicit overrides.
+        request: Box<refresh::RefreshRequest>,
+    },
     /// Collect independent coefficients without requiring quote acquisition.
     CollectCoefficients {
         /// Frozen source and securities.
@@ -754,6 +800,8 @@ pub enum WorkflowRequest {
         /// Previous owned collection task.
         resume: Option<Uuid>,
     },
+    /// Inspect endpoint permissions without declaring source completeness.
+    TusharePermissions {},
     /// Register existing JFQuant-owned data from an explicit workspace path.
     RegisterData {
         /// Relative or absolute input path.
@@ -792,6 +840,9 @@ pub enum WorkflowRequest {
     },
     /// Execute previously trained models without calling the trainer.
     BacktestResearch {
+        /// Explicit execution trust for the new account task; it does not invalidate models.
+        #[serde(default)]
+        event_check_policy: analytics_core::execution::EventCheckPolicy,
         /// Completed training or combined task containing training.json.
         training: Uuid,
         /// Selected execution event version.
@@ -813,6 +864,17 @@ impl WorkflowRequest {
     /// Display operation names without exposing backend details in the user flow.
     pub fn label(&self) -> String {
         match self {
+            Self::CollectAnnouncements { .. } => "采集巨潮实施公告证据".into(),
+            Self::CollectReference { .. } => "采集日历或当前成分".into(),
+            Self::SourceStatus {} => "查看数据来源与优先级".into(),
+            Self::SaveSourcePolicy { .. } => "保存数据来源优先级".into(),
+            Self::CheckSource { .. } => "小样本验证数据来源".into(),
+            Self::RefreshData { request } => if request.preview {
+                "预览数据刷新"
+            } else {
+                "刷新研究数据"
+            }
+            .into(),
             Self::TrainResearch { .. } => "训练研究模型".into(),
             Self::BacktestResearch { .. } => "使用已有模型回测".into(),
             Self::PreviewResearch { .. } => "预览研究日期和数据需求".into(),
@@ -825,6 +887,7 @@ impl WorkflowRequest {
             Self::CreateDemo {} => "创建合成演示数据".into(),
             Self::CheckUpdates {} => "检查行情更新".into(),
             Self::DownloadMarket { tag, .. } => format!("下载行情快照 {tag}"),
+            Self::TusharePermissions {} => "Tushare接口权限检查".into(),
             Self::CollectActions { .. } => "Python公司行动采集".into(),
             Self::CollectCoefficients { .. } => "独立复权系数采集".into(),
             Self::ComposeMarket { .. } => "组合研究行情版本".into(),
@@ -914,6 +977,17 @@ fn version(workspace: &Workspace, id: &str, kind: &str) -> Result<DataVersion> {
                 }
             }
         }
+        if let Some(expected) = data.details["evidence_tree_sha256"].as_str()
+            && expected
+                != market_content_hash(
+                    &path
+                        .parent()
+                        .ok_or("market parent missing")?
+                        .join("evidence"),
+                )?
+        {
+            return Err("market acquisition evidence changed".into());
+        }
         if data.details["content_sha256"] != market_content_hash(&path)? {
             return Err("registered market bytes changed; register it as a new version".into());
         }
@@ -953,6 +1027,57 @@ fn execute_scoped(
     let mut data = None;
     let mut details = Value::Null;
     match request {
+        WorkflowRequest::CollectAnnouncements { request, resume } => {
+            if request.provider != analytics_storage::collector::Provider::Akshare {
+                return Err(
+                    "announcement_source_unsupported: select akshare for CNINFO evidence".into(),
+                );
+            }
+            let staging = w.resolve(format!(
+                ".jfquant/staging/announcements-{}",
+                resume.unwrap_or(run.id)
+            ));
+            let manifest =
+                analytics_storage::collector::collect_announcements(request, &staging, context)?;
+            details = serde_json::from_slice(&fs::read(&manifest)?)?;
+            let output = w.resolve(&run.output).join("announcements");
+            fs::rename(staging, &output)?;
+            details["artifact"] = json!(output.join("announcements.json"));
+            details["candidate_only"] = json!(true);
+        }
+        WorkflowRequest::CollectReference {
+            request,
+            kind,
+            resume,
+        } => {
+            let staging = w.resolve(format!(
+                ".jfquant/staging/reference-{}",
+                resume.unwrap_or(run.id)
+            ));
+            let file =
+                analytics_storage::collector::collect_reference(request, &staging, context, kind)?;
+            details = serde_json::from_slice(&fs::read(&file)?)?;
+            let output = w.resolve(&run.output).join("reference");
+            fs::rename(&staging, &output)?;
+            details["artifact"] = json!(output.join("reference.json"));
+        }
+        WorkflowRequest::SourceStatus {} => details = refresh::catalog(w)?,
+        WorkflowRequest::SaveSourcePolicy { policy } => {
+            policy.save(w)?;
+            details = refresh::catalog(w)?;
+        }
+        WorkflowRequest::CheckSource { provider } => {
+            details = refresh::check_source(w, run, *provider, context)?
+        }
+        WorkflowRequest::RefreshData { request } => {
+            let policy = serde_json::from_value(run.request["source_policy"].clone())?;
+            details = refresh::execute(w, run, request, &policy, context)?;
+            data = details
+                .get("market")
+                .filter(|v| !v.is_null())
+                .map(|v| serde_json::from_value(v.clone()))
+                .transpose()?;
+        }
         WorkflowRequest::PreviewResearch {
             template,
             market,
@@ -1097,7 +1222,7 @@ fn execute_scoped(
             let base = version(w, market, "market")?;
             let c = version(w, coefficients, "coefficients")?;
             let d = DailyDataset::open(w.resolve(&base.path))?;
-            if !d.supports_provider_training() {
+            if !d.is_original_qlib() {
                 return Err("composition requires an original Qlib snapshot".into());
             }
             let bundle =
@@ -1156,6 +1281,24 @@ fn execute_scoped(
             fs::rename(&staging, &output)?;
             data = Some(w.register(&output.join("market"))?);
         }
+        WorkflowRequest::TusharePermissions {} => {
+            let date = chrono::Utc::now().date_naive();
+            let request = analytics_storage::collector::CollectionRequest {
+                source_bindings: Default::default(),
+                provider: analytics_storage::collector::Provider::Tushare,
+                adjustment_source: analytics_storage::adjustment::AdjustmentSource::None,
+                start: date,
+                end: date,
+                instruments: BTreeSet::from(["SH600018".into()]),
+                benchmarks: Default::default(),
+                universes: Default::default(),
+            };
+            let staging = w.resolve(format!(".jfquant/staging/tushare-permissions-{}", run.id));
+            let path = analytics_storage::collector::check_tushare_permissions(
+                &request, &staging, context,
+            )?;
+            details = serde_json::from_slice(&fs::read(path)?)?;
+        }
         WorkflowRequest::CollectActions { request, resume } => {
             let owner = resume.unwrap_or(run.id);
             let staging = w
@@ -1193,13 +1336,37 @@ fn execute_scoped(
             resume,
             pool_version,
         } => {
-            version(w, market, "market")?;
+            let market_version = version(w, market, "market")?;
             let (pool, _) = w.resolve_pool(pool_version, market)?;
             let symbols = pool.intervals.into_keys().collect::<Vec<_>>();
             let path = w.root.join(format!("data/actions-{}", run.id));
             let owner = resume.unwrap_or(run.id);
             let staging = w.root.join(format!(".jfquant/staging/actions-{owner}"));
-            analytics_storage::corporate_actions::fetch_public_resumable(&symbols, &staging)?;
+            let dataset = DailyDataset::open(w.resolve(&market_version.path))?;
+            let request = analytics_storage::collector::CollectionRequest {
+                source_bindings: Default::default(),
+                provider: analytics_storage::collector::Provider::Akshare,
+                adjustment_source: analytics_storage::adjustment::AdjustmentSource::SinaHfq,
+                start: *dataset.calendar.first().ok_or("empty market calendar")?,
+                end: *dataset.calendar.last().ok_or("empty market calendar")?,
+                instruments: symbols
+                    .iter()
+                    .filter(|s| analytics_core::pool::validate_exchange_symbol(s).is_ok())
+                    .cloned()
+                    .collect(),
+                benchmarks: Default::default(),
+                universes: Default::default(),
+            };
+            context.report("巨潮优先：分红派息，新浪补充上市日及独立系数")?;
+            let file = analytics_storage::collector::collect_actions(&request, &staging, context)?;
+            let mut book = ActionBundle::read(&file)?;
+            for id in symbols.iter().filter(|s| !request.instruments.contains(*s)) {
+                book.failures.insert(
+                    id.clone(),
+                    "provider_locator_missing: historical key has no formal source code".into(),
+                );
+            }
+            fs::write(&file, serde_json::to_vec_pretty(&book)?)?;
             fs::rename(staging, &path)?;
             data = Some(w.register(&path.join("actions.json"))?);
         }
@@ -1265,7 +1432,11 @@ fn execute_scoped(
             analytics_ml::backtest::run_with_context(&r, context)?;
             details = w.results(run)?;
         }
-        WorkflowRequest::BacktestResearch { training, actions } => {
+        WorkflowRequest::BacktestResearch {
+            training,
+            actions,
+            event_check_policy,
+        } => {
             let saved = w
                 .runs()?
                 .into_iter()
@@ -1298,11 +1469,12 @@ fn execute_scoped(
             }
             let a = version(w, actions, "actions")?;
             context.report("读取已有模型并回测")?;
-            analytics_ml::backtest::backtest_from_training_with_data(
+            analytics_ml::backtest::backtest_from_training_with_policy(
                 &source,
                 &w.resolve(&run.output),
                 &w.resolve(a.path),
                 Some(&w.resolve(market.path)),
+                Some(*event_check_policy),
                 context,
             )?;
             details = w.results(run)?;
@@ -1331,7 +1503,18 @@ fn execute_scoped(
 /// Snapshot selected input versions when creating a run, rather than resolving them later.
 pub fn snapshot(workspace: &Workspace, request: &WorkflowRequest) -> Result<Value> {
     match request {
-        WorkflowRequest::CollectQuotes { request, .. }
+        WorkflowRequest::SaveSourcePolicy { policy } => policy.validate()?,
+        WorkflowRequest::RefreshData { request } => request.template.validate()?,
+        WorkflowRequest::CollectAnnouncements { request, .. } => {
+            request.validate()?;
+            if request.provider != analytics_storage::collector::Provider::Akshare {
+                return Err(
+                    "announcement_source_unsupported: select akshare for CNINFO evidence".into(),
+                );
+            }
+        }
+        WorkflowRequest::CollectReference { request, .. }
+        | WorkflowRequest::CollectQuotes { request, .. }
         | WorkflowRequest::CollectMarket { request, .. }
         | WorkflowRequest::CollectActions { request, .. }
         | WorkflowRequest::CollectCoefficients { request, .. } => request.validate()?,
@@ -1343,6 +1526,13 @@ pub fn snapshot(workspace: &Workspace, request: &WorkflowRequest) -> Result<Valu
         _ => {}
     };
     let versions = match request {
+        WorkflowRequest::RefreshData { request } => {
+            let mut v = vec![version_metadata(workspace, &request.market, "market")?];
+            if let Some(id) = &request.actions {
+                v.push(version_metadata(workspace, id, "actions")?);
+            }
+            v
+        }
         WorkflowRequest::ComposeMarket {
             market,
             coefficients,
@@ -1385,6 +1575,9 @@ pub fn snapshot(workspace: &Workspace, request: &WorkflowRequest) -> Result<Valu
         _ => analytics_factor::FORMULA_VERSION,
     };
     let mut frozen = json!({"request":request,"inputs":versions,"app_version":env!("CARGO_PKG_VERSION"),"formula_version":formula_version,"pool_definition": match request { WorkflowRequest::Research{template,..}|WorkflowRequest::TrainResearch{template,..} if !template.pool_version.starts_with("builtin:") => Some(workspace.pool(&template.pool_version)?), _ => None }});
+    if matches!(request, WorkflowRequest::RefreshData { .. }) {
+        frozen["source_policy"] = serde_json::to_value(refresh::SourcePolicy::load(workspace)?)?;
+    }
     if let WorkflowRequest::BacktestResearch { training, .. } = request {
         let record = workspace
             .runs()?
@@ -1513,6 +1706,7 @@ fn research_request(
     r.quality_policy = template.quality_policy.clone();
     r.schedule = template.schedule.clone();
     r.action_policy = template.action_policy.clone();
+    r.event_check_policy = template.event_check_policy;
     r.market_rules = template.market_rules.clone();
     r.initial_cash_cny = template.initial_cash_cny;
     r.dividend_withholding_rate = template.dividend_withholding_rate;

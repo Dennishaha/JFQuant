@@ -134,7 +134,7 @@ flowchart LR
 
 第二档保持原成员，纯缺失传播null；第三档派生每日合格成员，不改原始成员或证据。不能看到后来缺价而倒删早期股票。账户仍采用原价、整数股、T+1和连续权益；未裁定冲突、损坏、基准缺项及剩余必要依赖仍阻断。默认有效因子比例0表示至少一项有效，最低有标签样本1只表示可执行，不表示样本在统计上充分。所选因子整列无有效值不会被自动删除。
 
-公共类型在[research_quality.rs](src/research_quality.rs)：ResearchStrictness、ResearchQualityPolicy、ProblemKind、ProblemDisposition及QualityDecision。策略校验与筛选门槛在core，clap类型留在CLI。AdmissionReport格式4保留passed/failed/not_run，另外记录处理方式；只有纯缺失的keep_null可在第二档非阻断，损坏和未执行不能改写为通过。枚举提供中文label/description供App统一显示。验收：`cargo nextest run -p analytics-core`。
+公共类型在[research_quality.rs](src/research_quality.rs)：ResearchStrictness、ResearchQualityPolicy、ProblemKind、ProblemDisposition及QualityDecision。策略校验与筛选门槛在core，clap类型留在CLI。AdmissionReport格式5保留passed/failed/not_run，另外记录处理方式；只有纯缺失的keep_null可在第二档非阻断，损坏和未执行不能改写为通过。枚举提供中文label/description供App统一显示。验收：`cargo nextest run -p analytics-core`。
 
 ```mermaid
 flowchart LR
@@ -151,7 +151,7 @@ flowchart LR
 
 为什么调整：普通市场代码无需先登记身份；独立目录、审核和权威名录下载增加了研究前置负担。特殊历史代码仍需在快照内明确区间，不能将旧证券行情或权益接到另一证券。训练使用价量和标签，到账／交付资料只在实际账户执行时检查。
 
-当前格式：模板8、需求3、准入5、股票池3、公司行动4、规范行情5、系数3、采集7、服务10、研究结果12；快照内来源映射1、训练产物2。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
+当前格式：模板9、需求3、准入5、股票池3、公司行动5、规范行情5、系数3、采集7、服务11、研究结果13；快照内来源映射1、训练产物2。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
 
 ```mermaid
 flowchart LR
@@ -170,7 +170,7 @@ flowchart LR
 
 `PriceBasis::{Verified,Provider}` 与三档 `ResearchQualityPolicy` 是两个独立维度：正常样本空值不能说明来源可信，尚未完成事件对账也不等于供应商研究价量不可训练。默认核对复权依据；显式供应商口径才允许 historical_events 保留 failed/not_run 事实并采用 Warn。解析损坏、来源冲突和样本下限仍阻断。账户资料采用 not_run/Warn 表示训练没有验证未来持仓路径，不宣称回测已就绪。
 
-`FactorSet` 决定预热窗口：GTJA191 756、Alpha158 61交易日。AdmissionReport5冻结price_basis，服务10/结果12复用同一判定；Warn不能成为任意检查的通行证。
+`FactorSet` 决定预热窗口：GTJA191 756、Alpha158 61交易日。AdmissionReport5冻结price_basis，服务11/结果13复用同一判定；Warn不能成为任意检查的通行证。
 
 ```mermaid
 flowchart LR

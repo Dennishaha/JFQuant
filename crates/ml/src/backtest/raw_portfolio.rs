@@ -9,6 +9,7 @@ use analytics_storage::{corporate_actions::ActionBundle, daily::DailyDataset, ql
 use std::collections::{BTreeSet, HashMap};
 
 pub(super) struct RawPortfolio {
+    event_index: Option<analytics_storage::corporate_actions::execution_index::ExecutionIndex>,
     ledger: ShareLedger,
     previous_nav: f64,
     rebalance_clock: usize,
@@ -24,6 +25,7 @@ impl RawPortfolio {
             ShareLedger::new(request.initial_cash_cny, request.dividend_withholding_rate)?;
         ledger.action_policy = request.action_policy.clone();
         Ok(Self {
+            event_index: None,
             ledger,
             previous_nav: request.initial_cash_cny,
             rebalance_clock: 0,
@@ -287,13 +289,71 @@ fn compress_adjustment_issues(calendar: &[Date], issues: Vec<(Date, String)>) ->
     output
 }
 
+struct AdjustmentContext<'a> {
+    explicit: bool,
+    previous: Date,
+    date: Date,
+    index: &'a analytics_storage::corporate_actions::execution_index::ExecutionIndex,
+}
+fn check_daily_adjustment(
+    id: &str,
+    f: &RawFields,
+    day: usize,
+    actions: &[CorporateAction],
+    context: AdjustmentContext<'_>,
+) -> Result<()> {
+    if day == 0 {
+        return Ok(());
+    }
+    let independent = context
+        .index
+        .independent_ratio(id, context.previous, context.date)?;
+    let explicit = context.explicit || independent.is_some();
+    let transition = independent.or_else(|| {
+        f.factor
+            .get(day - 1)
+            .zip(f.factor.get(day))
+            .map(|(p, n)| n / p)
+    });
+    let event = actions.iter().find(|a| a.instrument == id);
+    if let Some(a) = event {
+        a.validate_adjustment_terms()?;
+        let unchanged = matches!(
+            a.terms.reference(),
+            Some(analytics_core::actions::Reference::Unchanged { .. })
+        );
+        if unchanged
+            && transition.is_some_and(|r| (r - 1.).abs() > if explicit { 1e-12 } else { 0.00002 })
+        {
+            return Err("execution_data_missing: unchanged_reference_coefficient_conflict".into());
+        }
+        if !unchanged {
+            let previous = f
+                .close(day - 1)
+                .ok_or("execution_data_missing: event_reference_close_missing")?;
+            let reference = a.reference_price(previous)?;
+            let ratio = transition.ok_or("execution_data_missing: event_coefficient_missing")?;
+            if (ratio / (previous / reference) - 1.).abs() > 0.002 {
+                return Err("execution_data_missing: event_coefficient_conflict".into());
+            }
+        }
+    } else if transition.is_some_and(|r| (r - 1.).abs() > if explicit { 1e-12 } else { 0.00002 }) {
+        return Err("execution_data_missing: unexplained_coefficient_transition".into());
+    }
+    Ok(())
+}
+struct TradeContext<'a> {
+    rules: &'a MarketRulesPreset,
+    data: Option<&'a analytics_storage::execution_data::ExecutionData>,
+    date: Date,
+}
 fn trade_allowed(
     id: &str,
     code: &str,
     field: &RawFields,
     day: usize,
     actions: &[CorporateAction],
-    rules: &MarketRulesPreset,
+    execution: TradeContext<'_>,
     buy: bool,
 ) -> Result<bool> {
     let Some(price) = field.open(day) else {
@@ -301,6 +361,29 @@ fn trade_allowed(
     };
     if !field.volume.get(day).is_some_and(|v| v > 0.0) {
         return Ok(false);
+    }
+    if let Some(data) = execution.data {
+        if data
+            .suspensions
+            .get(id)
+            .is_some_and(|v| v.contains_key(&execution.date))
+        {
+            return Ok(false);
+        }
+        if let Some([lower, upper]) = data.limits.get(id).and_then(|v| v.get(&execution.date)) {
+            if price < *lower - 1e-7 || price > *upper + 1e-7 {
+                return Err(format!(
+                    "data_not_ready: execution_price_outside_limits: {id} {}",
+                    execution.date
+                )
+                .into());
+            }
+            return Ok(if buy {
+                price < *upper - 1e-7
+            } else {
+                price > *lower + 1e-7
+            });
+        }
     }
     let Some(mut previous) = day.checked_sub(1).and_then(|d| field.close(d)) else {
         return Ok(false);
@@ -311,7 +394,7 @@ fn trade_allowed(
     if previous <= 0.0 {
         return Ok(false);
     }
-    let limit = rules.board_for(code)?.daily_limit - 0.005;
+    let limit = execution.rules.board_for(code)?.daily_limit - 0.005;
     let change = price / previous - 1.0;
     Ok(if buy { change < limit } else { change > -limit })
 }
@@ -359,6 +442,19 @@ pub(super) fn simulate(
             ))
         })
         .collect::<Result<_>>()?;
+    if state.event_index.is_none() {
+        state.event_index = Some(
+            analytics_storage::corporate_actions::execution_index::ExecutionIndex::build(
+                book,
+                request.event_check_policy,
+            )?,
+        );
+        let warnings = state.event_index.as_ref().unwrap().warnings();
+        fs::write(
+            request.output.join("execution_warnings.json"),
+            serde_json::to_vec_pretty(&warnings)?,
+        )?;
+    }
     let benchmark = RawFields::load(dataset, &request.benchmark)?;
     let mut signals = BTreeMap::<usize, Vec<(String, f64)>>::new();
     for (r, s) in meta.rows.iter().zip(scores) {
@@ -383,8 +479,36 @@ pub(super) fn simulate(
         let date = dataset.calendar[day];
         let held = state.ledger.required_instruments();
         if !held.is_empty() {
-            book.require_coverage(&held, date, date)
-                .map_err(|e| format!("data_not_ready: held account dependencies {date}: {e}"))?;
+            for id in &held {
+                state
+                    .event_index
+                    .as_ref()
+                    .unwrap()
+                    .check(id, date)
+                    .map_err(|e| {
+                        format!("data_not_ready: held account dependencies {date}: {e}")
+                    })?;
+            }
+        }
+        let todays_events = state.event_index.as_ref().unwrap().ex_events(date);
+        for id in &held {
+            if let Some(f) = fields.get(id.as_str()) {
+                check_daily_adjustment(
+                    id,
+                    f,
+                    day,
+                    todays_events,
+                    AdjustmentContext {
+                        explicit: dataset.has_independent_coefficients(),
+                        previous: dataset.calendar[day.saturating_sub(1)],
+                        date,
+                        index: state.event_index.as_ref().unwrap(),
+                    },
+                )
+                .map_err(|e| {
+                    format!("data_not_ready: held account dependencies {id} {date}: {e}")
+                })?;
+            }
         }
         for id in state.ledger.positions.keys() {
             let f = fields
@@ -392,6 +516,11 @@ pub(super) fn simulate(
                 .ok_or("held security fields unavailable")?;
             if (f.close(day).is_none() || f.volume.get(day).is_none())
                 && f.volume.get(day) != Some(0.)
+                && !state
+                    .event_index
+                    .as_ref()
+                    .unwrap()
+                    .full_day_suspension(id, date)
                 && !quality::evidenced_nonquote(Some(book), id, date)
             {
                 return Err(format!(
@@ -400,12 +529,7 @@ pub(super) fn simulate(
                 .into());
             }
         }
-        let actions: Vec<_> = book
-            .actions
-            .iter()
-            .filter(|a| a.ex_date == date)
-            .cloned()
-            .collect();
+        let actions = state.event_index.as_ref().unwrap().ex_events(date).to_vec();
         // Adjust stale marks on an ex date even when a stock is suspended.
         for a in &actions {
             if let Some(p) = state.marks.get_mut(&a.instrument) {
@@ -463,7 +587,11 @@ pub(super) fn simulate(
                     f,
                     day,
                     &actions,
-                    &request.market_rules,
+                    TradeContext {
+                        rules: &request.market_rules,
+                        data: state.event_index.as_ref().and_then(|i| i.data.as_ref()),
+                        date,
+                    },
                     false,
                 )?;
             let entry = serde_json::json!({"date":date,"instrument":id,"reason":"pool_removed","status":if can_trade{"filled"}else{"blocked"},"shares":quantity});
@@ -577,7 +705,11 @@ pub(super) fn simulate(
                         f,
                         day,
                         &actions,
-                        &request.market_rules,
+                        TradeContext {
+                            rules: &request.market_rules,
+                            data: state.event_index.as_ref().and_then(|i| i.data.as_ref()),
+                            date,
+                        },
                         false,
                     )?
                 {
@@ -612,9 +744,24 @@ pub(super) fn simulate(
                     reject_order(request, date, id, "buy", "missing_deal_price")?;
                     continue;
                 };
+                if let Err(e) = check_daily_adjustment(
+                    id,
+                    f,
+                    day,
+                    &actions,
+                    AdjustmentContext {
+                        explicit: dataset.has_independent_coefficients(),
+                        previous: dataset.calendar[day.saturating_sub(1)],
+                        date,
+                        index: state.event_index.as_ref().unwrap(),
+                    },
+                ) {
+                    blocked += 1;
+                    reject_order(request, date, id, "buy", &e.to_string())?;
+                    continue;
+                }
                 if !state.ledger.positions.contains_key(id) {
-                    let scope = std::iter::once(id.clone()).collect();
-                    if let Err(e) = book.require_coverage(&scope, date, date) {
+                    if let Err(e) = state.event_index.as_ref().unwrap().check(id, date) {
                         blocked += 1;
                         reject_order(
                             request,
@@ -656,7 +803,11 @@ pub(super) fn simulate(
                         f,
                         day,
                         &actions,
-                        &request.market_rules,
+                        TradeContext {
+                            rules: &request.market_rules,
+                            data: state.event_index.as_ref().and_then(|i| i.data.as_ref()),
+                            date,
+                        },
                         true,
                     )?
                 {
@@ -688,8 +839,11 @@ pub(super) fn simulate(
         for (id, p) in &state.marks {
             state.ledger.mark(id, *p)?;
         }
-        let relevant_actions: Vec<_> = book
-            .actions
+        let relevant_actions: Vec<_> = state
+            .event_index
+            .as_ref()
+            .unwrap()
+            .record_events(date)
             .iter()
             .filter(|a| state.ledger.positions.contains_key(&a.instrument))
             .cloned()
@@ -760,6 +914,174 @@ pub(super) fn simulate(
 mod tests {
     use super::*;
     #[test]
+    fn independent_event_coefficients_ignore_qlib_restoration_factor_drift() {
+        let mut book: ActionBundle = serde_json::from_value(serde_json::json!({
+            "schema_version":5,"downloader":"JFQuant analytics-workflow synthetic-demo-v1","downloaded_at":"fixture",
+            "source_bindings":{},"coverage":{},"queried_symbols":[],"actions":[],"failures":{},"raw_sha256":{},
+            "execution_data":{"schema_version":1,"suspensions":{},"limits":{},"coefficients":{"SH600000":{"2024-01-01":1}},
+            "capabilities":{"SH600000:independent_sina_factor":{"status":"available","verified_through":"2024-12-31"}}}
+        })).unwrap();
+        let p = analytics_storage::corporate_actions::execution_index::ExecutionIndex::build(
+            &book,
+            Default::default(),
+        )
+        .unwrap();
+        let field = RawFields {
+            open: DailyField {
+                start: 0,
+                values: vec![Some(10.); 2],
+            },
+            close: DailyField {
+                start: 0,
+                values: vec![Some(10.); 2],
+            },
+            volume: DailyField {
+                start: 0,
+                values: vec![Some(100.); 2],
+            },
+            factor: DailyField {
+                start: 0,
+                values: vec![Some(1.), Some(1.0001)],
+            },
+        };
+        let previous = "2024-01-02".parse().unwrap();
+        let date = "2024-01-03".parse().unwrap();
+        check_daily_adjustment(
+            "SH600000",
+            &field,
+            1,
+            &[],
+            AdjustmentContext {
+                explicit: false,
+                previous,
+                date,
+                index: &p,
+            },
+        )
+        .unwrap();
+        book.execution_data = None;
+        let p = analytics_storage::corporate_actions::execution_index::ExecutionIndex::build(
+            &book,
+            Default::default(),
+        )
+        .unwrap();
+        assert!(
+            check_daily_adjustment(
+                "SH600000",
+                &field,
+                1,
+                &[],
+                AdjustmentContext {
+                    explicit: false,
+                    previous,
+                    date,
+                    index: &p
+                }
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn exact_limits_and_suspensions_override_buffer_without_inventing_fills() {
+        let mut field = RawFields {
+            open: DailyField {
+                start: 0,
+                values: vec![Some(10.2)],
+            },
+            close: DailyField {
+                start: 0,
+                values: vec![Some(10.)],
+            },
+            volume: DailyField {
+                start: 0,
+                values: vec![Some(100.)],
+            },
+            factor: DailyField {
+                start: 0,
+                values: vec![Some(1.)],
+            },
+        };
+        let date: Date = "2024-01-02".parse().unwrap();
+        let mut data = analytics_storage::execution_data::ExecutionData {
+            schema_version: 1,
+            limits: BTreeMap::from([("SH600000".into(), BTreeMap::from([(date, [9.8, 10.2])]))]),
+            ..Default::default()
+        };
+        let rules = MarketRulesPreset::a_share_latest();
+        assert!(
+            !trade_allowed(
+                "SH600000",
+                "SH600000",
+                &field,
+                0,
+                &[],
+                TradeContext {
+                    rules: &rules,
+                    data: Some(&data),
+                    date
+                },
+                true
+            )
+            .unwrap()
+        );
+        assert!(
+            trade_allowed(
+                "SH600000",
+                "SH600000",
+                &field,
+                0,
+                &[],
+                TradeContext {
+                    rules: &rules,
+                    data: Some(&data),
+                    date
+                },
+                false
+            )
+            .unwrap()
+        );
+        field.open.values[0] = Some(10.3);
+        for buy in [true, false] {
+            assert!(
+                trade_allowed(
+                    "SH600000",
+                    "SH600000",
+                    &field,
+                    0,
+                    &[],
+                    TradeContext {
+                        rules: &rules,
+                        data: Some(&data),
+                        date
+                    },
+                    buy
+                )
+                .is_err()
+            );
+        }
+        field.open.values[0] = Some(10.2);
+        data.suspensions.insert(
+            "SH600000".into(),
+            BTreeMap::from([(date, "intraday".into())]),
+        );
+        assert!(
+            !trade_allowed(
+                "SH600000",
+                "SH600000",
+                &field,
+                0,
+                &[],
+                TradeContext {
+                    rules: &rules,
+                    data: Some(&data),
+                    date
+                },
+                false
+            )
+            .unwrap()
+        );
+    }
+    #[test]
     fn raw_folds_keep_real_shares_cash_and_dated_rights_across_new_year() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("qlib_bin");
@@ -820,7 +1142,10 @@ mod tests {
             source: "synthetic hand-calculated fixture".into(),
         };
         let mut book = ActionBundle {
-            schema_version: 4,
+            structured_coverage: Default::default(),
+            execution_issues: Vec::new(),
+            execution_data: None,
+            schema_version: 5,
             source_bindings: Default::default(),
             coverage: Default::default(),
             downloader: "JFQuant analytics-workflow synthetic-demo-v1".into(),

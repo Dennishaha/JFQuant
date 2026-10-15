@@ -2,6 +2,7 @@
 
 import contextlib
 import hashlib
+import json
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -25,6 +26,15 @@ class EvidenceCapture:
         ]
         url = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), ""))
         body = bytes(response.content)
+        if parts.hostname == "api.tushare.pro":
+            request_body = getattr(getattr(response, "request", None), "body", None)
+            if request_body:
+                try:
+                    credential = json.loads(request_body).get("token", "")
+                except (ValueError, TypeError):
+                    credential = ""
+                if credential and credential.encode() in body:
+                    raise ValueError("authenticated_response_contains_credential")
         digest = hashlib.sha256(body).hexdigest()
         key = hashlib.sha256(url.encode()).hexdigest()[:16] + "-" + digest[:16]
         filename = "http-" + key + ".body"

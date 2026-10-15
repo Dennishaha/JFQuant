@@ -625,7 +625,7 @@ fn current_research_cli_and_api_share_results_and_reject_old_imports_without_mod
     let cli_id = value["task_id"].as_str().unwrap().parse().unwrap();
     let actual = s.client.wait(cli_id, Some(15)).unwrap();
     assert_eq!(actual["results"], expected);
-    assert_eq!(expected["schema_version"], 12);
+    assert_eq!(expected["schema_version"], 13);
     assert!(
         expected["aggregate"]
             .get("terminal_valuation_fees_cny")
@@ -919,7 +919,7 @@ fn cli_pools_and_canonical_research_share_public_backend_and_schema() {
     let id = run["task_id"].as_str().unwrap();
     s.json(&["jobs", "wait", id, "--timeout", "30"]);
     let result = s.json(&["jobs", "results", id]);
-    assert_eq!(result["schema_version"], 12);
+    assert_eq!(result["schema_version"], 13);
     assert_eq!(
         result["execution"]["benchmark"],
         analytics_workflow::demo::fixture_security_id("SH000905")
@@ -1001,7 +1001,7 @@ fn date_overrides_preview_and_no_validation_run_share_the_public_schedule() {
         "--timeout",
         "30",
     ]);
-    assert_eq!(done["results"]["schema_version"], 12);
+    assert_eq!(done["results"]["schema_version"], 13);
     assert_eq!(done["results"]["fold_reports"][0]["validation_rows"], 0);
     let invalid = s.cli(&[
         "research",
@@ -1026,7 +1026,44 @@ fn stopping_idle_service_then_immediately_reconnecting_does_not_parse_empty_json
     s.json(&["service", "stop"]);
     let after = s.json(&["service", "status"]);
     assert!(after["active"].is_null());
-    assert_eq!(after["protocol_version"], 10);
+    assert_eq!(
+        after["protocol_version"],
+        analytics_workflow::service::PROTOCOL_VERSION
+    );
+}
+
+#[test]
+fn execution_data_only_rejections_are_exit_three_with_models_and_diagnostics_retained() {
+    let s = Sandbox::new();
+    let w = Workspace::open(&s.client.root).unwrap();
+    let (m, a, t) = analytics_workflow::demo::create(&w).unwrap();
+    let path = w.resolve(a.path);
+    let mut book = analytics_storage::corporate_actions::ActionBundle::read(&path).unwrap();
+    book.coverage.clear();
+    std::fs::write(&path, serde_json::to_vec(&book).unwrap()).unwrap();
+    let a = w.register(&path).unwrap();
+    t.write(&w.resolve("execution-recipe.json")).unwrap();
+    let accepted = s.json(&[
+        "research",
+        "run",
+        "--template",
+        "execution-recipe.json",
+        "--market",
+        &m.id,
+        "--actions",
+        &a.id,
+    ]);
+    let id = accepted["task_id"].as_str().unwrap();
+    let wait = s.cli(&["jobs", "wait", id, "--timeout", "30"]);
+    assert_eq!(wait.status.code(), Some(3));
+    let records = w.runs().unwrap();
+    let run = records.iter().find(|r| r.id.to_string() == id).unwrap();
+    let root = w.resolve(&run.output);
+    assert!(root.join("training.json").is_file());
+    let summary: Value =
+        serde_json::from_slice(&std::fs::read(root.join("summary.json")).unwrap()).unwrap();
+    assert_eq!(summary["backtest_status"], "execution_data_not_ready");
+    assert!(root.join("order_events.jsonl").is_file());
 }
 
 #[test]
@@ -1056,7 +1093,7 @@ fn removed_identity_cli_is_rejected_and_research_stages_are_explicit() {
     let accepted = s.json(&["research", "backtest", "--training", id, "--actions", &a.id]);
     let id = accepted["task_id"].as_str().unwrap();
     assert!(s.cli(&["jobs", "wait", id]).status.success());
-    assert_eq!(s.json(&["jobs", "results", id])["schema_version"], 12);
+    assert_eq!(s.json(&["jobs", "results", id])["schema_version"], 13);
 }
 
 #[test]
@@ -1135,4 +1172,106 @@ fn split_template_profiles_and_price_basis_flags_share_native_training() {
             .any(|c| c["code"] == "provider_adjustment_unreconciled")
     );
     assert_eq!(artifact["feature_order"], json!(t.config.factor_ids));
+}
+
+#[test]
+fn source_priorities_and_refresh_preview_share_the_public_backend_without_credentials() {
+    let s = Sandbox::new();
+    let sources = s.json(&["data", "sources", "list"]);
+    for role in ["quotes", "actions", "execution", "members", "calendar"] {
+        assert_eq!(
+            sources["result"]["results"]["details"]["policy"]["priorities"][role][0],
+            "tdxaidata"
+        );
+    }
+    let w = Workspace::open(&s.client.root).unwrap();
+    let (market, actions, recipe) = analytics_workflow::demo::create_canonical(&w).unwrap();
+    recipe.write(&w.resolve("recipe.json")).unwrap();
+    let result = s.json(&[
+        "data",
+        "refresh",
+        "--template",
+        "recipe.json",
+        "--market",
+        &market.id,
+        "--actions",
+        &actions.id,
+        "--preview",
+        "--provider",
+        "tdxaidata",
+    ]);
+    assert_eq!(
+        result["result"]["results"]["details"]["plan"]["schema_version"],
+        1
+    );
+    assert_eq!(
+        result["result"]["results"]["details"]["account"]["status"],
+        "not_run"
+    );
+    let plan = &result["result"]["results"]["details"]["plan"];
+    for security in plan["securities"].as_array().unwrap() {
+        assert_eq!(security["quote_sources"], json!(["tdxaidata"]));
+    }
+    let out = s.cli(&["data", "sources", "configure", "--provider", "tdxaidata"]);
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn local_credentials_are_private_and_survive_separate_cli_processes_without_os_prompts() {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Stdio;
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    let secret = "fixture-only-tdx-private-key";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_jfquant"))
+        .env("HOME", &home)
+        .args([
+            "data",
+            "sources",
+            "configure",
+            "--provider",
+            "tdxaidata",
+            "--key-stdin",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(secret.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(secret));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(secret));
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["storage"], "private_local_file");
+    #[cfg(target_os = "macos")]
+    let root = home.join("Library/Application Support/JFQuant/credentials");
+    #[cfg(not(target_os = "macos"))]
+    let root = home.join(".jfquant/credentials");
+    assert_eq!(
+        std::fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    assert_eq!(
+        std::fs::metadata(root.join("tdxaidata.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    let removed = Command::new(env!("CARGO_BIN_EXE_jfquant"))
+        .env("HOME", home)
+        .args(["data", "sources", "authorize", "--provider", "tdxaidata"])
+        .output()
+        .unwrap();
+    assert_eq!(removed.status.code(), Some(2));
 }

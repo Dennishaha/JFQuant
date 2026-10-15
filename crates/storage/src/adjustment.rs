@@ -9,24 +9,28 @@ pub const NORMALIZATION: &str = "explicit-hfq-first-raw-close-v1;shares;cny;null
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AdjustmentSource {
+    /// Declared TdxAiData coefficients rebased across windows and checked against its own events.
+    TdxForward,
     /// Independent dated factors from the fixed Sina endpoint documented by AKShare.
     SinaHfq,
     /// No verified adjustment factors (including Yahoo candidate prices).
     None,
 }
-/// Exact source decimal plus effective date; no rounding to quote precision.
+/// Dated explicit coefficient; any source-anchor normalization is frozen in evidence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdjustmentPoint {
     /// First effective calendar date.
     pub effective_date: Date,
-    /// Original positive, finite decimal coefficient.
+    /// Positive, finite decimal coefficient: original Sina value or rebased TDX value.
     pub factor: String,
 }
 /// Supported independent coefficient identities.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FactorSource {
+    /// TdxAiData's explicit ForwardFactor series, normalized to a fixed first-day anchor.
+    TdxForward,
     /// Documented, fixed Sina endpoint.
     SinaHfq,
     /// Explicit coefficients belonging only to a marked synthetic fixture.
@@ -58,11 +62,11 @@ pub enum AdjustmentBasis {
         reason: String,
     },
 }
-/// Independent per-security file under adjustments/ID.json, format 1.
+/// Independent per-security file under adjustments/ID.json, format 3.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdjustmentRecord {
-    /// Adjustment record schema, 1.
+    /// Adjustment record schema, 3.
     pub schema_version: u32,
     /// Exact internal security identity.
     pub instrument_id: String,
@@ -115,6 +119,9 @@ impl AdjustmentRecord {
                     return Err(invalid("verified price index requires identity basis"));
                 }
                 let expected = match source {
+                    FactorSource::TdxForward => {
+                        "tdxaidata:get_market_data:none:ForwardFactor".into()
+                    }
                     FactorSource::SinaHfq => format!(
                         "https://finance.sina.com.cn/realstock/company/{}/hfq.js",
                         self.source_symbol.to_ascii_lowercase()
@@ -141,6 +148,7 @@ impl AdjustmentRecord {
                     || !matches!(
                         source.as_str(),
                         "akshare.index_zh_a_hist"
+                            | "tdxaidata.get_market_data"
                             | "JFQuant Qlib price-index recovery-v1"
                             | "JFQuant analytics-workflow synthetic-demo-v1"
                     )

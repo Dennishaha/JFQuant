@@ -70,7 +70,7 @@ fn synthetic_annual_recipe_runs_native_model_and_dated_real_share_account() {
         .begin(c.id, "synthetic research", snapshot(&w, &request).unwrap())
         .unwrap();
     let result = execute(&w, &request, &run, &c).unwrap();
-    assert_eq!(result.details["schema_version"], 12);
+    assert_eq!(result.details["schema_version"], 13);
     assert!(
         result.details["aggregate"]["total_return"]
             .as_f64()
@@ -423,7 +423,7 @@ fn historical_adjustment_terms_do_not_require_old_settlement_dates_but_execution
         .begin(c.id, "historical terms", snapshot(&w, &request).unwrap())
         .unwrap();
     let out = execute(&w, &request, &r, &c).unwrap();
-    assert_eq!(out.details["schema_version"], 12);
+    assert_eq!(out.details["schema_version"], 13);
     assert_eq!(out.details["annual_reports"][0]["year"], 2010);
     t = demo::create_canonical(&w).unwrap().2;
     let c = context();
@@ -479,7 +479,7 @@ fn source_adjusted_quotes_are_audit_only_and_report_provenance_is_required() {
         )
         .unwrap();
     let out = execute(&w, &request, &r, &c).unwrap();
-    assert_eq!(out.details["schema_version"], 12);
+    assert_eq!(out.details["schema_version"], 13);
     let input = &out.details["execution"]["price_inputs"]["securities"]
         [demo::fixture_security_id("SH600000")];
     let frozen = if input["source"].is_object() {
@@ -762,6 +762,7 @@ fn independent_training_survives_settlement_gap_and_repaired_backtest_does_not_r
     let (bt, result) = execute_stage(
         &w,
         WorkflowRequest::BacktestResearch {
+            event_check_policy: Default::default(),
             training: run.id,
             actions: bad.id,
         },
@@ -781,6 +782,7 @@ fn independent_training_survives_settlement_gap_and_repaired_backtest_does_not_r
     let (_, result) = execute_stage(
         &w,
         WorkflowRequest::BacktestResearch {
+            event_check_policy: Default::default(),
             training: run.id,
             actions: fixed.id.clone(),
         },
@@ -796,6 +798,7 @@ fn independent_training_survives_settlement_gap_and_repaired_backtest_does_not_r
     let (_, out) = execute_stage(
         &w,
         WorkflowRequest::BacktestResearch {
+            event_check_policy: Default::default(),
             training: run.id,
             actions: changed.id,
         },
@@ -872,11 +875,74 @@ fn absent_unheld_execution_coverage_retains_cash_and_reports_no_valid_trades() {
             audit_only: false,
         },
     );
-    let result = out.unwrap().details;
-    assert_eq!(result["backtest_status"], "no_valid_trades");
+    assert!(out.unwrap_err().to_string().contains("data_not_ready"));
+    let result: Value =
+        serde_json::from_slice(&fs::read(w.resolve(&run.output).join("summary.json")).unwrap())
+            .unwrap();
+    assert_eq!(result["backtest_status"], "execution_data_not_ready");
     assert_eq!(result["aggregate"]["total_return"], 0.0);
     let events = fs::read_to_string(w.resolve(run.output).join("order_events.jsonl")).unwrap();
     assert!(events.contains("execution_data_missing"));
+}
+
+#[test]
+fn supplier_account_policy_can_trade_without_manual_categories_and_audited_stays_blocked() {
+    for source in [
+        "tushare.dividend/implemented/per-share-v1",
+        "akshare.cninfo/implemented/per-ten-shares-v1",
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let w = Workspace::open(tmp.path()).unwrap();
+        let (m, a, mut t) = demo::create(&w).unwrap();
+        t.price_basis = analytics_core::research_quality::PriceBasis::Provider;
+        let path = w.resolve(a.path);
+        let mut book = ActionBundle::read(&path).unwrap();
+        book.coverage.clear();
+        for id in &book.queried_symbols {
+            book.structured_coverage.insert(
+                id.clone(),
+                analytics_storage::execution_data::StructuredCoverage {
+                    dates: analytics_core::DateRange {
+                        start: "2007-01-02".parse().unwrap(),
+                        end: "2010-01-12".parse().unwrap(),
+                    },
+                    source: source.into(),
+                    evidence: vec!["explicit synthetic supplier fixture".into()],
+                },
+            );
+        }
+        atomic_json(&path, &book).unwrap();
+        let a = w.register(&path).unwrap();
+        let (_, out) = execute_stage(
+            &w,
+            WorkflowRequest::Research {
+                template: Box::new(t.clone()),
+                market: m.id.clone(),
+                actions: Some(a.id.clone()),
+                audit_only: false,
+            },
+        );
+        let outcome = out.unwrap();
+        assert_eq!(outcome.details["backtest_status"], "completed");
+        assert!(
+            outcome.details["aggregate"]["mean_daily_turnover"]
+                .as_f64()
+                .unwrap()
+                > 0.
+        );
+        t.event_check_policy = analytics_core::execution::EventCheckPolicy::Audited;
+        let (run, out) = execute_stage(
+            &w,
+            WorkflowRequest::Research {
+                template: Box::new(t),
+                market: m.id,
+                actions: Some(a.id),
+                audit_only: false,
+            },
+        );
+        assert!(out.unwrap_err().to_string().contains("data_not_ready"));
+        assert!(w.resolve(run.output).join("training.json").exists());
+    }
 }
 #[test]
 fn damaged_training_descriptor_or_model_is_rejected_without_prediction_or_refitting() {
@@ -901,6 +967,7 @@ fn damaged_training_descriptor_or_model_is_rejected_without_prediction_or_refitt
     let (bt, out) = execute_stage(
         &w,
         WorkflowRequest::BacktestResearch {
+            event_check_policy: Default::default(),
             training: run.id,
             actions: a.id.clone(),
         },
@@ -916,6 +983,7 @@ fn damaged_training_descriptor_or_model_is_rejected_without_prediction_or_refitt
     let (_, out) = execute_stage(
         &w,
         WorkflowRequest::BacktestResearch {
+            event_check_policy: Default::default(),
             training: run.id,
             actions: a.id,
         },
@@ -949,6 +1017,7 @@ fn relocated_workspace_reuses_models_from_verified_relative_market_version() {
     let (_, out) = execute_stage(
         &w,
         WorkflowRequest::BacktestResearch {
+            event_check_policy: Default::default(),
             training: run.id,
             actions: a.id,
         },

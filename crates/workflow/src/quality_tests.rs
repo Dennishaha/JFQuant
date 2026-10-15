@@ -337,7 +337,7 @@ fn missing_later_source_alias_does_not_erase_earlier_qualified_history() {
     assert_eq!(&before[..33], &after[..33]);
     assert_eq!(after[33]["retained"], 1);
     let (_, result) = execute_quality(&w, &m, &a, &t, false);
-    assert_eq!(result.unwrap().details["schema_version"], 12);
+    assert_eq!(result.unwrap().details["schema_version"], 13);
     let mut dataset = analytics_storage::daily::DailyDataset::open(&root).unwrap();
     dataset.bind_source_map(directory).unwrap();
     dataset
@@ -465,7 +465,7 @@ fn split_profiles_are_reusable_portable_and_reject_flat_or_conflicting_templates
     let mut t = ResearchTemplate::builtin_csi300().unwrap();
     t.write(&root.join("workflow.json")).unwrap();
     let d: Value = serde_json::from_slice(&fs::read(root.join("workflow.json")).unwrap()).unwrap();
-    assert_eq!(d["schema_version"], 8);
+    assert_eq!(d["schema_version"], 9);
     for k in [
         "config",
         "factor_ids",

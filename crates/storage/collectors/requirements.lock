@@ -722,6 +722,10 @@ tabulate==0.10.0 \
     --hash=sha256:e2cfde8f79420f6deeffdeda9aaec3b6bc5abce947655d17ac662b126e48a60d \
     --hash=sha256:f0b0622e567335c8fabaaa659f1b33bcb6ddfe2e496071b743aa113f8774f2d3
     # via akshare
+tdxaidata==1.2.2 \
+    --hash=sha256:794011131704a7827746b89da490e43345ddd442644d6100890d39063485171e \
+    --hash=sha256:ceaf0be18cb54cd197e79cca5590d4ba7d7c3620b899e818d472d032f2c33849
+    # via -r crates/storage/collectors/requirements.in
 tqdm==4.70.1 \
     --hash=sha256:c293e525e6fef9c20e8728fd4612df02a0aa31bb5fe91ecd93e123b1b7bffa73 \
     --hash=sha256:cefd0eca11b2a37a3aee776544d4f4ae913f02688135b5556b8788dfa474afc4

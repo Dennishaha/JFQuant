@@ -94,7 +94,7 @@ flowchart TD
   HISTORY --> CLIENT
 ```
 
-socket仅当前用户可访问，无网络监听端口；协议version=9，连接一条JSON请求/响应。启动竞争由工作区锁解决。服务无请求/任务/有效查询会话十分钟退出，状态和读取任务历史不依赖计算worker持有的原生句柄。
+socket仅当前用户可访问，无网络监听端口；协议version=11，连接一条JSON请求/响应。启动竞争由工作区锁解决。服务无请求/任务/有效查询会话十分钟退出，状态和读取任务历史不依赖计算worker持有的原生句柄。
 
 ## 开发构建与验收
 
@@ -115,25 +115,25 @@ packaging/verify-cli.sh清空开发环境执行帮助、原生自检、标准完
 
 服务自动启动时使用独立进程组；首次前台等待被Ctrl+C中断不会把SIGINT送到后台。该行为已用真实前台进程组发送信号并验证已提交任务继续成功的测试覆盖。
 
-研究结果只接受schema12及raw_integer_shares；不提供旧口径执行、重新计费或旧报告格式转换。jobs import先验证当前格式，失败不创建记录；旧文件保留。run --request只接受带operation的TaskRequest，例如{"operation":"workflow","request":{"operation":"create_demo"}}。不接受裸WorkflowRequest或未知参数。unsupported_result_format退出码为1，stdout为错误JSON，诊断写stderr。
+研究结果只接受schema13及raw_integer_shares；不提供旧口径执行、重新计费或旧报告格式转换。jobs import先验证当前格式，失败不创建记录；旧文件保留。run --request只接受带operation的TaskRequest，例如{"operation":"workflow","request":{"operation":"create_demo"}}。不接受裸WorkflowRequest或未知参数。unsupported_result_format退出码为1，stdout为错误JSON，诊断写stderr。
 
 
 ## 动态股票池与 Python 采集接口
 
-当前模板schema 8、研究结果schema12、服务协议10；公式仍为v4。解析后配置包含 `pool_version`、`benchmark` 和 `pool_exit_policy`（磁盘保存于TargetProfile）；默认 `builtin:csi500` / `SH000905`，沪深300模板使用 `builtin:csi300` / `SH000300`。自选和集合组合引用不可变pool版本，冻结成员区间、人工日期调整及输入哈希；模型manifest和缓存签名包含这些研究输入。原schema结果明确拒绝，历史状态和日志仍可查看，不转换旧文件。
+当前模板schema 9、研究结果schema13、服务协议13；公式仍为v4。解析后配置包含 `pool_version`、`benchmark` 和 `pool_exit_policy`（磁盘保存于TargetProfile）；默认 `builtin:csi500` / `SH000905`，沪深300模板使用 `builtin:csi300` / `SH000300`。自选和集合组合引用不可变pool版本，冻结成员区间、人工日期调整及输入哈希；模型manifest和缓存签名包含这些研究输入。原schema结果明确拒绝，历史状态和日志仍可查看，不转换旧文件。
 
 ```mermaid
 flowchart LR
-  CLIENT["App / jfquant"] --> SERVICE["协议10公共服务"]
+  CLIENT["App / jfquant"] --> SERVICE["协议13公共服务"]
   SERVICE --> POOL["保存/预览不可变股票池"]
   SERVICE --> COLLECT["Rust监督内置Python双源采集"]
   COLLECT --> SNAPSHOT["验证后的Parquet版本与公司行动候选"]
-  POOL --> FREEZE["模板8：池、基准、退出策略、签名"]
+  POOL --> FREEZE["模板9：池、基准、退出策略、签名"]
   SNAPSHOT --> READY["原价、历史覆盖、公司行动准入"]
   QLIB["现有Qlib读取器"] --> READY
   FREEZE --> READY
   READY --> RESEARCH["统一日行情、年度模型、持续整数股账户"]
-  RESEARCH --> RESULT["结果12：成员变化、退出/阻碍、账本、费用"]
+  RESEARCH --> RESULT["结果13：成员变化、退出/阻碍、账本、费用"]
 ```
 
 `pools create/validate/import/export/list/versions/preview` 使用公共定义及解析器；`data collect --provider akshare|yfinance --kind market|actions` 提交后台任务，使用 jobs wait 显式等待。`run --request` 可提交完整公共请求。App提供来源、采集日期/证券、股票池JSON编辑、日期预览、退出策略及失败采集恢复按钮。包内Python和依赖只用于采集，不需要外部Python；日常操作不调用Cargo。
@@ -154,7 +154,7 @@ jfquant research demo-parquet
 
 ## 显式系数采集
 
-jfquant data collect --provider akshare --adjustment-source sina-hfq --start 2004-01-01 --end 2026-10-13 --instruments SH600000,SH000300 --benchmarks SH000300 提交原价、供应商证据和独立新浪系数。省略选项时AKShare选择sina-hfq，yfinance选择none。未知组合、股票被声明为指数或已知指数未声明角色均失败，不换源。run --request的完整CollectionRequest须含adjustment_source。当前服务10、采集7、规范4、报告10；公式v4和默认178项不变。
+jfquant data collect --provider akshare --adjustment-source sina-hfq --start 2004-01-01 --end 2026-10-13 --instruments SH600000,SH000300 --benchmarks SH000300 提交原价、供应商证据和独立新浪系数。省略选项时AKShare选择sina-hfq，yfinance选择none。未知组合、股票被声明为指数或已知指数未声明角色均失败，不换源。run --request的完整CollectionRequest须含adjustment_source。当前服务11、采集7、规范4、报告10；公式v4和默认178项不变。
 
 ## 任意日期与数据修订命令
 
@@ -216,7 +216,7 @@ flowchart LR
 
 为什么调整：普通市场代码无需先登记身份；独立目录、审核和权威名录下载增加了研究前置负担。特殊历史代码仍需在快照内明确区间，不能将旧证券行情或权益接到另一证券。训练使用价量和标签，到账／交付资料只在实际账户执行时检查。
 
-当前格式：模板8、需求3、准入5、股票池3、公司行动4、规范行情5、系数3、采集7、服务10、研究结果12；快照内来源映射1、训练产物2。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
+当前格式：模板9、需求3、准入5、股票池3、公司行动5、规范行情5、系数3、采集7、服务11、研究结果13；快照内来源映射1、训练产物2。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
 
 ```bash
 jfquant --workspace "$JFQUANT_WORKSPACE" research train --template recipe.json --market MARKET_ID --actions HISTORY_ACTIONS_ID
@@ -238,7 +238,7 @@ flowchart LR
 
 ## 独立保存流程、因子和标的
 
-日常无需Cargo。模板默认导出工作流8及相邻factors/targets内容签名文件，整体携带即可复制给其他工作区；stdout返回解析后的完整请求方便AI，但这个冻结对象不能冒充磁盘模板。显式profile替换先应用，`--factor-set`再重置为该组合完整顺序，`--price-basis`最后覆盖口径。
+日常无需Cargo。模板默认导出工作流9及相邻factors/targets内容签名文件，整体携带即可复制给其他工作区；stdout返回解析后的完整请求方便AI，但这个冻结对象不能冒充磁盘模板。显式profile替换先应用，`--factor-set`再重置为该组合完整顺序，`--price-basis`最后覆盖口径。
 
 ```bash
 jfquant templates default --universe csi300 --output research/workflow.json
@@ -256,3 +256,65 @@ jfquant research backtest --training TRAINING_JOB_ID --actions ACTION_VERSION
 ```
 
 provider不要求train/check/preview携带actions，仍保存未对账告警；verified没有必要复权依据就失败。run与backtest要求actions，不能通过供应商训练模式跳过账户权益检查。默认仍GTJA191/verified/strict；Alpha158必须明确选择。JSON stdout、退出码、后台存活和单任务互斥规则保持。
+
+## Tushare配置和账户执行
+
+`jfquant data sources configure --provider tushare --key-stdin`只从stdin读取凭据并保存本机私有文件，禁止Token参数；`jfquant data tushare-permissions`异步检查端点权限。采集执行资料用`data collect --kind actions --provider tushare`，仍返回任务ID。研究流程命令增加`--event-check provider|audited`，独立回测可直接覆盖执行策略，不重训。
+
+```bash
+jfquant data collect --kind actions --provider tushare --start 2016-01-01 --end 2026-10-12 --instruments SH600018,SH600000,SZ000001
+jfquant research backtest --training TRAINING_JOB_ID --actions ACTION_VERSION --event-check provider
+jfquant jobs wait JOB_ID
+```
+
+全部买单因资料拒绝时wait退出3；普通无信号或合法交易限制全未成交显示无有效交易。二者都不能作为可信策略收益验收。
+
+App凭据配置通过同包jfquant的私有stdin管道执行，App与后台读取同一本机私有凭据目录；配置异步完成，Token不写任务、argv或日志。保存采用0600文件及原子替换，读取校验所有者/权限并拒绝符号链接；无钥匙串调用、授权入口或旧凭据自动读取。Tushare权限错误与频率错误可能共用40203，采集按源返回的明确频率提示区分并生成稳定原因；此分类仅用于诊断和有限重试，不能据此把失败当作无事件。
+
+## 普通分红默认巨潮优先
+
+`jfquant data actions --market MARKET_ID --pool builtin:csi300`与`data collect --kind actions --provider akshare`使用同一巨潮优先实现。无需Tushare凭据或新增配置；新浪补充匹配的送转上市日与独立系数。操作依然异步返回任务ID，来源不完整和真实冲突保留问题。研究补采也复用该路径。
+
+
+## 数据来源、指定途径和增量更新
+
+为什么独立为命令组：AI应能重现App的来源与刷新选择，不能靠外部脚本或Cargo另走采集逻辑。`data sources`和`data refresh`只转换公共workflow请求，所有用途默认通达信→AKShare→Tushare；行情/复权作为一致单元，账户资料与历史成员依其能力补缺。
+
+```mermaid
+flowchart LR
+  C[clap参数 / workflow文件] --> W[共用SourcePolicy与RefreshRequest]
+  W --> S[工作区服务协议13]
+  S --> R[任务 / 缺口 / 新版本]
+```
+
+```sh
+jfquant data sources list
+jfquant data sources policy --file source-policy.json
+jfquant data sources configure --provider tdxaidata --key-stdin
+jfquant data sources check --provider tdxaidata
+jfquant jobs wait TASK_ID
+jfquant data refresh --template workflow.json --market MARKET_ID --actions ACTIONS_ID --preview
+jfquant data refresh --template workflow.json --market MARKET_ID --mode incremental
+jfquant data refresh --template workflow.json --market MARKET_ID --mode repair --provider tdxaidata
+```
+
+Key通过本机安全stdin或App密码框输入，保存到本机私有JSON文件，不放命令行或请求JSON。更新App或重建CLI不改变读取权限，无系统授权弹窗。
+
+`list`和`--preview`等待完成，JSON包装为`{submission,result:{record,results}}`；来源设置位于`result.results.details.policy`，刷新计划位于`result.results.details.plan`。非预览刷新和三轮小样本验证立即返回任务ID，配合jobs读取。`--provider`禁止隐式换源；默认`data collect`为通达信，`--kind calendar|members`不下载行情，成员只登记当前观测日。研究workflow仍引用分离的因子和标的文件，策略文件不修改它们。
+
+详细策略和JSON格式见[workflow](../workflow/README.md)，原生SDK能力与安全边界见[采集组件](../storage/collectors/README.md)。验收：nextest对比CLI/API默认顺序、固定来源、模板解析、免凭据预览和JSON包装；清空环境的包内CLI另验。
+
+## 按缺口补采实施证据
+
+为什么独立任务：补齐一只股票的支付/上市日不应重取全池或重训模型。`CollectAnnouncements`接收固定AKShare/巨潮来源、证券、日期和可选resume，App和CLI提交同一请求。先验证再接受，失败不登记事件版本；成功返回公告manifest及`candidate_only=true`，必须经`InspectActions/ReviseActions`核对原值哈希、实施字段引用后生成不可变修订。App历史可恢复公告采集。新增请求采用服务协议13。
+
+```mermaid
+flowchart LR
+ U[App / jfquant collect announcements] --> W[公共请求与任务记录]
+ W --> C[监督巨潮采集 / 已验证检查点]
+ C --> M[正文哈希 / 候选字段 / manifest]
+ M --> R[原值及实施证据审阅]
+ R --> V[新公司行动版本 / 旧值保留]
+```
+
+复现：`jfquant data collect --kind announcements --provider akshare --start 2016-05-01 --end 2017-07-01 --instruments SH600000,SZ000001`，然后`jfquant jobs wait TASK_ID`。候选解析v3支持空格日期、沪市六列换行表和深市起始交易日，矛盾不自动裁决。真实研究本轮不使用Qlib快照；通达信行情完整时不要求其他来源背书，备用来源仅补用途缺口。详见[设计决定](../workflow/DECISIONS.md)。

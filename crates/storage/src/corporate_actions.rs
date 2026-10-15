@@ -2,6 +2,7 @@
 //! Provider success is recorded separately from execution eligibility.
 mod aastocks;
 mod checkpoints;
+pub mod execution_index;
 pub mod review;
 pub use aastocks::{fetch_pay_dates, repair_pay_dates};
 
@@ -60,6 +61,15 @@ pub struct EventCoverage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActionBundle {
+    /// Complete structured queries accepted by the supplier execution policy.
+    #[serde(default)]
+    pub structured_coverage: BTreeMap<String, crate::execution_data::StructuredCoverage>,
+    /// Discovered incomplete events and source conflicts, independently dated.
+    #[serde(default)]
+    pub execution_issues: Vec<crate::execution_data::ExecutionIssue>,
+    /// Optional immutable format-1 suspension, limit and coefficient diagnostics.
+    #[serde(default)]
+    pub execution_data: Option<crate::execution_data::ExecutionData>,
     /// Explicit acquisition locators and their proved/requested date scope.
     pub source_bindings: BTreeMap<String, analytics_core::source_map::SourceLocator>,
     /// Per-security/category historical completeness, separate from download success.
@@ -199,13 +209,36 @@ impl ActionBundle {
     }
 
     fn validate_identity(&self) -> io::Result<()> {
-        if self.schema_version != 4
+        if self.schema_version != 5
             || (self.downloader != "JFQuant analytics-storage corporate-actions"
                 && self.downloader != "JFQuant analytics-workflow synthetic-demo-v1")
         {
             return Err(invalid(
-                "unsupported_data_format: action bundle requires format 4 and known source",
+                "unsupported_data_format: action bundle requires format 5 and known source",
             ));
+        }
+        if let Some(data) = &self.execution_data {
+            data.validate()?;
+        }
+        for (id, c) in &self.structured_coverage {
+            analytics_core::pool::validate_instrument(id).map_err(invalid)?;
+            c.dates.validate().map_err(invalid)?;
+            if !matches!(
+                c.source.as_str(),
+                "tushare.dividend/implemented/per-share-v1"
+                    | "akshare.cninfo/implemented/per-ten-shares-v1"
+            ) || c.evidence.is_empty()
+                || !self.queried_symbols.contains(id)
+            {
+                return Err(invalid("invalid_structured_coverage"));
+            }
+        }
+        for issue in &self.execution_issues {
+            analytics_core::pool::validate_instrument(&issue.instrument).map_err(invalid)?;
+            issue.dates.validate().map_err(invalid)?;
+            if issue.code.is_empty() || issue.message.is_empty() {
+                return Err(invalid("invalid_execution_issue"));
+            }
         }
         for claims in self.coverage.values() {
             for c in claims {
@@ -311,6 +344,111 @@ impl ActionBundle {
             let root = path
                 .parent()
                 .ok_or_else(|| invalid("action evidence root missing"))?;
+            for (id, c) in &bundle.structured_coverage {
+                for name in &c.evidence {
+                    if Path::new(name).components().count() != 1 {
+                        return Err(invalid("unsafe structured evidence"));
+                    }
+                    let bytes = fs::read(root.join("raw").join(name))?;
+                    if bundle.raw_sha256.get(name)
+                        != Some(&format!("sha256:{:x}", Sha256::digest(&bytes)))
+                    {
+                        return Err(invalid("structured_evidence_hash_mismatch"));
+                    }
+                    let shard: Value = serde_json::from_slice(&bytes).map_err(invalid)?;
+                    if shard["instrument"] != *id
+                        || shard["history_verified"] != true
+                        || shard["evidence"]["history_complete"] != true
+                        || if c.source == "tushare.dividend/implemented/per-share-v1" {
+                            shard["evidence"]["provider"] != "tushare"
+                        } else {
+                            shard["evidence"]["provider"] != "akshare"
+                                || shard["evidence"]["source_rule"] != c.source
+                        }
+                        || shard["evidence"]["request_range"]
+                            != serde_json::to_value(&c.dates).map_err(invalid)?
+                    {
+                        return Err(invalid("structured_source_claim_mismatch"));
+                    }
+                    crate::collector::verify_http_receipts(root, &shard["evidence"])?;
+                    if c.source == "akshare.cninfo/implemented/per-ten-shares-v1" {
+                        let raw = &shard["evidence"]["cninfo"];
+                        let count = raw["records"].as_array().map(|v| v.len() as u64);
+                        let url = format!(
+                            "https://webapi.cninfo.com.cn/api/sysapi/p_sysapi1139?scode={}",
+                            &bundle.source_symbol(id)?[2..]
+                        );
+                        let captured =
+                            shard["evidence"]["http_receipts"]
+                                .as_array()
+                                .is_some_and(|rs| {
+                                    rs.iter().any(|r| {
+                                        r["url"] == url
+                                            && r["status"] == 200
+                                            && r["filename"].as_str().is_some_and(|name| {
+                                                fs::read(root.join("raw").join(name))
+                                                    .ok()
+                                                    .and_then(|b| {
+                                                        serde_json::from_slice::<Value>(&b).ok()
+                                                    })
+                                                    .is_some_and(|v| v == *raw)
+                                            })
+                                    })
+                                });
+                        if count.is_none()
+                            || raw["resultcode"] != 200
+                            || raw["count"].as_u64() != count
+                            || raw["total"].as_u64() != count
+                            || !captured
+                        {
+                            return Err(invalid("cninfo_source_receipt_mismatch"));
+                        }
+                        let adjustment: crate::adjustment::AdjustmentRecord =
+                            serde_json::from_value(shard["evidence"]["adjustment"].clone())
+                                .map_err(invalid)?;
+                        adjustment.validate()?;
+                        let crate::adjustment::AdjustmentBasis::Explicit {
+                            source,
+                            points,
+                            verified_through,
+                            ..
+                        } = adjustment.basis
+                        else {
+                            return Err(invalid("cninfo_independent_coefficient_missing"));
+                        };
+                        if source != crate::adjustment::FactorSource::SinaHfq
+                            || adjustment.source_symbol != bundle.source_symbol(id)?
+                            || verified_through < c.dates.end
+                        {
+                            return Err(invalid("cninfo_independent_coefficient_coverage"));
+                        }
+                        let expected: BTreeMap<_, _> = points
+                            .iter()
+                            .map(|p| {
+                                Ok((p.effective_date, crate::adjustment::coefficient(&p.factor)?))
+                            })
+                            .collect::<io::Result<_>>()?;
+                        // The exact decimal strings remain frozen in the source. JSON's
+                        // f64 round-trip may differ by a few ULPs; this is not the event
+                        // reconciliation tolerance and never accepts a different series.
+                        let matches = bundle
+                            .execution_data
+                            .as_ref()
+                            .and_then(|d| d.coefficients.get(id))
+                            .is_some_and(|actual| {
+                                actual.len() == expected.len()
+                                    && expected.iter().all(|(date, value)| {
+                                        actual.get(date).is_some_and(|n| {
+                                            (n - value).abs() <= f64::EPSILON * 4. * value.abs()
+                                        })
+                                    })
+                            });
+                        if !matches {
+                            return Err(invalid("cninfo_independent_coefficient_mismatch"));
+                        }
+                    }
+                }
+            }
             for (id, claims) in &bundle.coverage {
                 for c in claims
                     .iter()
@@ -499,7 +637,7 @@ fn fetch_histories(symbols: &[String], output: &Path, resume: bool) -> io::Resul
             return Err(invalid("duplicate requested symbol"));
         }
     }
-    let owner = serde_json::json!({"schema_version":4,"downloader":"JFQuant analytics-storage company-actions","symbols":symbols});
+    let owner = serde_json::json!({"schema_version":5,"downloader":"JFQuant analytics-storage company-actions","symbols":symbols});
     if resume && output.exists() {
         let saved: Value =
             serde_json::from_slice(&fs::read(output.join("owner.json"))?).map_err(invalid)?;
@@ -567,7 +705,10 @@ fn fetch_histories(symbols: &[String], output: &Path, resume: bool) -> io::Resul
     });
     task_context_check()?;
     let mut bundle = ActionBundle {
-        schema_version: 4,
+        structured_coverage: Default::default(),
+        execution_issues: Vec::new(),
+        execution_data: None,
+        schema_version: 5,
         source_bindings: Default::default(),
         coverage: Default::default(),
         downloader: "JFQuant analytics-storage corporate-actions".into(),
@@ -730,7 +871,7 @@ pub fn enrich_public(
     output: &Path,
 ) -> io::Result<ActionBundle> {
     source.validate_identity()?;
-    if source.schema_version != 4
+    if source.schema_version != 5
         || source.downloader != "JFQuant analytics-storage corporate-actions"
     {
         return Err(invalid("invalid source bundle"));
@@ -872,7 +1013,7 @@ pub fn fetch_details(
     end: Date,
 ) -> io::Result<ActionBundle> {
     source.validate_identity()?;
-    if start > end || source.schema_version != 4 {
+    if start > end || source.schema_version != 5 {
         return Err(invalid("invalid detail range/bundle"));
     }
     checkpoints::prepare(
@@ -983,7 +1124,7 @@ pub fn repair_from_evidence(
     output: &Path,
 ) -> io::Result<ActionBundle> {
     source.validate_identity()?;
-    if source.schema_version != 4
+    if source.schema_version != 5
         || source.downloader != "JFQuant analytics-storage corporate-actions"
     {
         return Err(invalid("invalid source bundle"));
@@ -1258,7 +1399,10 @@ mod tests {
     #[test]
     fn malformed_bundle_is_rejected_before_worker_urls_or_evidence_paths() {
         let mut bundle = ActionBundle {
-            schema_version: 4,
+            structured_coverage: Default::default(),
+            execution_issues: Vec::new(),
+            execution_data: None,
+            schema_version: 5,
             source_bindings: Default::default(),
             coverage: Default::default(),
             downloader: "JFQuant analytics-storage corporate-actions".into(),

@@ -43,7 +43,7 @@ const SUPPORTED_RESEARCH_INPUTS: [&str; 15] = [
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// Current strict integer-share research result format.
-pub const RESEARCH_SCHEMA_VERSION: u32 = 12;
+pub const RESEARCH_SCHEMA_VERSION: u32 = 13;
 
 /// A result cannot be interpreted using the current research contract.
 #[derive(Debug, thiserror::Error)]
@@ -135,10 +135,10 @@ pub fn validate_result(
             || value["execution"]["mode"] != "raw_integer_shares"
             || !matches!(
                 value["backtest_status"].as_str(),
-                Some("completed" | "no_valid_trades")
+                Some("completed" | "no_valid_trades" | "execution_data_not_ready")
             )
         {
-            return Err("requires research schema 12 and raw_integer_shares execution".into());
+            return Err("requires research schema 13 and raw_integer_shares execution".into());
         }
         let hash = |value: &serde_json::Value| {
             value.as_str().is_some_and(|s| {
@@ -165,6 +165,8 @@ pub fn validate_result(
             return Err("missing or invalid research provenance".into());
         }
         let execution = &value["execution"];
+        let _: analytics_core::execution::EventCheckPolicy =
+            serde_json::from_value(execution["event_check_policy"].clone())?;
         let policy: ResearchQualityPolicy =
             serde_json::from_value(execution["quality_policy"].clone())?;
         policy.validate()?;
@@ -542,6 +544,9 @@ pub struct ResearchRequest {
     pub schedule: Schedule,
     /// Explicit ordinary-holder corporate action policy.
     pub action_policy: analytics_core::actions::ActionPolicy,
+    /// Trust policy for actual account execution data. Training format 2 carries no required execution choice.
+    #[serde(default)]
+    pub event_check_policy: analytics_core::execution::EventCheckPolicy,
     /// Inspect provenance and coverage without calculating factors.
     pub audit_only: bool,
     /// Latest-only public market fees and user broker contract.
@@ -577,6 +582,7 @@ impl ResearchRequest {
             output,
             schedule: Schedule::default(),
             action_policy: Default::default(),
+            event_check_policy: Default::default(),
             audit_only: false,
             market_rules: MarketRulesPreset::a_share_latest(),
             initial_cash_cny: 1_000_000.0,
@@ -726,6 +732,17 @@ pub fn backtest_from_training_with_data(
     data_root: Option<&Path>,
     context: &analytics_core::task::TaskContext,
 ) -> Result<()> {
+    backtest_from_training_with_policy(source, output, actions, data_root, None, context)
+}
+/// Apply an execution-only policy without changing the frozen training manifest or model.
+pub fn backtest_from_training_with_policy(
+    source: &Path,
+    output: &Path,
+    actions: &Path,
+    data_root: Option<&Path>,
+    policy: Option<analytics_core::execution::EventCheckPolicy>,
+    context: &analytics_core::task::TaskContext,
+) -> Result<()> {
     let artifact: serde_json::Value =
         serde_json::from_slice(&fs::read(source.join("training.json"))?)?;
     validate_training_artifact(&artifact)?;
@@ -767,6 +784,9 @@ pub fn backtest_from_training_with_data(
             != adjustment_basis_signature(Some(&book), lo, hi)?
     {
         return Err("training_price_basis_changed: retraining required".into());
+    }
+    if let Some(policy) = policy {
+        request.event_check_policy = policy;
     }
     request.output = output.to_owned();
     request.reuse_training = Some(source.to_owned());
@@ -837,7 +857,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         && !dataset.supports_provider_training()
     {
         return Err(
-            "unsupported_provider_price_basis: registered Qlib research quotations required".into(),
+            "unsupported_provider_price_basis: registered Qlib or verified TDX ForwardFactor quotations required".into(),
         );
     }
     let mut pool = match &request.pool {
@@ -1374,7 +1394,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
 
         "source_map":dataset.source_map(),"source_map_signature":format!("sha256:{:x}",Sha256::digest(serde_json::to_vec(dataset.source_map())?)),"corporate_action_sha256":action_hash,"dividend_withholding_rate":request.dividend_withholding_rate,
         "price_inputs":price_inputs,"price_input_sha256":price_input_sha256,"pool":pool,"pool_signature":pool_signature,"benchmark":request.benchmark,"pool_exit_policy":request.pool_exit_policy,
-        "research_config":request.config,"schedule":request.schedule,"action_policy":request.action_policy,"resolved_folds":folds,"dividend_tax_convention":"explicit fixed research rate; default gross; not personal FIFO holding-period tax"});
+        "research_config":request.config,"schedule":request.schedule,"action_policy":request.action_policy,"event_check_policy":request.event_check_policy,"resolved_folds":folds,"dividend_tax_convention":"explicit fixed research rate; default gross; not personal FIFO holding-period tax"});
     if let Some(source) = &request.reuse_training {
         let artifact: serde_json::Value =
             serde_json::from_slice(&fs::read(source.join("training.json"))?)?;
@@ -1922,16 +1942,49 @@ fn finish(
         serde_json::json!({"year":y,"performance":portfolio::performance(ds),"partial_year":partial})
     }).collect();
     save(request.output.join("annual_reports.json"), &annual)?;
+    let has_trades = days.iter().any(|d| d.turnover > 0.);
+    let mut buy_orders = 0usize;
+    let mut data_rejections = 0usize;
+    if request.output.join("order_events.jsonl").exists() {
+        use std::io::BufRead;
+        for line in
+            std::io::BufReader::new(fs::File::open(request.output.join("order_events.jsonl"))?)
+                .lines()
+        {
+            let row: serde_json::Value = serde_json::from_str(&line?)?;
+            if row["side"] == "buy" {
+                buy_orders += 1;
+                if row["reason"].as_str().is_some_and(|r| {
+                    r.starts_with("execution_data_missing")
+                        || matches!(r, "source_missing" | "missing_deal_price")
+                }) {
+                    data_rejections += 1;
+                }
+            }
+        }
+    }
+    let data_blocked = !has_trades && buy_orders > 0 && buy_orders == data_rejections;
     save(
         request.output.join("summary.json"),
         &serde_json::json!({
-            "schema_version":RESEARCH_SCHEMA_VERSION,"backtest_status":if days.iter().any(|d|d.turnover>0.){"completed"}else{"no_valid_trades"},"input_kind":if audit["source"]["synthetic_fixture"]==true{"synthetic_fixture"}else{"public_market"},"method":"JFQuant native GTJA date-scheduled research",
+            "schema_version":RESEARCH_SCHEMA_VERSION,"backtest_status":if has_trades{"completed"}else if data_blocked{"execution_data_not_ready"}else{"no_valid_trades"},"execution_warnings":if request.output.join("execution_warnings.json").exists(){serde_json::from_slice::<serde_json::Value>(&fs::read(request.output.join("execution_warnings.json"))?)?}else{serde_json::json!([])},"input_kind":if audit["source"]["synthetic_fixture"]==true{"synthetic_fixture"}else{"public_market"},"method":"JFQuant native GTJA date-scheduled research",
             "fold_reports":reports,"annual_reports":annual,"aggregate":aggregate,"source":audit["source"],
             "formula_version":audit["formula_version"],"signature":run_signature,"factor_signature":factor_signature,
             "admission":serde_json::from_slice::<serde_json::Value>(&fs::read(request.output.join("admission.json"))?)?,"sample_selection":serde_json::from_slice::<serde_json::Value>(&fs::read(request.output.join("sample_selection.json"))?)?,"research_scope":if request.quality_policy.strictness==analytics_core::research_quality::ResearchStrictness::QualifiedOnly{"经数据筛选的研究股票池"}else{"原股票池"},
             "execution":audit["execution"],"excluded_factors":audit["excluded_factors_missing_inputs"],"coverage":audit["coverage"],
         }),
     )?;
+    if data_blocked {
+        save(
+            request.output.join("execution_readiness.json"),
+            &serde_json::json!({
+                "schema_version":5,"ready":false,"training_complete":true,"backtest_complete":false,
+                "code":"execution_data_not_ready","reason":"全部买单因执行资料缺项被拒绝；本次不是策略收益",
+                "buy_orders":buy_orders,"data_rejections":data_rejections,"summary":"summary.json","orders":"order_events.jsonl"
+            }),
+        )?;
+        return Err("data_not_ready: all buy orders rejected by execution-data dependencies; see summary.json and order_events.jsonl".into());
+    }
     Ok(())
 }
 

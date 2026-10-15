@@ -29,4 +29,4 @@ cp -R "$collector_root/jfquant_collectors" "$site_root/"
 cp "$collector_root/requirements.lock" "$collector_root/python-runtime.lock.json" "$python_root/"
 "$python_root/bin/python3" -I -B "$repo_root/crates/app/packaging/rewrite-python.py" "$python_root"
 "$python_root/bin/python3" -I -B "$repo_root/crates/app/packaging/verify-python.py" "$python_root" "$build_root/native-audit.json"
-"$python_root/bin/python3" -I -B -c 'import akshare, yfinance; assert akshare.__version__ == "1.19.1"; assert yfinance.__version__ == "1.7.0"'
+"$python_root/bin/python3" -I -B -c 'import akshare, yfinance, importlib.metadata; assert importlib.metadata.version("tdxaidata") == "1.2.2"; assert akshare.__version__ == "1.19.1"; assert yfinance.__version__ == "1.7.0"'

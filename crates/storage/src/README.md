@@ -88,7 +88,7 @@ flowchart TD
 
 `DailyDataset::validate_factor_basis(id)` 验证独立系数的来源映射、日期覆盖及首个实际原价收盘锚点，不从供应商后复权报价推断系数。研究字段从原价与显式系数生成，原价字段和真实成交股数独立读取；历史跳变由公司行动证据核验。
 
-采集协议7要求先发送 `ready`，包含代码签名及AKShare/yfinance/CPython准确版本，之后才能写入行情/公司行动分片或完成消息。完成消息再次核对身份；错误/缺失握手不会生成证券检查点。
+采集协议8要求先发送 `ready`，包含代码签名及AKShare/yfinance/CPython准确版本，之后才能写入行情/公司行动分片或完成消息。完成消息再次核对身份；错误/缺失握手不会生成证券检查点。
 
 ## 独立系数接口
 
@@ -98,7 +98,7 @@ flowchart TD
 
 ## 实施证据与当前版本
 
-collector.rs增加collect_announcements，与行情/事件共用专用Python、取消/超时/回收及证据恢复；[corporate_actions/review.rs](corporate_actions/review.rs)负责元数据/HTTP/PDF/文本复核和不可变修订。公司行动4允许带类型条款；daily_manifest3、采集7，独立系数记录仍为1。复制旧文件或修改schema数字不能代替重新获取及证据核验。
+collector.rs增加collect_announcements，与行情/事件共用专用Python、取消/超时/回收及证据恢复；[corporate_actions/review.rs](corporate_actions/review.rs)负责元数据/HTTP/PDF/文本复核和不可变修订。公司行动5允许带类型条款；daily_manifest3、采集7，独立系数记录仍为1。复制旧文件或修改schema数字不能代替重新获取及证据核验。
 
 ## 为什么需要本组件
 
@@ -132,7 +132,7 @@ DailyDataset的restrict_reads用于工作线程的日期需求；三个research�
 
 为什么调整：普通市场代码无需先登记身份；独立目录、审核和权威名录下载增加了研究前置负担。特殊历史代码仍需在快照内明确区间，不能将旧证券行情或权益接到另一证券。训练使用价量和标签，到账／交付资料只在实际账户执行时检查。
 
-当前格式：模板8、需求3、准入5、股票池3、公司行动4、规范行情5、系数3、采集7、服务10、研究结果12；快照内来源映射1、训练产物2。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
+当前格式：模板9、需求3、准入5、股票池3、公司行动5、规范行情5、系数3、采集7、服务11、研究结果13；快照内来源映射1、训练产物2。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
 
 来源映射位于快照source_map.json，普通证券可用空exceptions。每个例外含市场代码、资产类别、适用区间及provider/symbol/coverage定位。冲突拒绝；SHT00018只能读取自身旧文件，不自动绑定SH600018。原Qlib文件不改写；显式重新登记冻结文件内容和映射。worker内缓存字段，取消检查以证券和固定批次执行。
 
@@ -152,3 +152,24 @@ flowchart LR
 collector.rs提供quotes/coefficients/actions；market_view.rs冻结完整依赖并验证原文到解析记录的绑定；daily.rs恢复原价后用新日期系数生成研究价量。旧factor用于原价，不能被新factor覆盖。 完整接口、why、边界和验收见[组件契约](../README.md)。
 
 视图和原价恢复路径复用Qlib有限值域校验：负成交量/金额、非正价格/原系数拒绝；派生倍率或价量无法表示时返回错误，不能伪装成普通null。显式view的field("factor")返回F/F0，adjustment_factors保留来源F用于事件比值核验。锚点之前的研究字段保持null。回归测试使用内容哈希正确但成交量为负的基底，验证损坏不会被允许缺失模式放行。
+
+## 执行资料与来源信任
+
+`execution_data.rs`定义格式1的停牌、精确涨跌停、交叉检查系数及权限状态；`credentials.rs`仅负责私有凭据文件原子保存/读取；`corporate_actions/execution_index.rs`每任务建立一次日期和证券索引。公司行动5中structured_coverage证明的是选定供应商结构化查询取全，不代表九类事件完整。已知事件字段缺项、冲突及无法解释的系数变化仍阻断实际权益；特殊覆盖未知通过明确的Provider策略保留告警。Audited策略继续要求全类别证据。
+
+巨潮优先由`../collectors/jfquant_collectors/cninfo.py`采集、collector监督并哈希，`corporate_actions`验证当前来源证明，`execution_index`批量建索引及读取独立系数。为什么分开：恢复原价所用Qlib字段不等同于事件系数，普通结构化分红也不等同于特殊事件全覆盖。
+
+
+## TDX与来源信任边界
+
+为什么增加：高层SDK可能吞错误或补零，而复权及空值会直接改变训练样本。`collector.rs`先核验协议9、代码/依赖/解释器版本，再接受原生SDK收据或HTTP收据；`credentials.rs`只为已知供应商提供私有文件入口。`daily.rs`从TDX原价和显式ForwardFactor派生价量，指数类型须验证，候选行情不冒充研究输入。
+
+```mermaid
+flowchart TD
+  R[collector白名单请求] --> P[内置Python原生边界]
+  P --> H[SDK收据 / HTTP收据]
+  H --> C[哈希与完整分片检查]
+  C --> D[DailyDataset及不可变来源记录]
+```
+
+当前公共调用和复现方式见[组件README](../README.md)及[采集协议](../collectors/README.md)。验收覆盖原生证据篡改、保留null、单位、窗口冲突和`.tdx-runtime`恢复清理；无网络测试不会宣称覆盖真实历史。

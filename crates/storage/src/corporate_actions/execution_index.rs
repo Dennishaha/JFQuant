@@ -37,7 +37,9 @@ impl ExecutionIndex {
                 .or_default()
                 .push(a.clone());
             on_ex.entry(a.ex_date).or_default().push(a.clone());
-            on_record.entry(a.record_date).or_default().push(a.clone());
+            if let Some(date) = a.record_date {
+                on_record.entry(date).or_default().push(a.clone());
+            }
         }
         for v in events.values_mut() {
             v.sort_by_key(|a| a.record_date);
@@ -60,6 +62,9 @@ impl ExecutionIndex {
                     {
                         issues.entry(id.clone()).or_default().push(
                             crate::execution_data::ExecutionIssue {
+                                id: String::new(),
+                                event_category: String::new(),
+                                evidence: Vec::new(),
                                 instrument: id.clone(),
                                 announced: Some(*date),
                                 dates: analytics_core::DateRange {
@@ -132,7 +137,7 @@ impl ExecutionIndex {
             // the actual entitlement must already have all information required by the ledger.
             for a in events
                 .iter()
-                .take_while(|a| a.record_date <= date)
+                .take_while(|a| a.record_date.is_none_or(|d| d <= date))
                 .filter(|a| a.ex_date >= date)
             {
                 a.validate()
@@ -314,13 +319,13 @@ mod tests {
         b.actions.push(CorporateAction {
             id: "SH600000:2024-06-04".into(),
             instrument: "SH600000".into(),
-            announced: date("2024-06-01"),
-            record_date: date("2024-06-03"),
+            announced: Some(date("2024-06-01")),
+            record_date: Some(date("2024-06-03")),
             ex_date: date("2024-06-04"),
             pay_date: None,
             listing_date: None,
-            cash_per_share: 1.,
-            shares_per_share: 0.,
+            cash_per_share: (1.).to_string(),
+            shares_per_share: (0.).to_string(),
             terms: Default::default(),
             source: "fixture".into(),
         });
@@ -366,6 +371,9 @@ mod tests {
         );
         b.execution_issues
             .push(crate::execution_data::ExecutionIssue {
+                id: String::new(),
+                event_category: String::new(),
+                evidence: Vec::new(),
                 instrument: "SH600000".into(),
                 announced: Some(date("2024-06-01")),
                 dates: analytics_core::DateRange {

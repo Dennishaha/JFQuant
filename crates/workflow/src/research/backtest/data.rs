@@ -308,6 +308,7 @@ pub(super) struct YearInputs<'a> {
     pub universe_id: &'a str,
     pub pool_start: Date,
     pub allow_missing: bool,
+    pub price_basis: analytics_core::research_quality::PriceBasis,
 }
 pub(super) fn prepare_year(
     inputs: YearInputs<'_>,
@@ -324,16 +325,9 @@ pub(super) fn prepare_year(
         universe_id,
         pool_start,
         allow_missing,
+        price_basis,
     } = inputs;
     let (meta_path, feature_path) = paths(cache, year);
-    if meta_path.exists() && feature_path.exists() {
-        let meta = load_meta(cache, year)?;
-        if meta.signature == signature && meta.factor_ids == ids {
-            eprintln!("year={year} using JFQuant-owned factor cache");
-            return Ok(());
-        }
-        return Err("factor cache provenance mismatch".into());
-    }
     let first = dataset.calendar.partition_point(|d| d.year() < year);
     let end = dataset.calendar.partition_point(|d| d.year() <= year);
     if first >= end {
@@ -376,6 +370,7 @@ pub(super) fn prepare_year(
     for name in names {
         panel.columns.insert(name.into(), Vec::new());
     }
+    let mut anchors = BTreeMap::from([(benchmark.to_owned(), b_anchor)]);
     let mut selected = Vec::new();
     let mut rows = Vec::new();
     for (instrument, windows) in members {
@@ -399,6 +394,7 @@ pub(super) fn prepare_year(
             .copied()
             .find(|v| *v > 0.0)
             .ok_or("stock adjustment anchor missing")?;
+        anchors.insert(instrument.clone(), anchor);
         let p = |name: &str, day: usize| field(&raw, name, day).map(|v| v / anchor);
         for day in warmup..end {
             let close = p("close", day);
@@ -472,6 +468,73 @@ pub(super) fn prepare_year(
     order.sort_by_key(|i| (rows[*i].day, rows[*i].instrument.clone()));
     let selected: Vec<_> = order.iter().map(|i| selected[*i]).collect();
     let rows: Vec<_> = order.iter().map(|i| rows[*i].clone()).collect();
+    // Hash the actual executor panel, including pre-year history and normalization
+    // anchors. Labels and task-wide selection policy are deliberately separate.
+    let mut fingerprint = Sha256::new();
+    fingerprint.update(serde_json::to_vec(&(
+        "factor-shard-v1",
+        ids,
+        registry
+            .all()
+            .map(|s| (&s.id, &s.version))
+            .collect::<Vec<_>>(),
+        universe_id,
+        price_basis,
+        &anchors,
+        dataset.source_map(),
+    ))?);
+    for (instrument, date) in panel.instrument_id.iter().zip(&panel.trade_date) {
+        fingerprint.update((instrument.len() as u64).to_le_bytes());
+        fingerprint.update(instrument.as_bytes());
+        fingerprint.update(date.to_string().as_bytes());
+    }
+    for index in &selected {
+        fingerprint.update((*index as u64).to_le_bytes());
+    }
+    for name in names {
+        fingerprint.update(name.as_bytes());
+        for value in &panel.columns[name] {
+            fingerprint.update([u8::from(value.is_some())]);
+            fingerprint.update(value.unwrap_or(0.).to_le_bytes());
+        }
+    }
+    let shard_signature = format!("sha256:{:x}", fingerprint.finalize());
+    let shared = cache
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or(cache)
+        .join(".factor-shards-v1")
+        .join(shard_signature.trim_start_matches("sha256:"));
+    if shared.join("manifest.json").is_file() {
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(shared.join("manifest.json"))?)?;
+        if manifest["schema_version"] != 1
+            || manifest["signature"] != shard_signature
+            || manifest["features"] != serde_json::to_value(ids)?
+            || manifest["rows"] != rows.len()
+            || manifest["sha256"] != file_hash(&shared.join("features.parquet"))?
+        {
+            return Err("factor shard content/identity mismatch".into());
+        }
+        let features = read_features(&shared.join("features.parquet"), ids, rows.len())?;
+        let finite_counts = serde_json::from_value(manifest["finite_counts"].clone())?;
+        write_local(&feature_path, &features)?;
+        save(
+            meta_path,
+            &YearMeta {
+                signature: signature.into(),
+                factor_ids: ids.to_vec(),
+                rows,
+                finite_counts,
+            },
+        )?;
+        save(
+            cache.join(format!("{year}.receipt.json")),
+            &serde_json::json!({"signature":shard_signature,"cache_hit":true,"labels":"recomputed from current input; split boundaries applied at selection"}),
+        )?;
+        analytics_core::task::TaskContext::current().report(format!("{year} 因子缓存命中"))?;
+        return Ok(());
+    }
     let mut features = vec![f32::NAN; rows.len() * ids.len()];
     let mut finite_counts = BTreeMap::new();
     let executor = InMemoryFactorExecutor {
@@ -530,19 +593,105 @@ pub(super) fn prepare_year(
         rows,
         finite_counts,
     };
-    let part = feature_path.with_extension("bin.partial");
-    let mut output = BufWriter::new(fs::File::create(&part)?);
-    for value in features {
-        output.write_all(&value.to_le_bytes())?;
-    }
-    output.flush()?;
-    fs::rename(part, feature_path)?;
+    write_local(&feature_path, &features)?;
+    let staging = shared.with_extension(format!("{}.partial", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&staging)?;
+    write_features(&staging.join("features.parquet"), ids, &features)?;
+    save(
+        staging.join("manifest.json"),
+        &serde_json::json!({"schema_version":1,"signature":shard_signature,"features":ids,"rows":meta.rows.len(),"finite_counts":meta.finite_counts,"sha256":file_hash(&staging.join("features.parquet"))?}),
+    )?;
+    analytics_core::task::TaskContext::current().check()?;
+    fs::rename(staging, &shared)?;
+    save(
+        cache.join(format!("{year}.receipt.json")),
+        &serde_json::json!({"signature":shard_signature,"cache_hit":false}),
+    )?;
     save(meta_path, &meta)?;
     eprintln!(
         "year={year} factors saved; elapsed={:.1}s",
         start.elapsed().as_secs_f64()
     );
     Ok(())
+}
+
+fn write_local(path: &Path, features: &[f32]) -> Result<()> {
+    let part = path.with_extension("bin.partial");
+    let mut output = BufWriter::new(fs::File::create(&part)?);
+    for value in features {
+        output.write_all(&value.to_le_bytes())?;
+    }
+    output.flush()?;
+    fs::rename(part, path)?;
+    Ok(())
+}
+fn write_features(path: &Path, ids: &[String], features: &[f32]) -> Result<()> {
+    use arrow_array::{ArrayRef, Float32Array, RecordBatch};
+    use arrow_schema::{DataType, Field, Schema};
+    use std::sync::Arc;
+    let schema = Arc::new(Schema::new(
+        ids.iter()
+            .map(|id| Field::new(id, DataType::Float32, true))
+            .collect::<Vec<_>>(),
+    ));
+    let columns = ids
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            Arc::new(Float32Array::from(
+                features
+                    .chunks_exact(ids.len())
+                    .map(|r| r[i].is_finite().then_some(r[i]))
+                    .collect::<Vec<_>>(),
+            )) as ArrayRef
+        })
+        .collect();
+    let batch = RecordBatch::try_new(schema.clone(), columns)?;
+    let mut writer = parquet::arrow::ArrowWriter::try_new(fs::File::create(path)?, schema, None)?;
+    writer.write(&batch)?;
+    writer.close()?;
+    Ok(())
+}
+fn read_features(path: &Path, ids: &[String], rows: usize) -> Result<Vec<f32>> {
+    use arrow_array::{Array, Float32Array};
+    let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+        fs::File::open(path)?,
+    )?;
+    if builder
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name())
+        .ne(ids.iter())
+    {
+        return Err("factor shard feature order mismatch".into());
+    }
+    let mut features = Vec::with_capacity(rows * ids.len());
+    for batch in builder.build()? {
+        let batch = batch?;
+        let arrays = batch
+            .columns()
+            .iter()
+            .map(|a| {
+                a.as_any()
+                    .downcast_ref::<Float32Array>()
+                    .ok_or("factor shard type mismatch")
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        for row in 0..batch.num_rows() {
+            for a in &arrays {
+                features.push(if a.is_null(row) {
+                    f32::NAN
+                } else {
+                    a.value(row)
+                });
+            }
+        }
+    }
+    if features.len() != rows * ids.len() {
+        return Err("factor shard row count mismatch".into());
+    }
+    Ok(features)
 }
 
 #[cfg(test)]
@@ -701,5 +850,115 @@ mod tests {
             directional_movements(Some(10.0), None, Some(11.0), Some(9.0)),
             (None, None)
         );
+    }
+}
+
+#[cfg(test)]
+mod shard_tests {
+    use super::*;
+    #[test]
+    fn parquet_retains_missing_values_order_and_rejects_wrong_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("features.parquet");
+        let ids = vec!["a".into(), "b".into()];
+        write_features(&p, &ids, &[1., f32::NAN, 3., 4.]).unwrap();
+        let v = read_features(&p, &ids, 2).unwrap();
+        assert_eq!(v[0], 1.);
+        assert!(v[1].is_nan());
+        assert_eq!(v[2..], [3., 4.]);
+        assert!(read_features(&p, &["b".into(), "a".into()], 2).is_err());
+        assert!(read_features(&p, &ids, 3).is_err());
+    }
+}
+
+#[cfg(test)]
+mod dependency_tests {
+    use super::*;
+    #[test]
+    fn appended_labels_reuse_factors_but_anchor_warmup_and_cross_section_changes_invalidate() {
+        let temp = tempfile::tempdir().unwrap();
+        let w = crate::Workspace::open(temp.path()).unwrap();
+        let (m, _, _) = crate::demo::create(&w).unwrap();
+        let root = w.resolve(m.path);
+        let mut dataset = DailyDataset::open(&root).unwrap();
+        let pool = dataset.pool("csi500").unwrap();
+        let members = dataset.align_membership(&pool);
+        let registry =
+            FactorRegistry::for_set(analytics_core::research_quality::FactorSet::Gtja191);
+        let ids = vec!["alpha_002".into()];
+        let run =
+            |dataset: &DailyDataset, members: &BTreeMap<String, Vec<Membership>>, name: &str| {
+                let cache = temp.path().join("runs").join(name).join(".factor-staging");
+                fs::create_dir_all(&cache).unwrap();
+                prepare_year(
+                    YearInputs {
+                        dataset,
+                        members,
+                        benchmark: "SH000905",
+                        universe_id: "csi500",
+                        pool_start: pool.coverage.start,
+                        allow_missing: false,
+                        price_basis: analytics_core::research_quality::PriceBasis::Provider,
+                    },
+                    &registry,
+                    &ids,
+                    2008,
+                    &cache,
+                    "task-signature",
+                )
+                .unwrap();
+                let receipt: serde_json::Value =
+                    serde_json::from_slice(&fs::read(cache.join("2008.receipt.json")).unwrap())
+                        .unwrap();
+                (
+                    receipt,
+                    load_meta(&cache, 2008).unwrap(),
+                    fs::read(cache.join("2008.bin")).unwrap(),
+                )
+            };
+        let full_calendar = dataset.calendar.clone();
+        dataset.calendar.retain(|d| d.year() <= 2008);
+        let (first, before, before_bytes) = run(&dataset, &members, "before");
+        assert_eq!(first["cache_hit"], false);
+        let last = before
+            .rows
+            .iter()
+            .find(|r| r.instrument == "SH600000" && r.day == 21)
+            .unwrap();
+        assert!(last.label_end.is_none());
+        dataset.calendar = full_calendar;
+        let (second, after, after_bytes) = run(&dataset, &members, "after");
+        assert_eq!(second["cache_hit"], true);
+        assert_eq!(second["signature"], first["signature"]);
+        assert_eq!(before_bytes, after_bytes);
+        let last = after
+            .rows
+            .iter()
+            .find(|r| r.instrument == "SH600000" && r.day == 21)
+            .unwrap();
+        assert!(last.label_end.is_some());
+        let factor = root.join("features/sh600000/factor.day.bin");
+        let mut bytes = fs::read(&factor).unwrap();
+        bytes[4..8].copy_from_slice(&0.2f32.to_le_bytes());
+        fs::write(factor, bytes).unwrap();
+        let (anchor, _, _) = run(&DailyDataset::open(&root).unwrap(), &members, "anchor");
+        assert_eq!(anchor["cache_hit"], false);
+        assert_ne!(anchor["signature"], second["signature"]);
+        let high = root.join("features/sh600000/high.day.bin");
+        let mut bytes = fs::read(&high).unwrap();
+        bytes[4..8].copy_from_slice(&1.3f32.to_le_bytes());
+        fs::write(high, bytes).unwrap();
+        let (warmup, _, _) = run(&DailyDataset::open(&root).unwrap(), &members, "warmup");
+        assert_eq!(warmup["cache_hit"], false);
+        assert_ne!(warmup["signature"], anchor["signature"]);
+        let mut different_members = members.clone();
+        different_members.remove("SH600001");
+        let (cross_section, _, _) = run(
+            &DailyDataset::open(&root).unwrap(),
+            &different_members,
+            "members",
+        );
+        assert_eq!(cross_section["cache_hit"], false);
+        assert_ne!(cross_section["signature"], warmup["signature"]);
     }
 }

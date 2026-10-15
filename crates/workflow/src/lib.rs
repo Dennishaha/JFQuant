@@ -455,7 +455,7 @@ impl Workspace {
             verify_action_evidence(path, &book)?;
             (
                 "actions",
-                serde_json::to_value(&book)?,
+                ActionBundle::version_content(path)?,
                 book.actions
                     .iter()
                     .map(|a| a.ex_date)
@@ -471,7 +471,7 @@ impl Workspace {
         let hash = signature(&details)?;
         let details = if kind == "actions" {
             let book: ActionBundle = serde_json::from_value(details)?;
-            json!({"events":book.actions.len(),"queried_symbols":book.queried_symbols.len(),"source_failures":book.failures,"downloaded_at":book.downloaded_at,"downloader":book.downloader,"missing_cash_dates":book.actions.iter().filter(|a|a.cash_per_share>0.0 && a.pay_date.is_none()).count(),"missing_listing_dates":book.actions.iter().filter(|a|a.shares_per_share>0.0 && a.listing_date.is_none()).count()})
+            json!({"events":book.actions.len(),"queried_symbols":book.queried_symbols.len(),"source_failures":book.failures,"downloaded_at":book.downloaded_at,"downloader":book.downloader,"missing_cash_dates":book.actions.iter().filter(|a|a.cash()>0.0 && a.pay_date.is_none()).count(),"missing_listing_dates":book.actions.iter().filter(|a|a.shares()>0.0 && a.listing_date.is_none()).count()})
         } else {
             details
         };
@@ -660,6 +660,11 @@ impl Workspace {
                 if let Some(t) = &training_value {
                     readiness["training_artifact"] = t.clone();
                 }
+                let prediction = dir.join("prediction_manifest.json");
+                if prediction.is_file() {
+                    readiness["prediction_artifact"] =
+                        serde_json::from_slice(&fs::read(prediction)?)?;
+                }
                 Ok(readiness)
             } else {
                 let payload = dir.join("payload.json");
@@ -772,6 +777,15 @@ pub enum WorkflowRequest {
         instrument: String,
         /// Optional captured announcement manifest.
         evidence_manifest: Option<PathBuf>,
+    },
+    /// Replay frozen evidence through the shared deterministic action rules.
+    ReconcileActions {
+        /// Selected base action version; source files are never edited.
+        actions: String,
+        /// Terminal native evidence tasks to freeze into the new version.
+        evidence_tasks: Vec<Uuid>,
+        /// Optional explicit market calendar for record/ex-date joins.
+        market: Option<String>,
     },
     /// Apply reviewed implementation evidence as a new immutable action version.
     ReviseActions {
@@ -897,6 +911,7 @@ impl WorkflowRequest {
             Self::PreviewResearch { .. } => "预览研究日期和数据需求".into(),
             Self::PrepareResearchData { .. } => "补采研究所需公司行动/公告".into(),
             Self::InspectActions { .. } => "查看公司行动原值与实施证据".into(),
+            Self::ReconcileActions { .. } => "自动核对公司行动并发布新版本".into(),
             Self::ReviseActions { .. } => "实施公告对账修订".into(),
             Self::SavePool { .. } => "保存股票池版本".into(),
             Self::PreviewPool { .. } => "预览股票池成员".into(),
@@ -938,6 +953,39 @@ pub struct WorkflowOutcome {
     /// Public release candidate or report/readiness content.
     pub details: Value,
 }
+fn reconciliation_evidence_root(w: &Workspace, task: Uuid, record: &RunRecord) -> Result<PathBuf> {
+    if record.id != task || record.finished_at.is_none() {
+        return Err("evidence task must be terminal".into());
+    }
+    let request = &record.request["request"];
+    let resume = request["resume"].as_str().unwrap_or("");
+    let staging_id = if resume.is_empty() {
+        task.to_string()
+    } else {
+        resume.to_owned()
+    };
+    match request["operation"].as_str() {
+        Some("collect_actions") => {
+            let published = w.resolve(format!("data/python-actions-{task}"));
+            Ok(if published.is_dir() {
+                published
+            } else {
+                w.resolve(format!(".jfquant/staging/python-actions-{staging_id}"))
+            })
+        }
+        Some("collect_announcements") => {
+            let published = w.resolve(&record.output).join("announcements");
+            Ok(if published.is_dir() {
+                published
+            } else {
+                w.resolve(format!(".jfquant/staging/announcements-{staging_id}"))
+            })
+        }
+        _ => Err(
+            "evidence task must be a supported company-action or announcement collection".into(),
+        ),
+    }
+}
 fn version_metadata(workspace: &Workspace, id: &str, kind: &str) -> Result<DataVersion> {
     let data = workspace
         .datasets()?
@@ -966,7 +1014,7 @@ fn version_metadata(workspace: &Workspace, id: &str, kind: &str) -> Result<DataV
             &path,
         )?)?
     } else {
-        serde_json::to_value(ActionBundle::read(&path)?)?
+        ActionBundle::version_content(&path)?
     };
     if signature(&content)? != data.signature {
         return Err("registered data version changed; register it as a new version".into());
@@ -1147,7 +1195,50 @@ fn execute_scoped(
             } else {
                 Vec::new()
             };
-            details = json!({"instrument":instrument,"events":events,"source_failure":book.failures.get(instrument),"documents":documents});
+            details = json!({"instrument":instrument,"events":events,"source_failure":book.failures.get(instrument),"issues":book.execution_issues.iter().filter(|i| i.instrument == *instrument).map(|i| Ok(json!({"issue":i,"sha256":signature(i)?}))).collect::<Result<Vec<_>>>()?,"reconciliation_evidence":book.raw_sha256.get("reconciliation-v1.json"),"documents":documents});
+        }
+        WorkflowRequest::ReconcileActions {
+            actions,
+            evidence_tasks,
+            market,
+        } => {
+            let source = version(w, actions, "actions")?;
+            let source_path = w.resolve(&source.path);
+            verify_action_evidence(&source_path, &ActionBundle::read(&source_path)?)?;
+            let mut roots = Vec::new();
+            for task in evidence_tasks {
+                let record: RunRecord = serde_json::from_slice(&fs::read(
+                    w.resolve(format!(".jfquant/runs/{task}/run.json")),
+                )?)?;
+                let root = reconciliation_evidence_root(w, *task, &record)?;
+                if run.request["reconciliation_evidence"][task.to_string()]["sha256"]
+                    != market_content_hash(&root)?
+                {
+                    return Err("reconciliation evidence changed after request freeze".into());
+                }
+                roots.push(root);
+            }
+            let calendar = if let Some(id) = market {
+                analytics_storage::daily::DailyDataset::open(
+                    w.resolve(version(w, id, "market")?.path),
+                )?
+                .calendar
+            } else {
+                Vec::new()
+            };
+            let staging = w.resolve(format!(".jfquant/staging/action-reconcile-{}", run.id));
+            let book = analytics_storage::corporate_actions::reconcile::apply(
+                &source_path,
+                &roots,
+                &calendar,
+                &staging,
+                context,
+            )?;
+            context.check()?;
+            let output = w.resolve(format!("data/action-reconcile-{}", run.id));
+            fs::rename(staging, &output)?;
+            data = Some(w.register(&output.join("actions.json"))?);
+            details = json!({"reconciliation":output.join("raw/reconciliation-v1.json"),"ordinary_issues":book.execution_issues.iter().filter(|i| !i.skipped_by_engine()).count(),"unsupported_event_warnings":book.execution_issues.iter().filter(|i| i.skipped_by_engine()).count()});
         }
         WorkflowRequest::ReviseActions { actions, request } => {
             let source = version(w, actions, "actions")?;
@@ -1397,6 +1488,9 @@ fn execute_scoped(
             let a = version(w, actions, "actions")?;
             let path = w.resolve(&a.path);
             let source = ActionBundle::read(&path)?;
+            if source.schema_version == 6 {
+                return Err("format_6_requires_reconciliation: use data reconcile-actions or evidence-backed revise-actions".into());
+            }
             let root = path.parent().ok_or("action parent missing")?;
             let final_output = w.root.join(format!("data/actions-{}", run.id));
             let owner = resume.unwrap_or(run.id);
@@ -1576,6 +1670,15 @@ pub fn snapshot(workspace: &Workspace, request: &WorkflowRequest) -> Result<Valu
         | WorkflowRequest::PrepareResearchData { market, .. } => {
             vec![version_metadata(workspace, market, "market")?]
         }
+        WorkflowRequest::ReconcileActions {
+            actions, market, ..
+        } => {
+            let mut v = vec![version_metadata(workspace, actions, "actions")?];
+            if let Some(market) = market {
+                v.push(version_metadata(workspace, market, "market")?);
+            }
+            v
+        }
         WorkflowRequest::BacktestResearch { actions, .. }
         | WorkflowRequest::SupplementActions { actions, .. }
         | WorkflowRequest::ReviseActions { actions, .. }
@@ -1594,6 +1697,20 @@ pub fn snapshot(workspace: &Workspace, request: &WorkflowRequest) -> Result<Valu
         _ => analytics_factor::FORMULA_VERSION,
     };
     let mut frozen = json!({"request":request,"inputs":versions,"app_version":env!("CARGO_PKG_VERSION"),"formula_version":formula_version,"pool_definition": match request { WorkflowRequest::Research{template,..}|WorkflowRequest::TrainResearch{template,..} if !template.pool_version.starts_with("builtin:") => Some(workspace.pool(&template.pool_version)?), _ => None }});
+    if let WorkflowRequest::ReconcileActions { evidence_tasks, .. } = request {
+        let mut evidence = serde_json::Map::new();
+        for task in evidence_tasks {
+            let record: RunRecord = serde_json::from_slice(&fs::read(
+                workspace.resolve(format!(".jfquant/runs/{task}/run.json")),
+            )?)?;
+            let root = reconciliation_evidence_root(workspace, *task, &record)?;
+            evidence.insert(
+                task.to_string(),
+                json!({"sha256":market_content_hash(&root)?,"status":record.status}),
+            );
+        }
+        frozen["reconciliation_evidence"] = evidence.into();
+    }
     if matches!(request, WorkflowRequest::RefreshData { .. }) {
         frozen["source_policy"] = serde_json::to_value(refresh::SourcePolicy::load(workspace)?)?;
     }

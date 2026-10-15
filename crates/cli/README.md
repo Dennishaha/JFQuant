@@ -6,9 +6,9 @@
 ```mermaid
 flowchart LR
  CLI[jfquant命令与JSON] --> C[workflow Client]
- C --> S[Unix socket工作区服务14]
+ C --> S[Unix socket工作区服务16]
  S --> W[数据 / Rust因子 / Python研究worker]
- W --> R[记录与结果14]
+ W --> R[记录与结果16]
  R --> CLI
 ```
 
@@ -32,7 +32,7 @@ jfquant query run --sql 'SELECT 42 AS answer'
 的公共请求，不执行任意Python脚本。
 
 研究使用包内LightGBM和AKQuant，不再链接Rust LightGBM。分红、拆股采用事件日口径，
-仅报告执行费用合计；不支持事件或映射失败保留模型并返回任务诊断，不发布完整收益。
+仅报告执行费用合计；已识别特殊事件警告并跳过，继续发布含披露的收益；普通事件实质冲突或映射失败保留模型并返回阻断诊断。
 无有效交易与数据阻断分别展示。详细能力边界见[研究worker](../workflow/research/README.md)。
 
 退出码：成功0，参数错误2，数据阻断3，忙碌4，等待超时124，取消130，其他失败1。
@@ -49,3 +49,14 @@ DUCKDB_DOWNLOAD_LIB=1 cargo clippy -p analytics-cli --all-targets -- -D warnings
 
 `research backtest --training <ID> --actions <ID> --template <PATH>` 可复用模型并更改账户参数。
 可选模板仅覆盖资金、费用、持仓数、调仓周期和退池策略，不改变模型或训练窗口。
+
+## 回测复用与前置阻断
+
+`research backtest --training ID --actions VERSION` 在因子/预测前完成静态执行准入，失败清单包含阶段、证券、日期和稳定错误码。`stages.json` 和预测清单区分已完成产物；结果格式16中的未执行折指标为null。命中模型与输入均相同的预测缓存时直接执行账户，费用与持仓数量调整不重训。历史任务日志仍可读，旧结果不按新格式解释。
+
+验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli`；真实复现命令及缓存数据流见workflow README。
+
+`data reconcile-actions --actions VERSION --evidence-task UUID [--evidence-task UUID] --market VERSION`
+重放已保存证据，发布新的格式6公司行动版本；可省略证据任务或行情，缺失依据保持未解决。
+App调用同一`ReconcileActions`任务。`jobs results`提供普通问题数、未模拟事件警告数与核对回执路径。
+特殊事件不弹确认；回测成功仍输出收益和`skipped_events`，普通冲突仍返回数据阻断。

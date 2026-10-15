@@ -148,6 +148,10 @@ pub fn collector_signature() -> String {
             "tdx.py",
             include_bytes!("../collectors/jfquant_collectors/tdx.py").as_slice(),
         ),
+        (
+            "reconcile.py",
+            include_bytes!("../collectors/jfquant_collectors/reconcile.py").as_slice(),
+        ),
     ] {
         hash.update(name);
         hash.update([0]);
@@ -288,6 +292,60 @@ fn verify_collector_identity(message: &Value) -> io::Result<()> {
     }
     Ok(())
 }
+pub(crate) const REVIEWED_COLLECTOR_V9: &str =
+    "sha256:6ef9998660108cb5f7f7b7a01ef7a31fefcd59487481d5a7d614184ee52e88fe";
+pub(crate) const REVIEWED_COLLECTOR_V10: &str =
+    "sha256:a95fa5b539764ff37e902baec307eb0609d255894218f8b6a2ed17aec63447c1";
+/// Historical evidence eligibility, independent from the strict live handshake.
+pub(crate) fn reviewed_collection_owner(owner: &Value) -> bool {
+    let signature = owner["collector_signature"].as_str().unwrap_or("");
+    ((owner["collector_protocol"] == 9 && signature == REVIEWED_COLLECTOR_V9)
+        || (owner["collector_protocol"] == 10
+            && (signature == collector_signature() || signature == REVIEWED_COLLECTOR_V10)))
+        && owner["dependencies_sha256"] == dependencies_signature()
+        && owner["python_runtime_sha256"]
+            == format!(
+                "sha256:{:x}",
+                Sha256::digest(include_bytes!("../collectors/python-runtime.lock.json"))
+            )
+        && owner["normalization"] == NORMALIZATION
+}
+/// Historical format-1 AKShare/Sina coefficient producer reviewed against cf35c3193de4.
+/// Its adjustment parser and raw/parsed receipt binding are compatible; later additions
+/// affect other providers. This does not authorize running an old collector.
+pub(crate) fn verify_coefficient_producer(message: &Value, provider: Provider) -> io::Result<u32> {
+    let current = message["collector_signature"] == collector_signature();
+    let historical = provider == Provider::Akshare
+        && message["collector_signature"]
+            == "sha256:4311df0d8844c6cbfc9a9318e970ad806af634ec2cba47a4d8a0db9788c503ba"
+        && message["versions"]["akshare"] == "1.19.1"
+        && message["versions"]["yfinance"] == "1.7.0"
+        && message["versions"]["python"] == "3.12.15";
+    if current {
+        verify_collector_identity(message)?;
+        Ok(10)
+    } else if provider == Provider::Akshare
+        && message["collector_signature"] == REVIEWED_COLLECTOR_V9
+        && message["versions"]["python"] == "3.12.15"
+        && message["versions"]["akshare"] == "1.19.1"
+        && message["versions"]["yfinance"] == "1.7.0"
+    {
+        Ok(9)
+    } else if provider == Provider::Akshare
+        && message["collector_signature"] == REVIEWED_COLLECTOR_V10
+        && message["versions"]["python"] == "3.12.15"
+        && message["versions"]["akshare"] == "1.19.1"
+        && message["versions"]["yfinance"] == "1.7.0"
+    {
+        Ok(10)
+    } else if historical {
+        Ok(7)
+    } else {
+        Err(invalid(
+            "unsupported_historical_collector: revalidate producer or reacquire coefficients",
+        ))
+    }
+}
 /// Resolve the package runtime first; development builds may use the documented local build.
 pub fn runtime() -> io::Result<PathBuf> {
     let executable = std::env::current_exe()?;
@@ -374,6 +432,25 @@ pub fn collect_coefficients(
         return Err(invalid("unsupported independent coefficient source"));
     }
     collect_operation(request, staging, context, "coefficients")
+}
+/// Reconcile already verified source rows without network or provider credentials.
+pub fn reconcile_actions(
+    request: &CollectionRequest,
+    staging: &Path,
+    inputs: &Value,
+    context: &TaskContext,
+) -> io::Result<PathBuf> {
+    fs::create_dir_all(staging)?;
+    let input_path = staging.join("reconciliation-inputs.json");
+    if input_path.exists() {
+        let frozen: Value = serde_json::from_slice(&fs::read(&input_path)?).map_err(invalid)?;
+        if &frozen != inputs {
+            return Err(invalid("reconciliation inputs changed"));
+        }
+    } else {
+        save(&input_path, inputs)?;
+    }
+    collect_operation(request, staging, context, "reconcile_actions")
 }
 fn collect_operation(
     request: &CollectionRequest,
@@ -497,9 +574,13 @@ fn collect_with_command(
     fs::create_dir_all(staging.join("market/adjustments"))?;
     fs::create_dir_all(staging.join("raw"))?;
     let owner = staging.join("owner.json");
-    let owner_value = json!({"operation":operation,"request":request,"collector_protocol":9,"normalization":NORMALIZATION,
+    let mut owner_value = json!({"operation":operation,"request":request,"collector_protocol":10,"normalization":NORMALIZATION,
         "collector_signature":collector_signature(),"dependencies_sha256":dependencies_signature(),
         "python_runtime_sha256":format!("sha256:{:x}",Sha256::digest(include_bytes!("../collectors/python-runtime.lock.json")))});
+    if operation == "reconcile_actions" {
+        owner_value["reconciliation_inputs_sha256"] =
+            json!(hash(&staging.join("reconciliation-inputs.json"))?);
+    }
     if owner.exists() {
         let old: Value = serde_json::from_slice(&fs::read(&owner)?).map_err(invalid)?;
         if old != owner_value {
@@ -646,9 +727,26 @@ fn collect_with_command(
         log.sync_all()
     });
     let mut payload = serde_json::to_value(request).map_err(invalid)?;
-    payload["version"] = json!(9);
+    payload["version"] = json!(10);
     payload["expected_collector_signature"] = json!(collector_signature());
     payload["operation"] = json!(operation);
+    if operation == "reconcile_actions" {
+        let input: Value =
+            serde_json::from_slice(&fs::read(staging.join("reconciliation-inputs.json"))?)
+                .map_err(invalid)?;
+        let mut inputs = serde_json::Map::new();
+        for id in &pending {
+            let symbol = request.source_bindings.get(id).unwrap_or(id);
+            if inputs
+                .insert(symbol.clone(), input["securities"][id].clone())
+                .is_some()
+            {
+                return Err(invalid("ambiguous reconciliation source binding"));
+            }
+        }
+        payload["reconciliation_inputs"] = inputs.into();
+        payload["reconciliation_calendar"] = input["calendar"].clone();
+    }
     let native: BTreeMap<String, String> = pending
         .iter()
         .map(|id| {
@@ -742,7 +840,7 @@ fn collect_with_command(
                             }
                         }
                     }
-                    if msg["version"] != 9 {
+                    if msg["version"] != 10 {
                         return Err(invalid("collector_protocol_mismatch"));
                     }
                     if completed.is_some() {
@@ -820,6 +918,7 @@ fn collect_with_command(
                             if matches!(
                                 operation,
                                 "actions"
+                                    | "reconcile_actions"
                                     | "announcements"
                                     | "permissions"
                                     | "calendar"
@@ -1139,6 +1238,24 @@ fn collect_with_command(
         CoefficientBundle::read(&path)?;
         return Ok(path);
     }
+    if operation == "reconcile_actions" {
+        let mut results = BTreeMap::new();
+        for id in receipts.keys() {
+            let shard: Value = serde_json::from_slice(&fs::read(
+                staging
+                    .join("raw")
+                    .join(format!("{id}-actions-structured.json")),
+            )?)
+            .map_err(invalid)?;
+            results.insert(id, shard["evidence"]["reconciliation"].clone());
+        }
+        let path = staging.join("reconciliation.json");
+        save(
+            &path,
+            &json!({"schema_version":1,"collector_signature":collector_signature(),"results":results}),
+        )?;
+        return Ok(path);
+    }
     if operation == "permissions" {
         let id = receipts
             .keys()
@@ -1196,7 +1313,7 @@ fn collect_with_command(
             structured_coverage: Default::default(),
             execution_issues: Vec::new(),
             execution_data: None,
-            schema_version: 5,
+            schema_version: 6,
             source_bindings: request
                 .source_bindings
                 .iter()
@@ -1428,7 +1545,7 @@ fn collect_with_command(
     }
     save(
         &staging.join("jfquant_source.json"),
-        &json!({"downloader":"JFQuant analytics-storage","independent_download":true,"snapshot_verified":true,"exception_bindings":!request.source_bindings.is_empty(),"provider":request.provider,"request":request,"evidence_sha256":evidence_hashes,"collector_protocol":9,"versions":complete["versions"],"collector_signature":complete["collector_signature"],"python_runtime":serde_json::from_slice::<Value>(include_bytes!("../collectors/python-runtime.lock.json")).map_err(invalid)?,"calendar_source":if request.provider==Provider::Tdxaidata {"tdxaidata.get_trading_dates"} else {"akshare.tool_trade_date_hist_sina"},"dependencies_sha256":format!("sha256:{:x}",Sha256::digest(include_bytes!("../collectors/requirements.lock"))),"price_basis":manifest.price_basis,"normalization":manifest.normalization,"adjustment_source":request.adjustment_source,"adjustment_anchors":manifest.adjustment_anchors}),
+        &json!({"downloader":"JFQuant analytics-storage","independent_download":true,"snapshot_verified":true,"exception_bindings":!request.source_bindings.is_empty(),"provider":request.provider,"request":request,"evidence_sha256":evidence_hashes,"collector_protocol":10,"versions":complete["versions"],"collector_signature":complete["collector_signature"],"python_runtime":serde_json::from_slice::<Value>(include_bytes!("../collectors/python-runtime.lock.json")).map_err(invalid)?,"calendar_source":if request.provider==Provider::Tdxaidata {"tdxaidata.get_trading_dates"} else {"akshare.tool_trade_date_hist_sina"},"dependencies_sha256":format!("sha256:{:x}",Sha256::digest(include_bytes!("../collectors/requirements.lock"))),"price_basis":manifest.price_basis,"normalization":manifest.normalization,"adjustment_source":request.adjustment_source,"adjustment_anchors":manifest.adjustment_anchors}),
     )?;
     Ok(staging.join("market"))
 }
@@ -1498,8 +1615,8 @@ r=json.loads(sys.stdin.readline());mode=sys.argv[1]
 open('collector.pid','w').write(str(os.getpid()))
 versions={'akshare':'1.19.1','yfinance':'1.7.0','python':'3.12.15'}
 identity=r['expected_collector_signature'] if mode!='bad_identity' else 'wrong code'
-if mode!='missing_identity': print(json.dumps({'version':9,'event':'ready','collector_signature':identity,'versions':versions}),flush=True)
-print(json.dumps({'version':9,'event':'progress','message':'ready'}),flush=True)
+if mode!='missing_identity': print(json.dumps({'version':10,'event':'ready','collector_signature':identity,'versions':versions}),flush=True)
+print(json.dumps({'version':10,'event':'progress','message':'ready'}),flush=True)
 if mode=='timeout': time.sleep(30)
 if mode=='crash': sys.exit(1)
 if mode=='bad_protocol': print(json.dumps({'version':0,'event':'complete'}),flush=True);sys.exit(0)
@@ -1508,15 +1625,15 @@ if 'SH600000' in r['instruments']:
  open('raw/http-fixture.body','wb').write(body)
  evidence={'kind':'structured_library_response','http_receipts':[{'filename':'http-fixture.body','sha256':'sha256:'+hashlib.sha256(body).hexdigest(),'url':'https://example.test/history'}]}
  if r['operation']=='actions':
-  print(json.dumps({'version':9,'event':'action_shard','instrument':'SH600000','history_verified':True,'records':[],'evidence':evidence}),flush=True)
+  print(json.dumps({'version':10,'event':'action_shard','instrument':'SH600000','history_verified':True,'records':[],'evidence':evidence}),flush=True)
  b={'instrument_id':'SH600000','trade_date':'2020-01-02','open':10.,'high':11.,'low':9.,'close':10.,'adj_open':10.,'adj_high':11.,'adj_low':9.,'adj_close':10.,'volume':1000.,'amount':10000.}
  adjustment={'schema_version':3,'instrument_id':'SH600000','source_symbol':'SH600000','basis':{'kind':'explicit','source':'sina_hfq','source_url':'https://finance.sina.com.cn/realstock/company/sh600000/hfq.js','verified_through':r['end'],'points':[{'effective_date':'1900-01-01','factor':'2'}]}}
  if r['operation']=='coefficients': adjustment['basis']['points'].append({'effective_date':'2020-01-03','factor':'4'})
- if r['operation']=='coefficients': print(json.dumps({'version':9,'event':'adjustment_shard','instrument':'SH600000','adjustment':adjustment,'evidence':evidence}),flush=True)
- if r['operation']=='market': print(json.dumps({'version':9,'event':'shard','instrument':'SH600000','bars':[b],'adjustment':adjustment,'evidence':evidence}),flush=True)
+ if r['operation']=='coefficients': print(json.dumps({'version':10,'event':'adjustment_shard','instrument':'SH600000','adjustment':adjustment,'evidence':evidence}),flush=True)
+ if r['operation']=='market': print(json.dumps({'version':10,'event':'shard','instrument':'SH600000','bars':[b],'adjustment':adjustment,'evidence':evidence}),flush=True)
 if mode=='partial': sys.exit(1)
-print(json.dumps({'version':9,'event':'complete','collector_signature':r['expected_collector_signature'],'calendar':['2020-01-02','2020-01-03'],'universes':{},'versions':versions}),flush=True)
-if mode=='after_complete': print(json.dumps({'version':9,'event':'progress','message':'late'}),flush=True)
+print(json.dumps({'version':10,'event':'complete','collector_signature':r['expected_collector_signature'],'calendar':['2020-01-02','2020-01-03'],'universes':{},'versions':versions}),flush=True)
+if mode=='after_complete': print(json.dumps({'version':10,'event':'progress','message':'late'}),flush=True)
 "#).unwrap();
         let mut c = Command::new(runtime().unwrap());
         c.args(["-I", "-B", "-u"]).arg(script).arg(mode);
@@ -1981,8 +2098,8 @@ impl CoefficientBundle {
         {
             return Err(invalid("unsupported_data_format: coefficient version"));
         }
-        verify_collector_identity(&b.collector)?;
-        if b.collector["version"] != 9 || b.collector["event"] != "complete" {
+        let protocol = verify_coefficient_producer(&b.collector, b.request.provider)?;
+        if b.collector["version"] != protocol || b.collector["event"] != "complete" {
             return Err(invalid("coefficient completion protocol mismatch"));
         }
         let root = path
@@ -2004,7 +2121,7 @@ impl CoefficientBundle {
             let msg: Value = serde_json::from_slice(&fs::read(root.join("raw").join(&name))?)
                 .map_err(invalid)?;
             if b.evidence.get(&name) != Some(&hash(&root.join("raw").join(&name))?)
-                || msg["version"] != 9
+                || msg["version"] != protocol
                 || msg["event"] != "adjustment_shard"
                 || msg["instrument"] != *id
                 || msg["adjustment"] != serde_json::to_value(&r).map_err(invalid)?
@@ -2071,5 +2188,31 @@ mod tdx_evidence_tests {
         assert_eq!(cleanup_private_runtimes(root).unwrap(), 1);
         assert!(root.join("staging/receipts.json").exists());
         assert!(!root.join("staging/.tdx-runtime").exists());
+    }
+}
+
+#[cfg(test)]
+mod historical_producer_tests {
+    use super::*;
+    #[test]
+    fn historical_reader_does_not_relax_live_handshake_or_unknown_producers() {
+        let mut receipt = json!({"collector_signature":"sha256:4311df0d8844c6cbfc9a9318e970ad806af634ec2cba47a4d8a0db9788c503ba","versions":{"python":"3.12.15","akshare":"1.19.1","yfinance":"1.7.0"}});
+        assert!(verify_coefficient_producer(&receipt, Provider::Akshare).is_ok());
+        assert!(verify_collector_identity(&receipt).is_err());
+        assert!(verify_coefficient_producer(&receipt, Provider::Tdxaidata).is_err());
+        receipt["collector_signature"] = json!("unknown");
+        assert!(verify_coefficient_producer(&receipt, Provider::Akshare).is_err());
+    }
+}
+
+#[cfg(test)]
+mod registered_coefficient_acceptance {
+    /// Optional real-data acceptance; does not modify the registered bundle.
+    #[test]
+    #[ignore = "requires JFQUANT_COEFFICIENT_FIXTURE pointing to an immutable bundle"]
+    fn registered_historical_coefficients_validate_without_rewriting_receipts() {
+        let path = std::env::var_os("JFQUANT_COEFFICIENT_FIXTURE").expect("fixture path");
+        let b = super::CoefficientBundle::read(std::path::Path::new(&path)).unwrap();
+        assert!(!b.records.is_empty());
     }
 }

@@ -32,3 +32,14 @@ RUSTDOCFLAGS="-D warnings" cargo doc -p analytics-core --no-deps
 
 验收覆盖日期、分页、manifest顺序、股票池、来源映射和调度边界。模块目录说明位于
 [src/README.md](src/README.md)，规则来源URL随配置快照保留。
+
+## 研究阶段准入（2026-10）
+
+`AdmissionCheck.stage` 标注 `training`、`execution` 或 `account`；历史报告缺省为 training。检查仍使用同一套状态、日期范围、证据和稳定错误码。训练缺失值策略不放宽执行数据要求。执行前的静态检查与实际持仓估值检查分别归属 execution/account；`not_run` 不能解释为已验证。
+
+验收：`cargo test -p analytics-core admission`。
+
+`CorporateAction`的金额与新增股份比例以十进制文本保存，公告/登记/到账/上市日期可为空。
+普通历史事件要求可信除权日；`cash()`/`shares()`仅为既有历史参考计算的数值边界，跨源核对使用
+采集规则Decimal。`share_multiplier()`精确生成上游拆股倍率，避免二进制浮点合计。
+格式5数字只由受支持的历史读取适配接受；格式6强制十进制文本。因子公式、顺序与null行为不变。

@@ -1093,7 +1093,7 @@ fn incomplete_research_is_persisted_as_blocked_and_shown_without_old_results() {
     let (m, a, template) = analytics_workflow::testing::synthetic(&w);
     let p = w.resolve(&a.path);
     let mut book = analytics_storage::corporate_actions::ActionBundle::read(&p).unwrap();
-    book.actions[0].cash_per_share = 99.0;
+    book.actions[0].cash_per_share = "99.0".into();
     std::fs::write(&p, serde_json::to_vec(&book).unwrap()).unwrap();
     let a = w.register(&p).unwrap();
     h.app.state.platform.template = template;

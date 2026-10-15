@@ -32,7 +32,7 @@ class RuntimeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "order/schema"):
                 predict({"model": str(p/"model.txt"), "matrix": str(p/"wrong.parquet"), "output": str(p/"prediction.parquet"), "contributions": False}, {})
 
-    def run_backtest(self, root, actions=(), signals=True, opening_gap=False):
+    def run_backtest(self, root, actions=(), signals=True, opening_gap=False, initial_cash=100000., reference_drop=0.):
         dates = pd.bdate_range("2020-12-28", periods=8).date
         rows = [{"date": str(d), "symbol": s, "open": 10., "high": 10., "low": 10., "close": 10., "volume": 10000000.} for d in dates for s in ("SH600000", "SZ000001")]
         if opening_gap:
@@ -40,16 +40,20 @@ class RuntimeTests(unittest.TestCase):
                 if row["date"] > str(dates[0]):
                     for field in ("open", "high", "low", "close"):
                         row[field] *= 100
+        for row in rows:
+            if row["symbol"]=="SH600000" and row["date"]>="2021-01-04":
+                for field in ("open","high","low","close"):
+                    row[field]-=reference_drop
         for event in actions:
             if event["kind"] == "Split":
                 for row in rows:
                     if row["symbol"] == event["symbol"] and row["date"] >= event["date"]:
                         for field in ("open", "high", "low", "close"):
-                            row[field] /= event["value"]
+                            row[field] /= float(event["value"])
         pq.write_table(pa.Table.from_pylist(rows), root/"bars.parquet")
         scores = [{"date": str(d), "symbol": s, "score": -0.5 if s=="SH600000" else -1.} for d in dates for s in ("SH600000", "SZ000001")] if signals else []
         pq.write_table(pa.Table.from_pylist(scores, schema=pa.schema([("date",pa.string()),("symbol",pa.string()),("score",pa.float64())])), root/"scores.parquet")
-        result = backtest({"bars": str(root/"bars.parquet"), "signals": str(root/"scores.parquet"), "signal_dates": [str(d) for d in dates], "output": str(root), "initial_cash": 100000., "top_n": 1, "rebalance_days": 20, "commission_rate": 0.00025, "minimum_commission": 5., "stamp_tax": 0.0005, "transfer_fee": 0.00001, "lot_sizes": {"SH600000":100,"SZ000001":100}, "actions": list(actions), "benchmark_returns": {str(d): 0. for d in dates}}, threading.Event(), lambda *a,**k: None)
+        result = backtest({"bars": str(root/"bars.parquet"), "signals": str(root/"scores.parquet"), "signal_dates": [str(d) for d in dates], "output": str(root), "initial_cash": initial_cash, "top_n": 1, "rebalance_days": 20, "commission_rate": 0.00025, "minimum_commission": 5., "stamp_tax": 0.0005, "transfer_fee": 0.00001, "lot_sizes": {"SH600000":100,"SZ000001":100}, "actions": list(actions), "benchmark_returns": {str(d): 0. for d in dates}}, threading.Event(), lambda *a,**k: None)
         events = [json.loads(line) for line in (root/"order_events.jsonl").read_text().splitlines()]
         return result, events
 
@@ -87,6 +91,29 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(after["cash"], before["cash"])
             self.assertAlmostEqual(after["equity"], before["equity"])
             self.assertEqual(next(d for d in result["days"] if d["date"]=="2021-01-04")["net_return"], 0)
+
+    def test_decimal_cash_precedes_split_on_the_same_old_share_base(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            self.run_backtest(root, initial_cash=1030., actions=[
+                {"symbol":"SH600000","date":"2021-01-04","kind":"Dividend","value":"1"},
+                {"symbol":"SH600000","date":"2021-01-04","kind":"Split","value":"2"},
+            ])
+            snapshots=json.loads((root/"portfolio_snapshots.json").read_text())
+            before,after=snapshots["2021-01-01"],snapshots["2021-01-04"]
+            self.assertEqual(before["positions"]["SH600000"],100)
+            self.assertEqual(after["positions"]["SH600000"],200)
+            self.assertAlmostEqual(after["cash"]-before["cash"],100.)
+
+    def test_verified_public_dividend_differs_from_exchange_price_reference(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            self.run_backtest(root,initial_cash=1030.,reference_drop=.15,actions=[{"symbol":"SH600000","date":"2021-01-04","kind":"Dividend","value":"0.18"}])
+            snapshots=json.loads((root/"portfolio_snapshots.json").read_text())
+            before,after=snapshots["2021-01-01"],snapshots["2021-01-04"]
+            self.assertEqual(before["positions"]["SH600000"],100)
+            self.assertAlmostEqual(after["cash"]-before["cash"],18.)
+            self.assertAlmostEqual(after["equity"]-before["equity"],3.)
 
     def test_next_open_cash_shortage_is_rejected_without_fictitious_fill(self):
         with tempfile.TemporaryDirectory() as tmp:

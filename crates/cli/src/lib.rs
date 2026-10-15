@@ -112,6 +112,14 @@ pub enum DataCommand {
         #[arg(long)]
         evidence_manifest: Option<PathBuf>,
     },
+    ReconcileActions {
+        #[arg(long)]
+        actions: String,
+        #[arg(long = "evidence-task")]
+        evidence_tasks: Vec<Uuid>,
+        #[arg(long)]
+        market: Option<String>,
+    },
     ReviseActions {
         #[arg(long)]
         actions: String,
@@ -811,6 +819,15 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
                 actions,
                 instrument,
                 evidence_manifest,
+            }),
+            DataCommand::ReconcileActions {
+                actions,
+                evidence_tasks,
+                market,
+            } => workflow(WorkflowRequest::ReconcileActions {
+                actions,
+                evidence_tasks,
+                market,
             }),
             DataCommand::ReviseActions { actions, request } => {
                 workflow(WorkflowRequest::ReviseActions {

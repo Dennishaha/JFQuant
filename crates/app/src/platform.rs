@@ -27,6 +27,7 @@ pub struct PlatformState {
     pub training_job: String,
     pub action_review_instrument: String,
     pub action_evidence_manifest: String,
+    pub action_evidence_tasks: String,
     pub datasets: Vec<DataVersion>,
     pub runs: Vec<RunRecord>,
     pub selected_run: Option<Uuid>,
@@ -87,6 +88,7 @@ impl Default for PlatformState {
             action_review_editor: String::new(),
             action_review_instrument: "SH600000".into(),
             action_evidence_manifest: String::new(),
+            action_evidence_tasks: String::new(),
             datasets: vec![],
             runs: vec![],
             selected_run: None,
@@ -949,6 +951,11 @@ pub fn research_panel(
             if ui.button("预览研究日程").clicked(){submit(state,worker,cancel_slot,WorkflowRequest::PreviewResearch{actions:(!state.platform.actions.is_empty()).then(||state.platform.actions.clone()),template:Box::new(state.platform.template.clone()),market:state.platform.market.clone()});}
         });
         ui.collapsing("公司行动：查看证据与审计修订",|ui|{
+            ui.horizontal(|ui| { ui.label("核对证据任务ID（逗号分隔，可空）"); ui.text_edit_singleline(&mut state.platform.action_evidence_tasks); });
+            if ui.button("自动核对并发布新版本").clicked() {
+                let ids = state.platform.action_evidence_tasks.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::parse).collect::<std::result::Result<Vec<uuid::Uuid>,_>>();
+                match ids { Ok(evidence_tasks) => submit(state,worker,cancel_slot,WorkflowRequest::ReconcileActions { actions:state.platform.actions.clone(), evidence_tasks, market:(!state.platform.market.is_empty()).then(||state.platform.market.clone()) }),Err(e)=>state.platform.error=Some(e.to_string()) }
+            }
             ui.label("从运行结果查看原值、候选字段及公告。修订JSON必须包含原事件哈希、逐字段原文引用及理由。");
             ui.add(egui::TextEdit::multiline(&mut state.platform.action_review_editor).desired_rows(8).desired_width(f32::INFINITY));
             if ui.button("提交证据修订为新版本").clicked(){match serde_json::from_str(&state.platform.action_review_editor){Ok(request)=>submit(state,worker,cancel_slot,WorkflowRequest::ReviseActions{actions:state.platform.actions.clone(),request}),Err(e)=>state.platform.error=Some(e.to_string())}}
@@ -1417,14 +1424,25 @@ fn show_results(ui: &mut egui::Ui, value: &Value) {
     if value["status"] == "trained" {
         ui.label("训练已完成，模型已保存。尚未执行回测。");
     }
+    let predicted = value["prediction_complete"] == true
+        || value["prediction_artifact"]["status"] == "completed"
+        || value["stages"]["prediction"] == "completed";
     if value["ready"] == false {
         ui.colored_label(
             crate::theme::semantic(ui.ctx()).warning,
-            if trained {
-                "回测未完成。已保存训练模型和截至失败点的账户记录。"
+            if trained && predicted {
+                "回测未完成。已保存训练模型与预测；账户记录以阶段产物为准。"
+            } else if trained {
+                "回测未完成。已保存训练模型，预测阶段尚未完成。"
             } else {
-                "训练数据未就绪，尚未进行训练与回测。"
+                "研究数据未就绪，前置检查未通过；尚未完成训练与回测。"
             },
+        );
+    }
+    if value["skipped_event_count"].as_u64().unwrap_or(0) > 0 {
+        ui.colored_label(
+            crate::theme::semantic(ui.ctx()).warning,
+            "回测完成，含未模拟事件。收益按披露的简化口径计算。",
         );
     }
     if value["backtest_status"] == "no_valid_trades" {
@@ -1433,13 +1451,20 @@ fn show_results(ui: &mut egui::Ui, value: &Value) {
             "无有效交易。账户保留现金，本次结果不能用于判断策略效果。",
         );
     }
+    if value["execution_diagnostics"].is_object() {
+        let d = &value["execution_diagnostics"];
+        ui.label(format!(
+            "有效信号：{}；成交回报：{}；拒单回报：{}",
+            d["valid_signals"], d["filled_events"], d["rejected_events"]
+        ));
+    }
     if value["input_kind"] == "synthetic_fixture" {
         ui.colored_label(
             crate::theme::semantic(ui.ctx()).warning,
             "合成演示数据，仅验证流程与账本，不代表真实市场收益。",
         );
     }
-    if value.get("aggregate").is_some() {
+    if value["aggregate"].is_object() {
         if let Err(error) = analytics_workflow::research::backtest::validate_result(value) {
             ui.colored_label(crate::theme::semantic(ui.ctx()).error, error.to_string());
             return;

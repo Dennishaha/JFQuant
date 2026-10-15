@@ -680,8 +680,8 @@ fn action_histories_match(a: &ActionBundle, b: &ActionBundle) -> bool {
                 x.instrument == y.instrument
                     && x.ex_date == y.ex_date
                     && x.record_date == y.record_date
-                    && (x.cash_per_share - y.cash_per_share).abs() <= 1e-6
-                    && (x.shares_per_share - y.shares_per_share).abs() <= 1e-6
+                    && (x.cash() - y.cash()).abs() <= 1e-6
+                    && (x.shares() - y.shares()).abs() <= 1e-6
                     && x.terms == y.terms
                     && (x.pay_date.is_none() || y.pay_date.is_none() || x.pay_date == y.pay_date)
                     && (x.listing_date.is_none()
@@ -779,8 +779,8 @@ fn refresh_actions(
                     book.actions
                         .iter()
                         .filter(|a| {
-                            (a.cash_per_share > 0. && a.pay_date.is_none())
-                                || (a.shares_per_share > 0. && a.listing_date.is_none())
+                            (a.cash() > 0. && a.pay_date.is_none())
+                                || (a.shares() > 0. && a.listing_date.is_none())
                         })
                         .count()
                 };
@@ -822,6 +822,9 @@ fn refresh_actions(
                 } else {
                     chosen.0.execution_issues.push(
                         analytics_storage::execution_data::ExecutionIssue {
+                            id: String::new(),
+                            event_category: String::new(),
+                            evidence: Vec::new(),
                             instrument: s.instrument.clone(),
                             announced: None,
                             dates: p.history.clone(),
@@ -845,11 +848,14 @@ fn refresh_actions(
                     .and_then(|s| s.parse::<f64>().ok())
                     .map(|v| v / 10.);
                 let matched = chosen.0.actions.iter().any(|a| {
-                    a.ex_date == date && cash.is_some_and(|v| (v - a.cash_per_share).abs() <= 1e-6)
+                    a.ex_date == date && cash.is_some_and(|v| (v - a.cash()).abs() <= 1e-6)
                 });
                 if !ordinary || !matched {
                     chosen.0.execution_issues.push(
                         analytics_storage::execution_data::ExecutionIssue {
+                            id: String::new(),
+                            event_category: String::new(),
+                            evidence: Vec::new(),
                             instrument: s.instrument.clone(),
                             announced: None,
                             dates: DateRange {
@@ -955,7 +961,7 @@ fn refresh_actions(
     let published = w.resolve(format!("data/refresh-actions-{}", run.id));
     fs::rename(&dest, &published)?;
     result.actions = Some(w.register(&published.join("actions.json"))?);
-    result.account = json!({"status":"not_run","code":"account_path_not_run","action_securities":book.queried_symbols.len(),"missing_cash_dates":book.actions.iter().filter(|a|a.cash_per_share>0.&&a.pay_date.is_none()).count(),"missing_listing_dates":book.actions.iter().filter(|a|a.shares_per_share>0.&&a.listing_date.is_none()).count(),"execution_issues":book.execution_issues});
+    result.account = json!({"status":"not_run","code":"account_path_not_run","action_securities":book.queried_symbols.len(),"missing_cash_dates":book.actions.iter().filter(|a|a.cash()>0.&&a.pay_date.is_none()).count(),"missing_listing_dates":book.actions.iter().filter(|a|a.shares()>0.&&a.listing_date.is_none()).count(),"execution_issues":book.execution_issues});
     Ok(())
 }
 

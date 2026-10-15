@@ -17,6 +17,15 @@ pub struct StructuredCoverage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionIssue {
+    /// Stable cause identity, empty only in legacy format 5.
+    #[serde(default)]
+    pub id: String,
+    /// Semantic category; unknown is never automatically downgraded to a warning.
+    #[serde(default)]
+    pub event_category: String,
+    /// Evidence digests or registered evidence names.
+    #[serde(default)]
+    pub evidence: Vec<String>,
     /// Internal data key.
     pub instrument: String,
     /// Earliest public knowledge date; missing dates do not guess an earlier eligibility change.
@@ -27,6 +36,25 @@ pub struct ExecutionIssue {
     pub code: String,
     /// Human-readable explanation, without credentials.
     pub message: String,
+}
+impl ExecutionIssue {
+    /// An identified upstream capability limitation, rather than incomplete ordinary data.
+    pub fn skipped_by_engine(&self) -> bool {
+        self.code == "execution_event_unsupported_skipped"
+            && matches!(
+                self.event_category.as_str(),
+                "rights_issue"
+                    | "reform"
+                    | "reorganization"
+                    | "compensation"
+                    | "merger"
+                    | "reduction"
+                    | "code_change"
+                    | "delisting"
+            )
+            && !self.evidence.is_empty()
+            && !self.id.is_empty()
+    }
 }
 /// Frozen auxiliary daily data. It never replaces the selected price source or factor files.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

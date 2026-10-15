@@ -15,10 +15,25 @@ pub enum CheckStatus {
     /// Prerequisites are unavailable; this is never a pass.
     NotRun,
 }
+/// The stage whose readiness this check describes.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmissionStage {
+    /// Factor, label and model inputs (default for historical reports).
+    #[default]
+    Training,
+    /// Static prerequisites for account execution.
+    Execution,
+    /// Checks requiring actual orders or positions.
+    Account,
+}
 /// One dependency check, shared by App, CLI and the training gate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdmissionCheck {
+    /// Stage attribution; old reports retain their training attribution.
+    #[serde(default)]
+    pub stage: AdmissionStage,
     /// Structured classification; missing is distinct from corrupt or conflicting data.
     pub kind: ProblemKind,
     /// Handling under the selected policy; factual status is retained.
@@ -111,6 +126,7 @@ mod tests {
         };
         assert!(!r.ready());
         r.checks.push(AdmissionCheck {
+            stage: Default::default(),
             kind: ProblemKind::Missing,
             disposition: ProblemDisposition::Block,
             category: "events".into(),
@@ -139,6 +155,7 @@ mod tests {
             },
             decisions: vec![],
             checks: vec![AdmissionCheck {
+                stage: Default::default(),
                 kind: ProblemKind::Missing,
                 disposition: ProblemDisposition::KeepNull,
                 category: "market".into(),
@@ -176,6 +193,7 @@ mod source_warning_tests {
             policy: Default::default(),
             decisions: vec![],
             checks: vec![AdmissionCheck {
+                stage: Default::default(),
                 kind: ProblemKind::ExecutionDependency,
                 disposition: ProblemDisposition::Warn,
                 category: "historical_events".into(),

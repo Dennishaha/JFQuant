@@ -1,4 +1,4 @@
-"""One supervised task per process. stdout is exclusively JSON Lines protocol v9."""
+"""One supervised task per process. stdout is exclusively JSON Lines protocol v10."""
 
 import contextlib
 import hashlib
@@ -15,6 +15,7 @@ from .announcements import collect as announcements
 from .cninfo import collect as cninfo_actions
 from .evidence import EvidenceCapture
 from .providers import coefficients, corporate_actions, market
+from .reconcile import replay
 from .tdx import collect as tdx_collect
 from .tdx import reference
 from .tushare import collect as tushare_actions
@@ -36,6 +37,7 @@ def main():
         "tushare.py",
         "cninfo.py",
         "tdx.py",
+        "reconcile.py",
     ):
         code_hash.update(
             name.encode() + b"\0" + Path(__file__).with_name(name).read_bytes() + b"\0"
@@ -43,6 +45,7 @@ def main():
 
     def report(event, **value):
         if event == "complete":
+            value.setdefault("versions", versions)
             value["collector_signature"] = "sha256:" + code_hash.hexdigest()
             if capture is not None:
                 value["evidence"] = {
@@ -74,6 +77,7 @@ def main():
             "permissions",
             "calendar",
             "members",
+            "reconcile_actions",
         ):
             raise ValueError("unsupported collector request")
         signature = "sha256:" + code_hash.hexdigest()
@@ -100,6 +104,9 @@ def main():
         capture = EvidenceCapture(Path(request["cache_dir"]).parent / "raw")
         with contextlib.redirect_stdout(sys.stderr), capture.enabled():
             operation = request["operation"]
+            if operation == "reconcile_actions":
+                replay(request, report)
+                return 0
             execute = {
                 "market": market,
                 "quotes": market,

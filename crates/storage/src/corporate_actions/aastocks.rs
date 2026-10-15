@@ -80,7 +80,7 @@ fn supplement_pay_dates(
         .actions
         .iter()
         .filter(|a| {
-            a.ex_date >= start && a.ex_date <= end && a.cash_per_share > 0.0 && a.pay_date.is_none()
+            a.ex_date >= start && a.ex_date <= end && a.cash() > 0.0 && a.pay_date.is_none()
         })
         .map(|a| a.instrument.clone())
         .collect::<BTreeSet<_>>()
@@ -185,15 +185,15 @@ fn supplement_pay_dates(
                     a.instrument == id
                         && a.ex_date >= start
                         && a.ex_date <= end
-                        && a.cash_per_share > 0.0
+                        && a.cash() > 0.0
                         && a.pay_date.is_none()
                 }) {
                     let matches: Vec<_> = rows
                         .iter()
                         .filter(|(record, ex, cash, _)| {
-                            *record == a.record_date
+                            Some(*record) == a.record_date
                                 && *ex == a.ex_date
-                                && (*cash - a.cash_per_share).abs() <= 0.000051
+                                && (*cash - a.cash()).abs() <= 0.000051
                         })
                         .collect();
                     let dates: BTreeSet<_> = matches.iter().map(|(_, _, _, pay)| *pay).collect();
@@ -288,13 +288,13 @@ mod tests {
             actions: vec![CorporateAction {
                 id: "SH600000:2017-07-14".into(),
                 instrument: "SH600000".into(),
-                announced: "2017-07-08".parse().unwrap(),
-                record_date: "2017-07-13".parse().unwrap(),
+                announced: Some("2017-07-08".parse().unwrap()),
+                record_date: Some("2017-07-13".parse().unwrap()),
                 ex_date: "2017-07-14".parse().unwrap(),
                 pay_date: None,
                 listing_date: None,
-                cash_per_share: 0.37,
-                shares_per_share: 0.0,
+                cash_per_share: (0.37).to_string(),
+                shares_per_share: (0.0).to_string(),
                 terms: Default::default(),
                 source: "https://example.test/evidence".into(),
             }],

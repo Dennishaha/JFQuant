@@ -81,13 +81,13 @@ pub fn create(w: &Workspace) -> Result<(DataVersion, DataVersion, ResearchTempla
         .map(|id| analytics_core::execution::CorporateAction {
             id: format!("{}:2009-01-04", fixture_security_id(id)),
             instrument: fixture_security_id(id),
-            announced: "2009-01-02".parse().unwrap(),
-            record_date: "2009-01-03".parse().unwrap(),
+            announced: Some("2009-01-02".parse().unwrap()),
+            record_date: Some("2009-01-03".parse().unwrap()),
             ex_date: "2009-01-04".parse().unwrap(),
             pay_date: Some("2009-01-05".parse().unwrap()),
             listing_date: Some("2009-01-06".parse().unwrap()),
-            cash_per_share: 0.1,
-            shares_per_share: 0.1,
+            cash_per_share: (0.1).to_string(),
+            shares_per_share: (0.1).to_string(),
             terms: Default::default(),
             source: "https://example.test/synthetic-fixture".into(),
         })

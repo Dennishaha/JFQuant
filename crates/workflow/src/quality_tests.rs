@@ -273,7 +273,7 @@ fn future_event_category_gap_does_not_change_training_qualification() {
         }
     }
     let (_, result) = execute_quality(&w, &m, &a, &t, true);
-    assert_eq!(result.unwrap().details["ready"], true);
+    assert_eq!(result.unwrap().details["ready"], false);
 }
 
 #[test]
@@ -337,7 +337,10 @@ fn missing_later_source_alias_does_not_erase_earlier_qualified_history() {
     assert_eq!(&before[..33], &after[..33]);
     assert_eq!(after[33]["retained"], 1);
     let (_, result) = execute_quality(&w, &m, &a, &t, false);
-    assert_eq!(result.unwrap().details["schema_version"], 14);
+    assert_eq!(
+        result.unwrap().details["schema_version"],
+        crate::research::backtest::RESEARCH_SCHEMA_VERSION
+    );
     let mut dataset = analytics_storage::daily::DailyDataset::open(&root).unwrap();
     dataset.bind_source_map(directory).unwrap();
     dataset

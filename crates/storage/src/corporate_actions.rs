@@ -3,6 +3,7 @@
 mod aastocks;
 mod checkpoints;
 pub mod execution_index;
+pub mod reconcile;
 pub mod review;
 pub use aastocks::{fetch_pay_dates, repair_pay_dates};
 
@@ -88,6 +89,51 @@ pub struct ActionBundle {
     pub failures: BTreeMap<String, String>,
     /// Saved raw JSON filename to SHA256, for independent provenance review.
     pub raw_sha256: BTreeMap<String, String>,
+}
+// Original JSON lexemes establish decimal precision; only the three declared
+// per-ten-share numeric fields receive the deterministic text projection.
+fn cninfo_receipt_matches(bytes: &[u8], expected: &Value, decimal_rows: &Value) -> bool {
+    let verify = || -> io::Result<bool> {
+        let raw: Value = serde_json::from_slice(bytes).map_err(invalid)?;
+        if raw != *expected {
+            return Ok(false);
+        }
+        if decimal_rows.is_null() {
+            return Ok(true);
+        }
+        let literal: BTreeMap<String, Box<serde_json::value::RawValue>> =
+            serde_json::from_slice(bytes).map_err(invalid)?;
+        let literals: Vec<BTreeMap<String, Box<serde_json::value::RawValue>>> =
+            serde_json::from_str(
+                literal
+                    .get("records")
+                    .ok_or_else(|| invalid("missing raw records"))?
+                    .get(),
+            )
+            .map_err(invalid)?;
+        let mut projected = raw["records"].clone();
+        let rows = projected
+            .as_array_mut()
+            .ok_or_else(|| invalid("missing raw records"))?;
+        if rows.len() != literals.len() {
+            return Ok(false);
+        }
+        for (row, literal) in rows.iter_mut().zip(literals) {
+            for field in ["F012N", "F010N", "F011N"] {
+                if row[field].is_f64() {
+                    row[field] = Value::String(
+                        literal
+                            .get(field)
+                            .ok_or_else(|| invalid("missing amount literal"))?
+                            .get()
+                            .to_owned(),
+                    );
+                }
+            }
+        }
+        Ok(projected == *decimal_rows)
+    };
+    verify().unwrap_or(false)
 }
 impl ActionBundle {
     /// Source selector for supplemental requests; opaque IDs are never sliced into stock codes.
@@ -191,7 +237,7 @@ impl ActionBundle {
             for a in &self.actions {
                 if out.contains(&a.instrument)
                     && a.ex_date >= start
-                    && a.record_date <= end
+                    && a.record_date.is_none_or(|d| d <= end)
                     && let analytics_core::actions::EventTerms::Conversion {
                         successor: Some(id),
                         ordinary_holder: true,
@@ -209,12 +255,12 @@ impl ActionBundle {
     }
 
     fn validate_identity(&self) -> io::Result<()> {
-        if self.schema_version != 5
+        if !matches!(self.schema_version, 5 | 6)
             || (self.downloader != "JFQuant analytics-storage corporate-actions"
                 && self.downloader != "JFQuant analytics-workflow synthetic-demo-v1")
         {
             return Err(invalid(
-                "unsupported_data_format: action bundle requires format 5 and known source",
+                "unsupported_data_format: action bundle requires supported format 5/6 and known source",
             ));
         }
         if let Some(data) = &self.execution_data {
@@ -315,7 +361,10 @@ impl ActionBundle {
     ) -> io::Result<()> {
         self.require_adjustment_coverage(symbols, start, end)?;
         for a in &self.actions {
-            if symbols.contains(&a.instrument) && a.ex_date >= start && a.record_date <= end {
+            if symbols.contains(&a.instrument)
+                && a.ex_date >= start
+                && a.record_date.is_none_or(|d| d <= end)
+            {
                 if let analytics_core::actions::EventTerms::Delisting {
                     valuations,
                     settlement_date,
@@ -336,10 +385,112 @@ impl ActionBundle {
         }
         Ok(())
     }
+    /// Canonical version identity keeps legacy numeric fields and absent metadata intact.
+    /// Validation uses the supported typed reader; hashing does not rewrite format 5.
+    pub fn version_content(path: &Path) -> io::Result<Value> {
+        let book = Self::read(path)?;
+        if book.schema_version == 5 {
+            serde_json::from_slice(&fs::read(path)?).map_err(invalid)
+        } else {
+            serde_json::to_value(book).map_err(invalid)
+        }
+    }
     /// Read without silently upgrading a historical schema.
     pub fn read(path: &Path) -> io::Result<Self> {
-        let bundle: Self = serde_json::from_slice(&fs::read(path)?).map_err(invalid)?;
+        let raw: Value = serde_json::from_slice(&fs::read(path)?).map_err(invalid)?;
+        if raw["schema_version"] == 6
+            && raw["actions"].as_array().is_none_or(|rows| {
+                rows.iter()
+                    .any(|a| !a["cash_per_share"].is_string() || !a["shares_per_share"].is_string())
+            })
+        {
+            return Err(invalid("format 6 action amounts must be decimal text"));
+        }
+        let bundle: Self = serde_json::from_value(raw).map_err(invalid)?;
+        let mut ids = BTreeSet::new();
+        if bundle.actions.iter().any(|a| !ids.insert(a.id.clone())) {
+            return Err(invalid("duplicate corporate-action event"));
+        }
+
         bundle.validate_identity()?;
+        if bundle.schema_version == 6 {
+            let root = path
+                .parent()
+                .ok_or_else(|| invalid("missing action root"))?;
+            for (name, expected) in &bundle.raw_sha256 {
+                if Path::new(name).components().count() != 1
+                    || format!(
+                        "sha256:{:x}",
+                        Sha256::digest(fs::read(root.join("raw").join(name))?)
+                    ) != *expected
+                {
+                    return Err(invalid("action evidence bytes changed"));
+                }
+            }
+        }
+        if let Some(expected) = bundle.raw_sha256.get("reconciliation-v1.json") {
+            let root = path
+                .parent()
+                .ok_or_else(|| invalid("missing action root"))?;
+            let bytes = fs::read(root.join("raw/reconciliation-v1.json"))?;
+            if format!("sha256:{:x}", Sha256::digest(&bytes)) != *expected {
+                return Err(invalid("reconciliation receipt hash mismatch"));
+            }
+            let receipt: Value = serde_json::from_slice(&bytes).map_err(invalid)?;
+            if receipt["schema_version"] != 1 || receipt["rule_version"] != "jfquant-actions-v1" {
+                return Err(invalid("unsupported reconciliation rules"));
+            }
+            for (name, expected) in receipt["evidence_sha256"]
+                .as_object()
+                .ok_or_else(|| invalid("missing replay evidence hashes"))?
+            {
+                if bundle.raw_sha256.get(name).map(String::as_str) != expected.as_str() {
+                    return Err(invalid("replay evidence binding changed"));
+                }
+            }
+            let events: BTreeMap<_, _> = bundle
+                .actions
+                .iter()
+                .map(|a| Ok((a.id.clone(), serde_json::to_value(a).map_err(invalid)?)))
+                .collect::<io::Result<_>>()?;
+            let issues: BTreeMap<_, _> = bundle
+                .execution_issues
+                .iter()
+                .filter(|i| !i.id.is_empty())
+                .map(|i| Ok((i.id.clone(), serde_json::to_value(i).map_err(invalid)?)))
+                .collect::<io::Result<_>>()?;
+            for (id, result) in receipt["results"]
+                .as_object()
+                .ok_or_else(|| invalid("missing replay results"))?
+            {
+                task_context_check()?;
+                for expected in result["records"]
+                    .as_array()
+                    .ok_or_else(|| invalid("missing replay events"))?
+                {
+                    let event: CorporateAction =
+                        serde_json::from_value(expected.clone()).map_err(invalid)?;
+                    if event.instrument != *id
+                        || events.get(&event.id)
+                            != Some(&serde_json::to_value(&event).map_err(invalid)?)
+                    {
+                        return Err(invalid(
+                            "normalized event differs from reconciliation receipt",
+                        ));
+                    }
+                }
+                for expected in result["issues"]
+                    .as_array()
+                    .ok_or_else(|| invalid("missing replay issues"))?
+                {
+                    let issue: crate::execution_data::ExecutionIssue =
+                        serde_json::from_value(expected.clone()).map_err(invalid)?;
+                    if issue.instrument != *id || issues.get(&issue.id) != Some(expected) {
+                        return Err(invalid("issue differs from reconciliation receipt"));
+                    }
+                }
+            }
+        }
         if bundle.downloader != "JFQuant analytics-workflow synthetic-demo-v1" {
             let root = path
                 .parent()
@@ -388,10 +539,7 @@ impl ActionBundle {
                                             && r["filename"].as_str().is_some_and(|name| {
                                                 fs::read(root.join("raw").join(name))
                                                     .ok()
-                                                    .and_then(|b| {
-                                                        serde_json::from_slice::<Value>(&b).ok()
-                                                    })
-                                                    .is_some_and(|v| v == *raw)
+                                                    .is_some_and(|b| cninfo_receipt_matches(&b,raw,&shard["evidence"]["cninfo_decimal_records"]))
                                             })
                                     })
                                 });
@@ -572,14 +720,13 @@ fn parse_history(
         actions.push(CorporateAction {
             id: format!("{symbol}:{ex}"),
             instrument: symbol.into(),
-            announced: date(row, "NOTICE_DATE")
-                .ok_or_else(|| invalid("implementation announcement date missing"))?,
-            record_date: record,
+            announced: date(row, "NOTICE_DATE"),
+            record_date: Some(record),
             ex_date: ex,
             pay_date: pay,
             listing_date: None,
-            cash_per_share: cash,
-            shares_per_share: shares,
+            cash_per_share: (cash).to_string(),
+            shares_per_share: (shares).to_string(),
             terms: Default::default(),
             source: format!("{HISTORY}?reportName=RPT_SHAREBONUS_DET; {SETTLEMENT}?code={symbol}"),
         });
@@ -843,13 +990,13 @@ fn parse_sina(symbol: &str, html: &str) -> io::Result<Vec<CorporateAction>> {
         out.push(CorporateAction {
             id: format!("{symbol}:{ex}"),
             instrument: symbol.into(),
-            announced: d(0)?,
-            record_date: d(6)?,
+            announced: Some(d(0)?),
+            record_date: Some(d(6)?),
             ex_date: ex,
             pay_date: None,
             listing_date: c[7].parse().ok(),
-            cash_per_share: cash,
-            shares_per_share: shares,
+            cash_per_share: (cash).to_string(),
+            shares_per_share: (shares).to_string(),
             terms: Default::default(),
             source: format!(
                 "https://money.finance.sina.com.cn/corp/go.php/vISSUE_ShareBonus/stockid/{}.phtml",
@@ -871,7 +1018,7 @@ pub fn enrich_public(
     output: &Path,
 ) -> io::Result<ActionBundle> {
     source.validate_identity()?;
-    if source.schema_version != 5
+    if !matches!(source.schema_version, 5 | 6)
         || source.downloader != "JFQuant analytics-storage corporate-actions"
     {
         return Err(invalid("invalid source bundle"));
@@ -920,8 +1067,8 @@ pub fn enrich_public(
                 let mut conflict = None;
                 for a in actions {
                     if let Some(existing) = bundle.actions.iter_mut().find(|old| old.id == a.id) {
-                        if (existing.cash_per_share - a.cash_per_share).abs() > 1e-6
-                            || (existing.shares_per_share - a.shares_per_share).abs() > 1e-6
+                        if (existing.cash() - a.cash()).abs() > 1e-6
+                            || (existing.shares() - a.shares()).abs() > 1e-6
                             || existing.record_date != a.record_date
                         {
                             conflict = Some(format!("public sources disagree for {}", a.id));
@@ -981,7 +1128,7 @@ fn detail_dates(action: &CorporateAction, html: &str) -> io::Result<(Option<Date
         })
         .collect();
     let d = |key: &str| fields.get(key).and_then(|s| s.parse::<Date>().ok());
-    if d("登记日") != Some(action.record_date) || d("除息日") != Some(action.ex_date) {
+    if d("登记日") != action.record_date || d("除息日") != Some(action.ex_date) {
         return Err(invalid("Sina detail identity/date mismatch"));
     }
     let cash = fields
@@ -989,12 +1136,12 @@ fn detail_dates(action: &CorporateAction, html: &str) -> io::Result<(Option<Date
         .and_then(|v| v.parse::<f64>().ok())
         .unwrap_or(0.0)
         / 10.0;
-    if (cash - action.cash_per_share).abs() > 0.001 {
+    if (cash - action.cash()).abs() > 0.001 {
         return Err(invalid("Sina detail dividend amount conflicts"));
     }
     // This generic field can mean stock arrival for mixed schemes. It is a cash
     // payment date only for an exclusively cash distribution. Never infer both.
-    let pay = if action.cash_per_share > 0.0 && action.shares_per_share == 0.0 {
+    let pay = if action.cash() > 0.0 && action.shares() == 0.0 {
         d("红利/配股起始日（送、转股到账日）")
     } else {
         None
@@ -1013,7 +1160,7 @@ pub fn fetch_details(
     end: Date,
 ) -> io::Result<ActionBundle> {
     source.validate_identity()?;
-    if start > end || source.schema_version != 5 {
+    if start > end || !matches!(source.schema_version, 5 | 6) {
         return Err(invalid("invalid detail range/bundle"));
     }
     checkpoints::prepare(
@@ -1041,8 +1188,8 @@ pub fn fetch_details(
         .filter(|a| {
             a.ex_date >= start
                 && a.ex_date <= end
-                && ((a.cash_per_share > 0.0 && a.pay_date.is_none())
-                    || (a.shares_per_share > 0.0 && a.listing_date.is_none()))
+                && ((a.cash() > 0.0 && a.pay_date.is_none())
+                    || (a.shares() > 0.0 && a.listing_date.is_none()))
         })
         .collect();
     let index = AtomicUsize::new(0);
@@ -1053,7 +1200,7 @@ pub fn fetch_details(
             scope.spawn(||{let _scope=task_context.install(); loop{
             if task_context.check().is_err(){break;}
             let i=index.fetch_add(1,Ordering::Relaxed);let Some(a)=candidates.get(i) else{break};
-            let announced=announcements.get(&a.id).copied().unwrap_or(a.announced);
+            let Some(announced)=announcements.get(&a.id).copied().flatten().or(a.announced) else { results.lock().expect("worker result mutex").push((a.id.clone(),String::new(),Err(invalid("implementation announcement date missing")))); continue; };
             let url=format!("https://money.finance.sina.com.cn/corp/view/vISSUE_ShareBonusDetail.php?stockid={}&type=1&end_date={announced}",&a.instrument[2..]);
             let result=(||{
                 let bytes=checkpoints::page(&url,Command::new("/usr/bin/curl").args(["--fail","--silent","--show-error","--location","--retry","2","--connect-timeout","15","--max-time","45",&url]),&output.join(format!("raw/{}-{}-detail.html",a.instrument,a.ex_date)))?;
@@ -1086,7 +1233,7 @@ pub fn fetch_details(
                     a.pay_date = pay;
                     cash_added += 1;
                 }
-                if a.listing_date.is_none() && a.shares_per_share > 0.0 && listing.is_some() {
+                if a.listing_date.is_none() && a.shares() > 0.0 && listing.is_some() {
                     a.listing_date = listing;
                     listings_added += 1;
                 }
@@ -1124,7 +1271,7 @@ pub fn repair_from_evidence(
     output: &Path,
 ) -> io::Result<ActionBundle> {
     source.validate_identity()?;
-    if source.schema_version != 5
+    if !matches!(source.schema_version, 5 | 6)
         || source.downloader != "JFQuant analytics-storage corporate-actions"
     {
         return Err(invalid("invalid source bundle"));
@@ -1135,37 +1282,52 @@ pub fn repair_from_evidence(
     let mut bundle = source.clone();
     let failed: Vec<_> = bundle.failures.keys().cloned().collect();
     let modified = !failed.is_empty();
+    let mut reparse_failures = BTreeMap::new();
     for id in failed {
-        let path = source_root.join(format!("raw/{id}-sina.html"));
+        let name = format!("{id}-sina.html");
+        let path = source_root.join("raw").join(&name);
         let result = fs::read(path)
-            .and_then(|bytes| decode_table(&bytes, b"id=\"sharebonus_1\""))
+            .and_then(|bytes| {
+                if source.raw_sha256.get(&name)
+                    != Some(&format!("sha256:{:x}", Sha256::digest(&bytes)))
+                {
+                    return Err(invalid("repair_evidence_hash_missing_or_mismatched"));
+                }
+                decode_table(&bytes, b"id=\"sharebonus_1\"")
+            })
             .and_then(|html| source.parse_sina_bound(&id, &html));
         if let Ok(actions) = result {
-            let mut conflict = None;
-            for a in actions {
-                if let Some(old) = bundle.actions.iter_mut().find(|old| old.id == a.id) {
-                    if (old.cash_per_share - a.cash_per_share).abs() > 1e-6
-                        || (old.shares_per_share - a.shares_per_share).abs() > 1e-6
-                        || old.record_date != a.record_date
-                    {
-                        conflict = Some(format!("public sources disagree for {}", a.id));
-                        continue;
-                    }
-                    if old.listing_date.is_none() {
-                        old.listing_date = a.listing_date;
-                    }
-                } else {
-                    bundle.actions.push(a);
+            let conflict = merge_retried_distributions(&mut bundle.actions, &id, &actions);
+            for a in &actions {
+                if let Some(old) = bundle.actions.iter_mut().find(|old| old.id == a.id)
+                    && matches!(
+                        old.terms,
+                        analytics_core::actions::EventTerms::Distribution { allocation: None }
+                    )
+                    && (old.cash() - a.cash()).abs() <= 1e-6
+                    && (old.shares() - a.shares()).abs() <= 1e-6
+                    && old.record_date == a.record_date
+                    && old.listing_date.is_none()
+                {
+                    old.listing_date = a.listing_date;
                 }
             }
             if let Some(reason) = conflict {
                 bundle.failures.insert(id, reason);
             } else {
                 bundle.queried_symbols.insert(id.clone());
-                bundle.failures.remove(&id);
+                // This parser proves a distribution history, never unrelated category
+                // coverage, source disagreements, or implementation review findings.
+                if source
+                    .failures
+                    .get(&id)
+                    .is_some_and(|e| e.starts_with("history API failed:"))
+                {
+                    bundle.failures.remove(&id);
+                }
             }
         } else if let Err(e) = result {
-            bundle.failures.insert(id, e.to_string());
+            reparse_failures.insert(id, e.to_string());
         }
     }
     if modified {
@@ -1175,7 +1337,7 @@ pub fn repair_from_evidence(
         output.join("actions.json"),
         serde_json::to_vec_pretty(&bundle).map_err(invalid)?,
     )?;
-    fs::write(output.join("repair_coverage.json"),serde_json::to_vec_pretty(&serde_json::json!({"reparsed_at":chrono::Utc::now().to_rfc3339(),"source_failures_before":source.failures.len(),"source_failures_after":bundle.failures.len(),"symbols":bundle.queried_symbols.len(),"events":bundle.actions.len(),"new_events":bundle.actions.len()-source.actions.len(),"failures":bundle.failures})).map_err(invalid)?)?;
+    fs::write(output.join("repair_coverage.json"),serde_json::to_vec_pretty(&serde_json::json!({"reparsed_at":chrono::Utc::now().to_rfc3339(),"source_failures_before":source.failures.len(),"source_failures_after":bundle.failures.len(),"symbols":bundle.queried_symbols.len(),"events":bundle.actions.len(),"new_events":bundle.actions.len()-source.actions.len(),"failures":bundle.failures,"reparse_failures":reparse_failures})).map_err(invalid)?)?;
     Ok(bundle)
 }
 
@@ -1235,25 +1397,35 @@ pub fn retry_public(
     let mut bundle = source.clone();
     bundle.downloaded_at = chrono::Utc::now().to_rfc3339();
     for id in &retry.queried_symbols {
-        bundle.actions.retain(|a| &a.instrument != id);
-        bundle.actions.extend(
-            retry
-                .actions
-                .iter()
-                .filter(|a| &a.instrument == id)
-                .cloned(),
-        );
+        let fresh = retry
+            .actions
+            .iter()
+            .filter(|a| &a.instrument == id)
+            .cloned()
+            .collect::<Vec<_>>();
+        let conflicts = merge_retried_distributions(&mut bundle.actions, id, &fresh);
         bundle.queried_symbols.insert(id.clone());
+        // Legacy history retries do not prove category/date coverage. Retaining an
+        // earlier supplier claim here would falsely certify a changed event set.
         bundle.coverage.remove(id);
-        if !source
+        bundle.structured_coverage.remove(id);
+        if let Some(reason) = conflicts {
+            bundle.failures.insert(id.clone(), reason);
+        } else if source
             .failures
             .get(id)
-            .is_some_and(|e| e.contains("disagree"))
+            .is_some_and(|e| e.starts_with("history API failed:"))
         {
             bundle.failures.remove(id);
         }
     }
-    bundle.failures.extend(retry.failures);
+    for (id, reason) in retry.failures {
+        bundle
+            .failures
+            .entry(id)
+            .and_modify(|old| *old = format!("{old}; retry: {reason}"))
+            .or_insert(reason);
+    }
     for (name, hash) in retry.raw_sha256 {
         fs::copy(
             output.join("retry/raw").join(&name),
@@ -1267,6 +1439,39 @@ pub fn retry_public(
         serde_json::to_vec_pretty(&bundle).map_err(invalid)?,
     )?;
     Ok(bundle)
+}
+
+fn merge_retried_distributions(
+    existing: &mut Vec<CorporateAction>,
+    id: &str,
+    fresh: &[CorporateAction],
+) -> Option<String> {
+    let mut issues = vec![];
+    for old in existing.iter().filter(|a| a.instrument == id) {
+        if !matches!(
+            old.terms,
+            analytics_core::actions::EventTerms::Distribution { allocation: None }
+        ) {
+            continue;
+        }
+        match fresh.iter().find(|a| a.id == old.id) {
+            None => issues.push(format!("retry_history_gap: {}", old.id)),
+            Some(new)
+                if (new.cash() - old.cash()).abs() > 1e-6
+                    || (new.shares() - old.shares()).abs() > 1e-6
+                    || new.record_date != old.record_date =>
+            {
+                issues.push(format!("public sources disagree for {}", old.id))
+            }
+            _ => {}
+        }
+    }
+    for new in fresh {
+        if !existing.iter().any(|old| old.id == new.id) {
+            existing.push(new.clone());
+        }
+    }
+    (!issues.is_empty()).then(|| issues.join("; "))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1397,6 +1602,18 @@ mod checkpoint_tests {
 mod tests {
     use super::*;
     #[test]
+    fn cninfo_decimal_text_is_bound_to_original_json_lexemes() {
+        let bytes=br#"{"records":[{"F012N":9.7000,"F010N":1,"F011N":null}],"count":1,"total":1,"resultcode":200}"#;
+        let raw: Value = serde_json::from_slice(bytes).unwrap();
+        let mut exact = serde_json::json!([{"F012N":"9.7000","F010N":1,"F011N":null}]);
+        assert!(cninfo_receipt_matches(bytes, &raw, &exact));
+        exact[0]["F012N"] = serde_json::json!("9.7");
+        assert!(!cninfo_receipt_matches(bytes, &raw, &exact));
+        exact[0]["F012N"] = serde_json::json!("9.70000000000001");
+        assert!(!cninfo_receipt_matches(bytes, &raw, &exact));
+        assert!(cninfo_receipt_matches(bytes, &raw, &Value::Null));
+    }
+    #[test]
     fn malformed_bundle_is_rejected_before_worker_urls_or_evidence_paths() {
         let mut bundle = ActionBundle {
             structured_coverage: Default::default(),
@@ -1436,13 +1653,13 @@ mod tests {
         let mut a = CorporateAction {
             id: "SH600000:2013-06-03".into(),
             instrument: "SH600000".into(),
-            announced: "2013-05-27".parse().unwrap(),
-            record_date: "2013-05-31".parse().unwrap(),
+            announced: Some("2013-05-27".parse().unwrap()),
+            record_date: Some("2013-05-31".parse().unwrap()),
             ex_date: "2013-06-03".parse().unwrap(),
             pay_date: None,
             listing_date: None,
-            cash_per_share: 0.55,
-            shares_per_share: 0.0,
+            cash_per_share: (0.55).to_string(),
+            shares_per_share: (0.0).to_string(),
             terms: Default::default(),
             source: "synthetic provider schema fixture".into(),
         };
@@ -1450,9 +1667,9 @@ mod tests {
             detail_dates(&a, html).unwrap(),
             (Some("2013-06-07".parse().unwrap()), None)
         );
-        a.shares_per_share = 0.5;
+        a.shares_per_share = (0.5).to_string();
         assert_eq!(detail_dates(&a, html).unwrap(), (None, None));
-        a.record_date = "2013-05-30".parse().unwrap();
+        a.record_date = Some("2013-05-30".parse().unwrap());
         assert!(detail_dates(&a, html).is_err());
     }
     #[test]
@@ -1461,7 +1678,7 @@ mod tests {
         let a = parse_sina("SH600000", html).unwrap().remove(0);
         assert_eq!(a.listing_date, Some("2013-06-05".parse().unwrap()));
         assert_eq!(a.pay_date, None);
-        assert!((a.shares_per_share - 0.3).abs() < 1e-12);
+        assert!((a.shares() - 0.3).abs() < 1e-12);
         assert!(parse_sina("SH600000", "blocked page").is_err());
     }
     #[test]
@@ -1469,12 +1686,73 @@ mod tests {
         let h = serde_json::json!({"success":true,"result":{"pages":1,"count":1,"data":[{"SECUCODE":"600000.SH","ASSIGN_PROGRESS":"实施分配","NOTICE_DATE":"2024-06-01 00:00:00","EQUITY_RECORD_DATE":"2024-06-03 00:00:00","EX_DIVIDEND_DATE":"2024-06-04 00:00:00","PRETAX_BONUS_RMB":4.2,"BONUS_RATIO":1,"IT_RATIO":2}]}});
         let p = serde_json::json!({"fhyx":[{"EQUITY_RECORD_DATE":"2024-06-03 00:00:00","EX_DIVIDEND_DATE":"2024-06-04 00:00:00","PAY_CASH_DATE":"2024-06-07 00:00:00"}]});
         let a = parse_history("SH600000", &h, &p).unwrap().remove(0);
-        assert!((a.cash_per_share - 0.42).abs() < 1e-12);
-        assert!((a.shares_per_share - 0.3).abs() < 1e-12);
+        assert!((a.cash() - 0.42).abs() < 1e-12);
+        assert!((a.shares() - 0.3).abs() < 1e-12);
         assert_eq!(a.pay_date, Some("2024-06-07".parse().unwrap()));
         assert_eq!(a.listing_date, None);
         assert!(a.validate().is_err());
         assert!(parse_history("SZ000001", &h, &p).is_err());
         assert!(parse_history("SH600000", &serde_json::json!({"success":false}), &p).is_err());
+    }
+}
+
+#[cfg(test)]
+mod repair_evidence_tests {
+    use super::*;
+    #[test]
+    fn retry_preserves_previous_facts_and_rejects_conflicting_or_short_histories() {
+        let original:CorporateAction=serde_json::from_value(serde_json::json!({"id":"SH600000:2013-06-03","instrument":"SH600000","announced":"2013-05-01","record_date":"2013-05-31","ex_date":"2013-06-03","cash_per_share":0.2,"shares_per_share":0.,"source":"fixture"})).unwrap();
+        let mut existing = vec![original.clone()];
+        assert!(
+            merge_retried_distributions(&mut existing, "SH600000", std::slice::from_ref(&original))
+                .is_none()
+        );
+        let mut conflicting = original.clone();
+        conflicting.cash_per_share = (0.3).to_string();
+        assert!(
+            merge_retried_distributions(&mut existing, "SH600000", &[conflicting])
+                .unwrap()
+                .contains("disagree")
+        );
+        assert_eq!(existing[0].cash(), 0.2);
+        assert!(
+            merge_retried_distributions(&mut existing, "SH600000", &[])
+                .unwrap()
+                .contains("retry_history_gap")
+        );
+    }
+    #[test]
+    fn missing_original_preserves_failure_and_distribution_page_does_not_clear_special_issue() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("source");
+        fs::create_dir_all(root.join("raw")).unwrap();
+        let mut source:ActionBundle=serde_json::from_value(serde_json::json!({"schema_version":5,"downloader":"JFQuant analytics-storage corporate-actions","downloaded_at":"2026-10-15","source_bindings":{},"coverage":{},"queried_symbols":[],"actions":[],"failures":{"SH600000":"history API failed: source unavailable"},"raw_sha256":{}})).unwrap();
+        let first = dir.path().join("missing");
+        let repaired = repair_from_evidence(&source, &root, &first).unwrap();
+        assert_eq!(repaired.failures, source.failures);
+        let diagnostic: Value =
+            serde_json::from_slice(&fs::read(first.join("repair_coverage.json")).unwrap()).unwrap();
+        assert!(diagnostic["reparse_failures"]["SH600000"].is_string());
+        let name = "SH600000-sina.html";
+        let html = "<table id=\"sharebonus_1\"><thead>红股上市日</thead><tbody><tr><td colspan=\"9\">暂时没有数据！</td></tr></tbody></table>";
+        let (page, _, _) = encoding_rs::GBK.encode(html);
+        fs::write(root.join("raw").join(name), &page).unwrap();
+        source
+            .raw_sha256
+            .insert(name.into(), format!("sha256:{:x}", Sha256::digest(&page)));
+        source.failures.insert(
+            "SH600000".into(),
+            "rights issue candidates require implementation review".into(),
+        );
+        let repaired = repair_from_evidence(&source, &root, &dir.path().join("special")).unwrap();
+        assert_eq!(repaired.failures, source.failures);
+        source.failures.insert(
+            "SH600000".into(),
+            "history API failed: source unavailable".into(),
+        );
+        let repaired = repair_from_evidence(&source, &root, &dir.path().join("history")).unwrap();
+        assert!(!repaired.failures.contains_key("SH600000"));
+        assert!(repaired.queried_symbols.contains("SH600000"));
+        assert!(repaired.coverage.is_empty());
     }
 }

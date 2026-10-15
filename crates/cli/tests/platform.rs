@@ -615,7 +615,10 @@ fn current_research_cli_and_api_share_results_and_reject_old_imports_without_mod
     let cli_id = value["task_id"].as_str().unwrap().parse().unwrap();
     let actual = s.client.wait(cli_id, Some(15)).unwrap();
     assert_eq!(actual["results"], expected);
-    assert_eq!(expected["schema_version"], 14);
+    assert_eq!(
+        expected["schema_version"],
+        analytics_workflow::research::backtest::RESEARCH_SCHEMA_VERSION
+    );
     assert!(
         expected["aggregate"]
             .get("terminal_valuation_fees_cny")
@@ -905,7 +908,10 @@ fn cli_pools_and_canonical_research_share_public_backend_and_schema() {
     let id = run["task_id"].as_str().unwrap();
     s.json(&["jobs", "wait", id, "--timeout", "30"]);
     let result = s.json(&["jobs", "results", id]);
-    assert_eq!(result["schema_version"], 14);
+    assert_eq!(
+        result["schema_version"],
+        analytics_workflow::research::backtest::RESEARCH_SCHEMA_VERSION
+    );
     assert_eq!(
         result["execution"]["benchmark"],
         analytics_workflow::demo::fixture_security_id("SH000905")
@@ -987,7 +993,10 @@ fn date_overrides_preview_and_no_validation_run_share_the_public_schedule() {
         "--timeout",
         "30",
     ]);
-    assert_eq!(done["results"]["schema_version"], 14);
+    assert_eq!(
+        done["results"]["schema_version"],
+        analytics_workflow::research::backtest::RESEARCH_SCHEMA_VERSION
+    );
     assert_eq!(done["results"]["fold_reports"][0]["validation_rows"], 0);
     let invalid = s.cli(&[
         "research",
@@ -1019,7 +1028,7 @@ fn stopping_idle_service_then_immediately_reconnecting_does_not_parse_empty_json
 }
 
 #[test]
-fn execution_data_only_rejections_are_exit_three_with_models_and_diagnostics_retained() {
+fn execution_data_rejections_exit_three_before_training_with_diagnostics() {
     let s = Sandbox::new();
     let w = Workspace::open(&s.client.root).unwrap();
     let (m, a, t) = analytics_workflow::demo::create(&w).unwrap();
@@ -1027,6 +1036,9 @@ fn execution_data_only_rejections_are_exit_three_with_models_and_diagnostics_ret
     let mut book = analytics_storage::corporate_actions::ActionBundle::read(&path).unwrap();
     book.execution_issues
         .push(analytics_storage::execution_data::ExecutionIssue {
+            id: String::new(),
+            event_category: String::new(),
+            evidence: Vec::new(),
             instrument: book.actions[0].instrument.clone(),
             announced: None,
             dates: analytics_core::DateRange {
@@ -1055,12 +1067,12 @@ fn execution_data_only_rejections_are_exit_three_with_models_and_diagnostics_ret
     let records = w.runs().unwrap();
     let run = records.iter().find(|r| r.id.to_string() == id).unwrap();
     let root = w.resolve(&run.output);
-    assert!(root.join("training.json").is_file());
+    assert!(!root.join("training.json").is_file());
     assert!(!root.join("summary.json").exists());
     let readiness: Value =
         serde_json::from_slice(&std::fs::read(root.join("execution_readiness.json")).unwrap())
             .unwrap();
-    assert_eq!(readiness["training_complete"], true);
+    assert_eq!(readiness["training_complete"], false);
     assert_eq!(readiness["backtest_complete"], false);
 }
 
@@ -1091,7 +1103,10 @@ fn removed_identity_cli_is_rejected_and_research_stages_are_explicit() {
     let accepted = s.json(&["research", "backtest", "--training", id, "--actions", &a.id]);
     let id = accepted["task_id"].as_str().unwrap();
     assert!(s.cli(&["jobs", "wait", id]).status.success());
-    assert_eq!(s.json(&["jobs", "results", id])["schema_version"], 14);
+    assert_eq!(
+        s.json(&["jobs", "results", id])["schema_version"],
+        analytics_workflow::research::backtest::RESEARCH_SCHEMA_VERSION
+    );
 }
 
 #[test]

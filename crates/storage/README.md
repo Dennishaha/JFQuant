@@ -106,7 +106,7 @@ jfquant jobs wait TASK_UUID
 
 `data actions`默认走巨潮优先采集（见下文），普通分红不必手动串联补充命令。以下Rust接口保留用于显式证据补采：`corporate_actions::fetch_public`独立请求东方财富RPT_SHAREBONUS_DET已实施历史和F10 PageAjax到账日期。`enrich_public`用新浪历史表补退市股票和显式红股上市日。`fetch_details`按明确日期区间下载新浪详情，只把纯现金方案“红利起始日”用于到账日，混合送转方案的通用“到账日”不推断为现金发放日；股票只用明确“上市日”。`fetch_pay_dates`再按阿思达克现金行中单独标明的“派送日”补混合方案现金日，要求股票代码、登记日、除权日与分红金额一致，不把其送股行派送日当现金日。这些Rust补采请求由本项目调用curl、最多4个worker；每次发布新版本，仅允许恢复身份匹配的未完成暂存目录，保存原始响应与SHA256，派生目录验证并复制原有证据。不读取其他项目缓存；默认巨潮路径使用本项目内置、锁定版本的AKShare适配。
 
-接口：`ActionBundle::read / require_coverage`，schema_version=5；downloader固定来源映射、downloaded_at UTC、queried_symbols、actions、failures和raw_sha256。事件格式遵循core `CorporateAction`；JSON拒绝未知字段。原始每10股数量转换成每旧股，缺失pay_date/listing_date保留null，失败与空历史分开；校验数量/分页、股票身份和日期。公开来源相互冲突记录到failures，不能静默选一边。coverage.json、details_coverage.json和payment_coverage.json列出缺字段及失败；“下载成功”不代表“可执行回测”。源HTML若改版或编码异常则拒绝。
+接口：`ActionBundle::read / require_coverage`，schema_version=6（格式5只读）；downloader固定来源映射、downloaded_at UTC、queried_symbols、actions、failures和raw_sha256。事件格式遵循core `CorporateAction`；JSON拒绝未知字段。原始每10股数量转换成每旧股，缺失pay_date/listing_date保留null，失败与空历史分开；校验数量/分页、股票身份和日期。公开来源相互冲突记录到failures，不能静默选一边。coverage.json、details_coverage.json和payment_coverage.json列出缺字段及失败；“下载成功”不代表“可执行回测”。源HTML若改版或编码异常则拒绝。
 
 ```mermaid
 flowchart TD
@@ -144,7 +144,7 @@ jfquant jobs wait TASK_UUID
 
 行情历史股票池有1802只证券。四路公开来源累计规范化27297条记录；除权日在2013-01-01—2026-10-12区间的17266条，新浪详情补8934个现金日及1797个上市日，阿思达克补1378个现金日，重解析另补12个。该除权区间仍缺80个现金日、12个股票上市日。执行准入还包括期末已经登记、未来除权的权益，共检查17274条，缺80个现金日、13个上市日，99条缺字段或日期不合法；另有60只证券的来源冲突或不完整历史。**未达到原价回测准入条件**。数据和逐条失败清单保存在忽略的data目录，实际条件以execution_readiness.json为准，不能只看事件数量。
 
-缺日期不一定只是采集失败。例如[中银绒业2019年重整专项意见（巨潮）](https://static.cninfo.com.cn/finalpage/2019-12-19/1207176343.PDF)明确每10股转增13.61股不向原股东分配、也不进行除权；新浪历史表却列为已实施且除权日为空。不得补猜除权日或把这些股份发给普通持仓。其他重整、股权分置及差异化分红也需实施公告确认对象和精确数量。当前模块用类型化事件处理普通及特殊行动；缺字段、资格、分配或估值证据的具体事件继续阻止运行。当前严格保留显示精度差异造成的来源冲突，不静默选择某个数值。
+缺日期不一定只是采集失败。例如[中银绒业2019年重整专项意见（巨潮）](https://static.cninfo.com.cn/finalpage/2019-12-19/1207176343.PDF)明确每10股转增13.61股不向原股东分配、也不进行除权；新浪历史表却列为已实施且除权日为空。不得补猜除权日或把这些股份发给普通持仓。其他重整、股权分置及差异化分红也需实施公告确认对象和精确数量。当前模块用类型化事件处理普通及特殊行动；普通事件缺必要条款或存在实质冲突继续阻断；已识别但无法模拟的特殊事件警告并跳过，实际持仓估值错误仍失败。当前严格保留显示精度差异造成的来源冲突，不静默选择某个数值。
 
 ## 平台任务、取消与检查点
 
@@ -200,9 +200,9 @@ flowchart TD
 
 adjustment模块定义AdjustmentSource、AdjustmentRecord、AdjustmentBasis和AdjustmentAnchor。规范行情5保存adjustments/ID.json、原价bars和首个原价收盘锚点；DailyDataset提供adjustment_factors、raw_volume、price_inputs及来源校验。研究价量由原价与F/F0生成，供应商后复权仅留证。Qlib当前读取保持，规范1不转换。接口与复现见[采集包](collectors/README.md)。
 
-## 公司行动5与公告证据
+## 公司行动6与公告证据
 
-ActionBundle仅接收格式5；规范行情为5，采集协议9。旧动作/规范行情/检查点不转换，Qlib当前读取保持。ordinary的公共金额是实际持有人权益；EventTerms的Reference独立核验除权。特殊事件或仅供历史核验的Historical条款都须有实施证据；后者不能进入实际账户。
+ActionBundle发布格式6，格式5只读；规范行情为5，采集协议10。旧动作/规范行情/检查点不转换，Qlib当前读取保持。ordinary的公共金额是实际持有人权益；EventTerms的Reference独立核验除权。特殊事件或仅供历史核验的Historical条款都须有实施证据；后者不能进入实际账户。
 
 新增内置announcements采集：固定CNINFO查询及static.cninfo.com.cn PDF路径，验证分页、证券、日期、状态和附件身份；pypdf5.9.0锁定在依赖中，记录PDF、逐页提取文本哈希和候选字段。预案、风险提示及无法确定实施身份的文档不能直接修订。扫描PDF无文本时保留待复核，不OCR猜数值。
 
@@ -236,9 +236,9 @@ flowchart LR
 
 ## 2026-10-14：直接代码读取与分阶段研究
 
-为什么调整：普通市场代码无需先登记身份；独立目录、审核和权威名录下载增加了研究前置负担。特殊历史代码仍需在快照内明确区间，不能将旧证券行情或权益接到另一证券。训练使用价量和标签，到账／交付资料只在实际账户执行时检查。
+为什么调整：普通市场代码无需先登记身份；独立目录、审核和权威名录下载增加了研究前置负担。特殊历史代码仍需在快照内明确区间，不能将旧证券行情或权益接到另一证券。训练使用价量和标签，到账／交付日期保留为证据，AKQuant普通事件仅要求除权日处理所需条款；已识别不支持事件警告跳过。
 
-当前格式：模板10、需求3、准入5、股票池3、公司行动5、规范行情5、系数3、采集7、服务14、研究结果14；快照内来源映射1、训练产物3。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
+当前格式：模板10、需求3、准入5、股票池3、公司行动6、规范行情5、系数3、采集10、服务16、研究结果16；快照内来源映射1、训练产物3。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
 
 来源映射位于快照source_map.json，普通证券可用空exceptions。每个例外含市场代码、资产类别、适用区间及provider/symbol/coverage定位。冲突拒绝；SHT00018只能读取自身旧文件，不自动绑定SH600018。原Qlib文件不改写；显式重新登记冻结文件内容和映射。worker内缓存字段，取消检查以证券和固定批次执行。
 
@@ -255,7 +255,7 @@ flowchart LR
 
 ## 独立系数与组合视图的理由和边界
 
-东方财富报价接口失效时，新浪日期系数仍可能可用。`collect_quotes`、`collect_coefficients`、`collect_actions`可以独立提交、取消和恢复；仅报价快照缺复权依据时仍不具备验证口径准入资格。`CoefficientBundle`格式1保存完整系数、原文和HTTP/协议证据哈希，损坏/部分分片不注册为完整系数版本。采集协议9。
+东方财富报价接口失效时，新浪日期系数仍可能可用。`collect_quotes`、`collect_coefficients`、`collect_actions`可以独立提交、取消和恢复；仅报价快照缺复权依据时仍不具备验证口径准入资格。`CoefficientBundle`格式1保存完整系数、原文和HTTP/协议证据哈希，损坏/部分分片不注册为完整系数版本。采集协议10。
 
 `MarketView`格式1明确组合原Qlib快照和独立新浪系数。原factor用于恢复原价和真实股数，新F/F0用于研究OHLC和反向成交量缩放；金额保持真实元、VWAP由真实金额/股数乘倍率。覆盖前缺系数不使用未来值。两个factor不能互换：原factor含供应商归一化比例，直接覆盖会改变撮合价及真实股数。
 
@@ -280,7 +280,7 @@ flowchart TD
 flowchart LR
   K[本机私有凭据文件] --> P[固定Tushare采集进程]
   P --> E[逐证券完整查询与原始响应]
-  E --> A[公司行动5 / 执行资料1]
+  E --> A[公司行动6 / 执行资料1]
   A --> I[任务内执行索引]
   I --> C[成交 / 拒单 / 已有权益停止]
 ```
@@ -331,3 +331,77 @@ flowchart LR
 ```
 
 依据：[CC Switch配置说明](https://github.com/farion1231/cc-switch/blob/main/docs/user-manual/en/5-faq/5.1-config-files.md)、本机CC Switch `database/schema.rs`的providers.settings_config及`config.rs`的atomic_write_private实现。未读取CC Switch用户数据库或凭据。验收覆盖权限、原子替换、不同来源保留、损坏脱敏、符号链接拒绝和独立CLI进程共享；不需要OS授权。
+
+## 历史系数回执兼容（2026-10）
+
+读取 `CoefficientBundle` 与启动当前采集进程使用不同校验入口。当前进程仍严格核对当前代码签名；历史格式1仅接受当前实现或明确核验过的 AKShare/Sina 实现 `cf35c3193de4`（签名 `4311df0d8844c6cbfc9a9318e970ad806af634ec2cba47a4d8a0db9788c503ba`）。该版本的系数解析与原始/结构化绑定格式经 Git 对照兼容，原始响应、HTTP回执、证券、系数记录和哈希仍逐项检查。不改写旧回执；未知实现报 `unsupported_historical_collector`，不扩大到其他供应商。
+
+```sh
+DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-storage historical_producer
+JFQUANT_COEFFICIENT_FIXTURE=/absolute/path/to/coefficients.json \
+  DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-storage registered_historical_coefficients -- --ignored
+```
+
+历史证据 `repair` 成功仅代表处理结束；来源失败、缺文件、覆盖不足仍须检查新版本清单。新版本不得因单次查询成功而隐去未解决的日期或事件类别缺口。
+
+失败补采的保守合并：`repair` 保留原来源失败，本次缺原文/解析失败写入 `repair_coverage.json.reparse_failures`；只有已验证分红原文能解除对应 `history API failed`，不能清除配股待审等独立问题。`retry` 保留旧事件并检查新旧分红的金额、登记日和遗漏，冲突写入失败；旧 typed 特殊事件不被普通分红接口替换。旧接口的重试不继承结构化/全类别覆盖声明，须补齐对应证据后才能通过新的执行准入。
+
+## 通达信公司行动交叉核对
+
+`tdxaidata` 的 `get_divid_factors` 使用原生 `GetCWDATAInStr` 除权参考。核对时读取带SHA256回执的原生GB18030回复，校验Date/Type/Value长度，按日期及每10股金额、送转、配股比例和价格比较。空Value且没有Date不证明历史为空；SDK填充后的列不作为完整性证据。现有适配器只发布参考条款，缺少完整账户事件元数据的结果仍带失败说明，不能直接解除事件覆盖阻断。
+
+同日年度／特别分红可能分别列示，来源金额精度也可能不同；交叉核对须保留组成项和原始精度，不能任取一条或统一放宽容差。匹配日期和金额只提供修订候选；缺失日期需进一步核验，配股参考不会使当前账户引擎支持配股。
+
+```sh
+jfquant data collect --kind actions --provider tdxaidata --start 2000-01-04 --end 2026-10-12 \
+  --instruments SH600005,SH600008,SH600025,SH600039
+```
+
+部分证券返回不完整时任务可标记failed；已捕获的原生请求回执保留在对应staging/raw中，仅用于诊断，不发布为完整数据版本。
+
+## 公司行动格式6与确定性核对
+
+公共接口为 `corporate_actions::reconcile::apply`，通过包内采集进程的固定 `reconcile_actions`
+操作调用纯规则 `collectors/jfquant_collectors/reconcile.py`；在线巨潮采集与离线重放使用同一实现。
+输入冻结来源版本、证据任务及交易日历；读取和执行前验证版本/文件哈希。历史通达信回执只允许
+已审核的协议9实现或当前协议10实现，校验单证券检查点、SDK身份、原生请求区间及原文字节。
+批次失败不改变已完整单证券回执；未形成完整回执、空回复和截断表均不取得覆盖资格。
+
+```mermaid
+flowchart LR
+  E[哈希校验的原始证据] --> C[分类 / Decimal单位标准化]
+  C --> D[同源去重 / 可区分组成项合计]
+  D --> X[跨源核对 / 唯一日期补证]
+  X --> V[新不可变格式6 / 核对回执]
+  V --> A[普通问题阻断 / 特殊事件警告跳过]
+```
+
+格式6金额和新增股份比例为十进制文本，公告日、登记日、到账日、上市日允许null，普通事件
+除权日必需。规范事件每证券/除权日唯一；现金合计后投影Dividend，新增股份合计后投影
+`Split(1+合计比例)`。原股份基数不同、组成项身份不明或更正替代关系不明时不合并；跨来源不相加。
+新浪仅覆盖一个已区分组成项时记为部分覆盖。精度表当前为空：不存在已审核精度契约的接近金额
+仍需实施公告，不按显示位数扩大容差。训练因子null及训练价口径不改变。
+
+`raw/reconciliation-v1.json` 保存规则版本、基础版本哈希、证据哈希、输入组成项与确定性决策；
+新版本保留规范事件、稳定问题ID、类别及证据引用。重复重放规范事件/决策一致，任务时间与基础版本
+引用可以不同。已核实公告修订保留；`RevisionRequest.resolve_issues` 按稳定ID、原问题序列化哈希及
+对应证券/日期/字段证据关闭普通问题，不能用无关修订清除整段历史。旧核对回执归档，旧文件不修改。
+未知历史实现、证据篡改、未完成任务或取消不能发布完整版本。
+
+验收：先构建包内运行时，再运行 `DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-storage`。
+Python fixture涵盖年度＋特别分红、重复、更正、部分覆盖、未知精度、税后金额、唯一/多义日期及
+历史特殊事件；Rust覆盖不可变重放、失败批次单证券证据、正文篡改与规范事件篡改。
+
+原始JSON数字字面量和规范值分别存储：`cninfo`保留可与HTTP正文逐项核验的原结构，
+`cninfo_decimal_records`仅把三项每10股金额/股份字段投影为原数字文本。Rust用RawValue核对原始
+字面量，不能把9.7000无证据地改成9.7或9.70000000000001。格式5版本签名按原始数值格式验证，
+`ActionBundle::version_content`避免只读适配改变既有目录签名。
+
+证据任务支持通达信原生参考及公告的完整单证券回执；巨潮主证据由`--actions`版本读取。
+公告即使所在批次失败，也只复制已经完整校验的单证券回执、HTTP/PDF/文本与哈希映射，保持
+candidate_only，不凭候选文件清除问题或声称覆盖。仍使用原`ReviseActions`字段证据流程。
+历史采集实现登记集中在collector的只读兼容表，实时采集握手始终要求当前实现。
+
+证券目录机构ID是不透明键。已核验的数字`99...`机构ID与历史`gssh/gssz`格式均可读取；同时
+约束代码、A股类别、机构唯一性、交易所查询列及返回身份，不能凭机构ID前缀把有效记录误报为冲突。
+格式6不再调用旧补充/重解析入口；应使用统一核对或公告修订。旧代码仅保留历史兼容用途。

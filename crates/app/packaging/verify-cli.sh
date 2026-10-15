@@ -35,7 +35,7 @@ run_cli research run --template "$recipe" --market "$market" --actions "$actions
 research_id="$(plutil -extract task_id raw -o - "$check_root/research-submission.json")"
 run_cli jobs wait "$research_id" --timeout 60 > "$check_root/research.json"
 run_cli jobs results "$research_id" > "$check_root/online-results.json"
-[ "$(plutil -extract schema_version raw -o - "$check_root/online-results.json")" = 14 ]
+[ "$(plutil -extract schema_version raw -o - "$check_root/online-results.json")" = 16 ]
 [ "$(plutil -extract execution.mode raw -o - "$check_root/online-results.json")" = akquant_ex_date ]
 "$app/Contents/Resources/python/bin/python3" -I -B - "$check_root/online-results.json" <<'PY'
 import hashlib
@@ -118,7 +118,7 @@ run_cli jobs results "$training_id" > "$check_root/train-results.json"
 run_cli research backtest --training "$training_id" --actions "$actions" --template "$recipe" > "$check_root/backtest-submit.json"
 backtest_id="$(plutil -extract task_id raw -o - "$check_root/backtest-submit.json")"
 run_cli jobs wait "$backtest_id" --timeout 60 > "$check_root/backtest-wait.json"
-[ "$(plutil -extract results.schema_version raw -o - "$check_root/backtest-wait.json")" = 14 ]
+[ "$(plutil -extract results.schema_version raw -o - "$check_root/backtest-wait.json")" = 15 ]
 
 # A provider profile is explicit and supported only by a frozen original Qlib source.
 run_cli research demo > "$check_root/qlib-demo-submit.json"

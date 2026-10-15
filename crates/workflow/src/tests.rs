@@ -70,7 +70,10 @@ fn synthetic_annual_recipe_runs_native_model_and_dated_real_share_account() {
         .begin(c.id, "synthetic research", snapshot(&w, &request).unwrap())
         .unwrap();
     let result = execute(&w, &request, &run, &c).unwrap();
-    assert_eq!(result.details["schema_version"], 14);
+    assert_eq!(
+        result.details["schema_version"],
+        crate::research::backtest::RESEARCH_SCHEMA_VERSION
+    );
     assert!(
         result.details["aggregate"]["total_return"]
             .as_f64()
@@ -299,8 +302,15 @@ fn unexplained_historical_security_codes_are_readiness_issues_not_training_failu
         .unwrap();
     let out = execute(&w, &request, &r, &c).unwrap();
     assert_eq!(out.details["ready"], false);
-    assert!(out.details["market_issues"].get("SHT00018").is_some());
-    assert!(out.details["factor_basis_issues"].get("SHT00018").is_some());
+    assert_eq!(
+        out.details["references"]["input_issues"]["path"],
+        "input_issues.json"
+    );
+    let issues: Value =
+        serde_json::from_slice(&fs::read(w.resolve(&r.output).join("input_issues.json")).unwrap())
+            .unwrap();
+    assert!(issues["market_issues"].get("SHT00018").is_some());
+    assert!(issues["factor_basis_issues"].get("SHT00018").is_some());
     assert!(!w.resolve(&r.output).join("factor-cache").exists());
 }
 
@@ -345,9 +355,12 @@ fn independent_coefficient_conflicts_in_training_history_stop_before_cache_and_t
     let out = execute(&w, &request, &r, &c).unwrap();
     assert_eq!(out.details["ready"], false);
     assert!(
-        out.details["adjustment_issues"][demo::fixture_security_id("SH600000")]
-            .to_string()
-            .contains("unexplained coefficient change")
+        serde_json::from_slice::<Value>(
+            &fs::read(w.resolve(&r.output).join("input_issues.json")).unwrap()
+        )
+        .unwrap()["adjustment_issues"][demo::fixture_security_id("SH600000")]
+        .to_string()
+        .contains("unexplained coefficient change")
     );
     assert_eq!(
         serde_json::from_value::<Vec<String>>(out.details["affected_factor_ids"].clone()).unwrap(),
@@ -412,7 +425,10 @@ fn historical_adjustment_terms_do_not_require_old_settlement_dates_but_execution
         .begin(c.id, "historical terms", snapshot(&w, &request).unwrap())
         .unwrap();
     let out = execute(&w, &request, &r, &c).unwrap();
-    assert_eq!(out.details["schema_version"], 14);
+    assert_eq!(
+        out.details["schema_version"],
+        crate::research::backtest::RESEARCH_SCHEMA_VERSION
+    );
     assert_eq!(out.details["annual_reports"][0]["year"], 2010);
     t = demo::create_canonical(&w).unwrap().2;
     let c = context();
@@ -468,7 +484,10 @@ fn source_adjusted_quotes_are_audit_only_and_report_provenance_is_required() {
         )
         .unwrap();
     let out = execute(&w, &request, &r, &c).unwrap();
-    assert_eq!(out.details["schema_version"], 14);
+    assert_eq!(
+        out.details["schema_version"],
+        crate::research::backtest::RESEARCH_SCHEMA_VERSION
+    );
     let input = &out.details["execution"]["price_inputs"]["securities"]
         [demo::fixture_security_id("SH600000")];
     let frozen = if input["source"].is_object() {
@@ -568,7 +587,7 @@ fn missing_reverse_special_and_unpriced_distribution_terms_block_every_entry_bef
             let mut book: ActionBundle = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
             let mut event = book.actions[0].clone();
             event.id = format!("{}:2007-01-02", event.instrument);
-            event.announced = "2007-01-01".parse().unwrap();
+            event.announced = Some("2007-01-01".parse().unwrap());
             event.record_date = event.announced;
             event.ex_date = "2007-01-02".parse().unwrap();
             event.pay_date = Some("2007-01-03".parse().unwrap());
@@ -780,7 +799,7 @@ fn independent_training_survives_settlement_gap_and_repaired_backtest_does_not_r
         .for_each(|a| a.pay_date = Some("2009-01-05".parse().unwrap()));
     atomic_json(&path, &book).unwrap();
     let fixed = w.register(&path).unwrap();
-    let (_, result) = execute_stage(
+    let (cached_run, result) = execute_stage(
         &w,
         WorkflowRequest::BacktestResearch {
             execution: Some(Box::new(execution)),
@@ -790,6 +809,13 @@ fn independent_training_survives_settlement_gap_and_repaired_backtest_does_not_r
         },
     );
     let details = result.unwrap().details;
+    let cached = w.resolve(cached_run.output);
+    let receipt: Value =
+        serde_json::from_slice(&fs::read(cached.join("prediction_manifest.json")).unwrap())
+            .unwrap();
+    assert_eq!(receipt["cache_hit"], true);
+    assert!(!cached.join("prediction-factor-cache").exists());
+
     assert_eq!(details["backtest_status"], "completed");
     assert_eq!(details["execution"]["initial_cash_cny"], 500_000.0);
     assert_eq!(details["execution"]["research_config"]["top_n"], 1);
@@ -805,7 +831,7 @@ fn independent_training_survives_settlement_gap_and_repaired_backtest_does_not_r
         fs::read(root.join("fold-0000/model.txt")).unwrap(),
         original
     );
-    book.actions[0].cash_per_share = 0.2;
+    book.actions[0].cash_per_share = (0.2).to_string();
     atomic_json(&path, &book).unwrap();
     let changed = w.register(&path).unwrap();
     let (_, out) = execute_stage(
@@ -824,7 +850,7 @@ fn independent_training_survives_settlement_gap_and_repaired_backtest_does_not_r
     );
 }
 #[test]
-fn known_execution_conflict_stops_backtest_and_preserves_completed_models() {
+fn known_execution_conflict_blocks_before_training() {
     let tmp = tempfile::tempdir().unwrap();
     let w = Workspace::open(tmp.path()).unwrap();
     let (m, a, t) = demo::create(&w).unwrap();
@@ -832,6 +858,9 @@ fn known_execution_conflict_stops_backtest_and_preserves_completed_models() {
     let mut book = ActionBundle::read(&path).unwrap();
     book.execution_issues
         .push(analytics_storage::execution_data::ExecutionIssue {
+            id: String::new(),
+            event_category: String::new(),
+            evidence: Vec::new(),
             instrument: book.actions[0].instrument.clone(),
             announced: None,
             dates: analytics_core::DateRange {
@@ -852,13 +881,9 @@ fn known_execution_conflict_stops_backtest_and_preserves_completed_models() {
             audit_only: false,
         },
     );
-    assert!(
-        out.unwrap_err()
-            .to_string()
-            .contains("execution_event_issue")
-    );
+    assert!(out.unwrap_err().to_string().contains("data_not_ready"));
     let p = w.resolve(&run.output);
-    assert!(p.join("training.json").exists());
+    assert!(!p.join("training.json").exists());
     assert!(!p.join("summary.json").exists());
     assert!(p.join("execution_readiness.json").exists());
 }
@@ -880,6 +905,20 @@ fn unknown_special_coverage_is_explicit_warning_in_upstream_event_mode() {
     let p = w.resolve(a.path);
     let mut book = ActionBundle::read(&p).unwrap();
     book.coverage.clear();
+    for id in &book.queried_symbols {
+        book.structured_coverage.insert(
+            id.clone(),
+            analytics_storage::execution_data::StructuredCoverage {
+                dates: analytics_core::DateRange {
+                    start: "2007-01-02".parse().unwrap(),
+                    end: "2010-01-12".parse().unwrap(),
+                },
+                source: "akshare.cninfo/implemented/per-ten-shares-v1".into(),
+                evidence: vec!["fixture".into()],
+            },
+        );
+    }
+
     atomic_json(&p, &book).unwrap();
     let a = w.register(&p).unwrap();
     let (run, out) = execute_stage(
@@ -961,7 +1000,7 @@ fn supplier_account_policy_can_trade_without_manual_categories_and_audited_stays
             },
         );
         assert!(out.unwrap_err().to_string().contains("data_not_ready"));
-        assert!(w.resolve(run.output).join("training.json").exists());
+        assert!(!w.resolve(run.output).join("training.json").exists());
     }
 }
 #[test]
@@ -1049,5 +1088,266 @@ fn relocated_workspace_reuses_models_from_verified_relative_market_version() {
     assert_eq!(
         original,
         fs::read(w.resolve(run.output).join("fold-0000/model.txt")).unwrap()
+    );
+}
+
+#[test]
+fn changed_model_parameters_reuse_verified_factor_shards_and_corruption_blocks() {
+    let tmp = tempfile::tempdir().unwrap();
+    let w = Workspace::open(tmp.path()).unwrap();
+    let (m, a, mut t) = demo::create(&w).unwrap();
+    let (first, out) = execute_stage(
+        &w,
+        WorkflowRequest::TrainResearch {
+            template: Box::new(t.clone()),
+            market: m.id.clone(),
+            actions: Some(a.id.clone()),
+        },
+    );
+    out.unwrap();
+    t.config
+        .training
+        .parameters
+        .insert("learning_rate".into(), "0.123".into());
+    let (second, out) = execute_stage(
+        &w,
+        WorkflowRequest::TrainResearch {
+            template: Box::new(t.clone()),
+            market: m.id.clone(),
+            actions: Some(a.id.clone()),
+        },
+    );
+    out.unwrap();
+    let cache = w.resolve(second.output).join("factor-cache");
+    let receipt: Value =
+        serde_json::from_slice(&fs::read(cache.join("2007.receipt.json")).unwrap()).unwrap();
+    assert_eq!(receipt["cache_hit"], true);
+    assert_eq!(
+        fs::read(cache.join("2007.bin")).unwrap(),
+        fs::read(w.resolve(first.output).join("factor-cache/2007.bin")).unwrap()
+    );
+    let shared = w.root().join(".jfquant/runs/.factor-shards-v1").join(
+        receipt["signature"]
+            .as_str()
+            .unwrap()
+            .trim_start_matches("sha256:"),
+    );
+    fs::write(shared.join("features.parquet"), b"damaged").unwrap();
+    let (_, out) = execute_stage(
+        &w,
+        WorkflowRequest::TrainResearch {
+            template: Box::new(t),
+            market: m.id,
+            actions: Some(a.id),
+        },
+    );
+    assert!(
+        out.unwrap_err()
+            .to_string()
+            .contains("factor shard content/identity mismatch")
+    );
+}
+
+#[test]
+fn cancellation_after_prediction_publication_preserves_models_and_retry_reuses_predictions() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let w = Workspace::open(tmp.path()).unwrap();
+    let (m, a, t) = demo::create(&w).unwrap();
+    let (trained, out) = execute_stage(
+        &w,
+        WorkflowRequest::TrainResearch {
+            template: Box::new(t),
+            market: m.id,
+            actions: Some(a.id.clone()),
+        },
+    );
+    out.unwrap();
+    let source = w.resolve(trained.output);
+    let before = fs::read(source.join("fold-0000/model.txt")).unwrap();
+    let flag = Arc::new(AtomicBool::new(false));
+    let callback = flag.clone();
+    let ctx = TaskContext::new(Uuid::new_v4(), flag, move |message| {
+        if message == "AKQuant 连续账户回测" {
+            callback.store(true, Ordering::Relaxed);
+        }
+    });
+    let cancelled = w.resolve(".jfquant/runs/cancelled-account");
+    assert!(
+        crate::research::backtest::backtest_from_training(
+            &source,
+            &cancelled,
+            &w.resolve(&a.path),
+            &ctx
+        )
+        .is_err()
+    );
+    let stages: Value =
+        serde_json::from_slice(&fs::read(cancelled.join("stages.json")).unwrap()).unwrap();
+    assert_eq!(stages["training"], "completed");
+    assert_eq!(stages["prediction"], "completed");
+    assert_eq!(stages["backtest"], "cancelled");
+    assert!(!cancelled.join("summary.json").exists());
+    let reports: Value =
+        serde_json::from_slice(&fs::read(cancelled.join("fold_reports.json")).unwrap()).unwrap();
+    assert!(
+        reports
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["performance"].is_null())
+    );
+    let retry = w.resolve(".jfquant/runs/retried-account");
+    crate::research::backtest::backtest_from_training(
+        &source,
+        &retry,
+        &w.resolve(&a.path),
+        &context(),
+    )
+    .unwrap();
+    let receipt: Value =
+        serde_json::from_slice(&fs::read(retry.join("prediction_manifest.json")).unwrap()).unwrap();
+    assert_eq!(receipt["cache_hit"], true);
+    assert!(!retry.join("prediction-factor-cache").exists());
+    assert_eq!(
+        fs::read(source.join("fold-0000/model.txt")).unwrap(),
+        before
+    );
+    let shared = w.root().join(".jfquant/runs/.predictions-v1").join(
+        receipt["signature"]
+            .as_str()
+            .unwrap()
+            .trim_start_matches("sha256:"),
+    );
+    fs::write(shared.join("predictions.parquet"), b"truncated").unwrap();
+    let damaged = w.resolve(".jfquant/runs/damaged-cache");
+    assert!(
+        crate::research::backtest::backtest_from_training(
+            &source,
+            &damaged,
+            &w.resolve(&a.path),
+            &context()
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("prediction cache damaged")
+    );
+    assert!(!damaged.join("summary.json").exists());
+}
+
+#[test]
+fn identified_special_event_warns_and_trades_while_ordinary_conflict_stays_blocked() {
+    let tmp = tempfile::tempdir().unwrap();
+    let w = Workspace::open(tmp.path()).unwrap();
+    let (m, a, t) = demo::create(&w).unwrap();
+    let path = w.resolve(a.path);
+    let mut book = ActionBundle::read(&path).unwrap();
+    book.execution_issues
+        .push(analytics_storage::execution_data::ExecutionIssue {
+            id: "fixture-rights".into(),
+            instrument: "SH600000".into(),
+            announced: Some("2009-01-05".parse().unwrap()),
+            dates: analytics_core::DateRange {
+                start: "2009-01-08".parse().unwrap(),
+                end: "2009-01-08".parse().unwrap(),
+            },
+            code: "execution_event_unsupported_skipped".into(),
+            event_category: "rights_issue".into(),
+            evidence: vec!["fixture-native-terms".into()],
+            message: "identified rights issue".into(),
+        });
+    atomic_json(&path, &book).unwrap();
+    let a = w.register(&path).unwrap();
+    let (run, result) = execute_stage(
+        &w,
+        WorkflowRequest::Research {
+            template: Box::new(t.clone()),
+            market: m.id.clone(),
+            actions: Some(a.id),
+            audit_only: false,
+        },
+    );
+    let result = result.unwrap().details;
+    assert_eq!(result["backtest_status"], "completed");
+    assert_eq!(result["unsupported_event_policy"], "warn_and_skip");
+    assert_eq!(result["event_simulation_complete"], false);
+    assert_eq!(result["skipped_event_count"], 1);
+    assert!(result["skipped_events"][0]["held_across_event"].is_boolean());
+    let report = fs::read_to_string(w.resolve(run.output).join("report.md")).unwrap();
+    assert!(report.contains("回测完成，含未模拟事件"));
+    book.execution_issues[0].code = "source_event_conflict".into();
+    book.execution_issues[0].event_category = "distribution".into();
+    atomic_json(&path, &book).unwrap();
+    let a = w.register(&path).unwrap();
+    let (run, result) = execute_stage(
+        &w,
+        WorkflowRequest::Research {
+            template: Box::new(t),
+            market: m.id,
+            actions: Some(a.id),
+            audit_only: false,
+        },
+    );
+    assert!(result.unwrap_err().to_string().contains("data_not_ready"));
+    assert!(!w.resolve(run.output).join("summary.json").exists());
+}
+
+#[test]
+fn legacy_action_version_hashes_original_numeric_format_without_mutating_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let w = Workspace::open(tmp.path()).unwrap();
+    let (m, a, t) = demo::create(&w).unwrap();
+    let path = w.resolve(a.path);
+    let mut raw: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for a in raw["actions"].as_array_mut().unwrap() {
+        for field in ["cash_per_share", "shares_per_share"] {
+            a[field] = json!(a[field].as_str().unwrap().parse::<f64>().unwrap());
+        }
+    }
+    let bytes = serde_json::to_vec(&raw).unwrap();
+    fs::write(&path, &bytes).unwrap();
+    let version = w.register(&path).unwrap();
+    assert_eq!(version.signature, signature(&raw).unwrap());
+    snapshot(
+        &w,
+        &WorkflowRequest::Research {
+            template: Box::new(t),
+            market: m.id,
+            actions: Some(version.id),
+            audit_only: true,
+        },
+    )
+    .unwrap();
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+}
+
+#[test]
+fn format_six_cannot_bypass_reconciliation_through_legacy_repair() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = Workspace::open(dir.path()).unwrap();
+    let (_, a, _) = demo::create(&w).unwrap();
+    let path = w.resolve(a.path);
+    let mut book = ActionBundle::read(&path).unwrap();
+    book.schema_version = 6;
+    atomic_json(&path, &book).unwrap();
+    let a = w.register(&path).unwrap();
+    let (_, result) = execute_stage(
+        &w,
+        WorkflowRequest::SupplementActions {
+            actions: a.id,
+            method: "repair".into(),
+            start: "2009-01-02".parse().unwrap(),
+            end: "2010-01-12".parse().unwrap(),
+            resume: None,
+        },
+    );
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("format_6_requires_reconciliation")
     );
 }

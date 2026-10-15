@@ -81,6 +81,21 @@ class AnnouncementTests(unittest.TestCase):
         ):
             security_identity("SH600000")
 
+    def test_numeric_institution_id_is_opaque_but_security_and_venue_still_match(self):
+        from jfquant_collectors.announcements import security_identity
+
+        table = [{"code": "600025", "category": "A股", "orgId": "9900030360"}]
+        with patch("jfquant_collectors.announcements.security_directory", return_value=table):
+            self.assertEqual(security_identity("SH600025"), "9900030360")
+            with self.assertRaises(ValueError):
+                security_identity("SZ600025")
+        for org in ["gssz0600025", "unreviewed-id"]:
+            with patch(
+                "jfquant_collectors.announcements.security_directory",
+                return_value=[{**table[0], "orgId": org}],
+            ), self.assertRaises(ValueError):
+                security_identity("SH600025")
+
     def test_identity_and_truncated_pagination_fail_without_completing(self):
         request = {
             "cache_dir": "/unused/cache",

@@ -38,6 +38,17 @@ pub struct FailureResolution {
     /// Reviewed explanation.
     pub reason: String,
 }
+/// Resolve one ordinary issue using an identity/date-matched implementation revision.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IssueResolution {
+    /// Stable issue identity from format 6 reconciliation.
+    pub id: String,
+    /// Exact serialized issue hash, preventing stale or overbroad closure.
+    pub expected_sha256: String,
+    /// Evidence-based reason for closing this particular issue.
+    pub reason: String,
+}
 /// Shared UI/CLI correction request. Paths resolve within the workspace in workflow.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -50,6 +61,9 @@ pub struct RevisionRequest {
     pub events: Vec<EventRevision>,
     /// Explicit source-failure resolutions.
     pub resolve_failures: Vec<FailureResolution>,
+    /// Exact ordinary issues resolved by the provided event revisions.
+    #[serde(default)]
+    pub resolve_issues: Vec<IssueResolution>,
     /// Audited category coverage. Empty does not claim completeness.
     #[serde(default)]
     pub coverage_reviews: Vec<CoverageReview>,
@@ -80,13 +94,21 @@ fn digest(value: &impl Serialize) -> io::Result<String> {
 /// Read a captured document, rehash its bytes and text and reject non-implementation candidates.
 pub fn verified_documents(manifest: &Path) -> io::Result<BTreeMap<String, (Value, String)>> {
     let value: Value = serde_json::from_slice(&fs::read(manifest)?).map_err(invalid)?;
+    verified_document_records(
+        manifest
+            .parent()
+            .ok_or_else(|| invalid("missing announcement root"))?,
+        &value,
+    )
+}
+pub(super) fn verified_document_records(
+    base: &Path,
+    value: &Value,
+) -> io::Result<BTreeMap<String, (Value, String)>> {
     if value["schema_version"] != 2 {
         return Err(invalid("unsupported announcement evidence format"));
     }
-    let root = manifest
-        .parent()
-        .ok_or_else(|| invalid("missing announcement root"))?
-        .join("raw");
+    let root = base.join("raw");
     let mut captured = Vec::new();
     for (id, expected) in value["receipts"]
         .as_object()
@@ -98,7 +120,7 @@ pub fn verified_documents(manifest: &Path) -> io::Result<BTreeMap<String, (Value
             return Err(invalid("announcement metadata receipt mismatch"));
         }
         let shard: Value = serde_json::from_slice(&bytes).map_err(invalid)?;
-        crate::collector::verify_http_receipts(manifest.parent().unwrap(), &shard["evidence"])?;
+        crate::collector::verify_http_receipts(base, &shard["evidence"])?;
         let documents = shard["evidence"]["documents"]
             .as_array()
             .ok_or_else(|| invalid("missing captured document metadata"))?;
@@ -312,7 +334,7 @@ pub fn apply(
                 .ok_or_else(|| invalid("missing announcement date"))?
                 .parse()
                 .map_err(invalid)?;
-            if announced > a.record_date {
+            if a.record_date.is_some_and(|d| announced > d) {
                 return Err(invalid(
                     "implementation announcement after entitlement date",
                 ));
@@ -336,6 +358,43 @@ pub fn apply(
         }
         bundle.failures.remove(&resolution.instrument);
     }
+    for resolution in &request.resolve_issues {
+        let issue = source
+            .execution_issues
+            .iter()
+            .find(|i| !i.id.is_empty() && i.id == resolution.id)
+            .ok_or_else(|| invalid("issue resolution requires a stable existing issue"))?;
+        if resolution.reason.trim().is_empty()
+            || resolution.expected_sha256 != digest(issue)?
+            || !matches!(
+                issue.code.as_str(),
+                "source_event_conflict"
+                    | "cninfo_history_gap"
+                    | "cninfo_event_date_missing"
+                    | "cninfo_event_chronology_conflict"
+                    | "event_amount_missing"
+                    | "event_amount_invalid"
+                    | "distribution_basis_unresolved"
+            )
+            || !request.events.iter().any(|revision| {
+                let a = &revision.replacement;
+                a.instrument == issue.instrument
+                    && (if issue.dates.start == issue.dates.end {
+                        a.ex_date == issue.dates.start
+                    } else {
+                        issue.announced.is_some() && a.announced == issue.announced
+                    })
+                    && (revision.fields.contains_key("ex_date")
+                        || revision.fields.contains_key("cash_per_share")
+                        || revision.fields.contains_key("shares_per_share"))
+            })
+        {
+            return Err(invalid(
+                "issue resolution requires matching field/date evidence and stale issue hash",
+            ));
+        }
+        bundle.execution_issues.retain(|i| i.id != resolution.id);
+    }
     // Copy and hash all source evidence before publishing the corrected bundle.
     fs::create_dir(output)?;
     fs::create_dir(output.join("raw"))?;
@@ -346,6 +405,17 @@ pub fn apply(
         }
         fs::write(output.join("raw").join(name), bytes)?;
     }
+    // Archive the preceding normalization receipt: this publication is superseded
+    // by explicit, hashed announcement revisions, rather than provider replay.
+    if let Some(hash) = bundle.raw_sha256.remove("reconciliation-v1.json") {
+        let archive = format!("previous-reconciliation-{}.json", &hash[7..]);
+        fs::rename(
+            output.join("raw/reconciliation-v1.json"),
+            output.join("raw").join(&archive),
+        )?;
+        bundle.raw_sha256.insert(archive, hash);
+    }
+    bundle.schema_version = 6;
     let selected_documents: Vec<_> = used.iter().map(|id| documents[id].0.clone()).collect();
     let evidence_root = request.evidence_manifest.parent().unwrap();
     let mut collection_receipts = BTreeMap::new();
@@ -451,13 +521,13 @@ mod tests {
         let mut a = CorporateAction {
             id: "SH600000:2024-06-04".into(),
             instrument: "SH600000".into(),
-            announced: "2024-06-01".parse().unwrap(),
-            record_date: "2024-06-03".parse().unwrap(),
+            announced: Some("2024-06-01".parse().unwrap()),
+            record_date: Some("2024-06-03".parse().unwrap()),
             ex_date: "2024-06-04".parse().unwrap(),
             pay_date: None,
             listing_date: None,
-            cash_per_share: 1.,
-            shares_per_share: 0.,
+            cash_per_share: (1.).to_string(),
+            shares_per_share: (0.).to_string(),
             terms: Default::default(),
             source: "https://static.cninfo.com.cn/finalpage/2024-06-01/a.PDF".into(),
         };
@@ -475,12 +545,12 @@ mod tests {
             failures: BTreeMap::from([(a.instrument.clone(), "sources disagree".into())]),
             raw_sha256: BTreeMap::new(),
         };
-        let text = "verified actual cash payment 2024-06-06";
+        let text = "verified actual cash payment 2024-06-06; gross dividend per share 0.8 CNY";
         fs::write(root.join("raw/a.txt"), text).unwrap();
         fs::write(root.join("raw/a.pdf"), b"%PDF-evidence").unwrap();
         let document = serde_json::json!({"id":"a","instrument":a.instrument,"announced":a.announced,"url":a.source,"pdf":"a.pdf","pdf_sha256":sha(b"%PDF-evidence"),"text":"a.txt","text_sha256":sha(text.as_bytes()),"candidates":{"stage":"implementation"}});
         fs::write(root.join("raw/http-pdf.body"), b"%PDF-evidence").unwrap();
-        let shard = serde_json::json!({"instrument":"SH600000","evidence":{"documents":[document.clone()],"http_receipts":[{"url":a.source,"status":200,"filename":"http-pdf.body","sha256":sha(b"%PDF-evidence")}]}});
+        let shard = serde_json::json!({"instrument":"SH600000","evidence":{"pagination_complete":true,"documents":[document.clone()],"http_receipts":[{"url":a.source,"status":200,"filename":"http-pdf.body","sha256":sha(b"%PDF-evidence")}]}});
         let shard_bytes = serde_json::to_vec(&shard).unwrap();
         fs::write(
             root.join("raw/SH600000-actions-structured.json"),
@@ -493,6 +563,24 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
+        // A failed batch can still contain a complete, immutable security receipt.
+        let owner = serde_json::json!({"operation":"announcements","collector_protocol":9,"collector_signature":crate::collector::REVIEWED_COLLECTOR_V9,"normalization":crate::adjustment::NORMALIZATION,"dependencies_sha256":format!("sha256:{:x}",Sha256::digest(include_bytes!("../../collectors/requirements.lock"))),"python_runtime_sha256":format!("sha256:{:x}",Sha256::digest(include_bytes!("../../collectors/python-runtime.lock.json"))),"request":{"provider":"akshare","adjustment_source":"sina_hfq","start":"2024-06-01","end":"2024-06-30","instruments":["SH600000"],"source_bindings":{},"benchmarks":[],"universes":[]}});
+        fs::write(root.join("owner.json"), serde_json::to_vec(&owner).unwrap()).unwrap();
+        fs::write(
+            root.join("receipts.json"),
+            serde_json::to_vec(&serde_json::json!({"SH600000":sha(&shard_bytes)})).unwrap(),
+        )
+        .unwrap();
+        let manifest = fs::read(root.join("announcements.json")).unwrap();
+        fs::remove_file(root.join("announcements.json")).unwrap();
+        let frozen = root.join("frozen-evidence");
+        fs::create_dir_all(frozen.join("raw")).unwrap();
+        let name =
+            super::super::reconcile::announcement_evidence(root, &frozen, &mut BTreeMap::new())
+                .unwrap();
+        assert!(frozen.join("raw").join(name).exists());
+        assert!(!root.join("announcements.json").exists());
+        fs::write(root.join("announcements.json"), manifest).unwrap();
         let original = digest(&a).unwrap();
         a.pay_date = Some("2024-06-06".parse().unwrap());
         let mut request = RevisionRequest {
@@ -513,6 +601,7 @@ mod tests {
                     },
                 )]),
             }],
+            resolve_issues: vec![],
             resolve_failures: vec![FailureResolution {
                 instrument: a.instrument.clone(),
                 expected_failure: "sources disagree".into(),
@@ -524,6 +613,41 @@ mod tests {
         assert!(book.actions[0].pay_date.is_none());
         assert_eq!(repaired.actions[0].pay_date, a.pay_date);
         assert!(repaired.raw_sha256.contains_key("http-pdf.body"));
+        let mut conflicted = book.clone();
+        let issue = crate::execution_data::ExecutionIssue {
+            id: "ordinary-conflict".into(),
+            instrument: a.instrument.clone(),
+            announced: a.announced,
+            dates: analytics_core::DateRange {
+                start: a.ex_date,
+                end: a.ex_date,
+            },
+            code: "source_event_conflict".into(),
+            event_category: "distribution".into(),
+            evidence: vec!["original-terms".into()],
+            message: "cash conflict".into(),
+        };
+        conflicted.execution_issues.push(issue.clone());
+        let mut correction = request.clone();
+        correction.events[0].replacement.cash_per_share = "0.8".into();
+        correction.events[0].fields.insert(
+            "cash_per_share".into(),
+            FieldEvidence {
+                document_id: "a".into(),
+                quote: text.into(),
+                unit: "gross_CNY_per_old_share".into(),
+            },
+        );
+        correction.resolve_issues.push(IssueResolution {
+            id: issue.id.clone(),
+            expected_sha256: digest(&issue).unwrap(),
+            reason: "implementation resolves this cash amount".into(),
+        });
+        let fixed = apply(&conflicted, root, &correction, &root.join("cash-fixed")).unwrap();
+        assert!(fixed.execution_issues.is_empty());
+        correction.resolve_issues[0].expected_sha256 = "stale".into();
+        assert!(apply(&conflicted, root, &correction, &root.join("stale-issue")).is_err());
+        assert!(!root.join("stale-issue").exists());
         let mut noop = request.clone();
         noop.events[0].replacement = book.actions[0].clone();
         assert!(apply(&book, root, &noop, &root.join("noop")).is_err());
@@ -578,6 +702,7 @@ mod coverage_tests {
             schema_version: 1,
             evidence_manifest: evidence.join("announcements.json"),
             events: vec![],
+            resolve_issues: vec![],
             resolve_failures: vec![],
             coverage_reviews: vec![CoverageReview {
                 instrument: "SH600000".into(),

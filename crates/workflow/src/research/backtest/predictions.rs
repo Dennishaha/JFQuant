@@ -1,0 +1,240 @@
+//! Atomic, hash-verified OOS predictions; account inputs are deliberately excluded.
+use super::*;
+use analytics_core::schedule::ResolvedFold;
+use arrow_array::{Array, Float64Array, StringArray};
+type Restored = (Vec<(Date, String, f64)>, Vec<FoldReport>, serde_json::Value);
+fn identity(request: &ResearchRequest, factors: &str, folds: &[ResolvedFold]) -> Result<String> {
+    let source = request.reuse_training.as_ref().unwrap_or(&request.output);
+    let training: serde_json::Value =
+        serde_json::from_slice(&fs::read(source.join("training.json"))?)?;
+    validate_training_artifact(&training)?;
+    for (i, model) in training["models"]
+        .as_array()
+        .ok_or("model receipts missing")?
+        .iter()
+        .enumerate()
+    {
+        let fold = source.join(format!("fold-{i:04}"));
+        if model["model_sha256"] != file_hash(&fold.join("model.txt"))?
+            || model["manifest_sha256"] != file_hash(&fold.join("manifest.json"))?
+        {
+            return Err("prediction model receipt mismatch".into());
+        }
+    }
+    Ok(format!(
+        "sha256:{:x}",
+        Sha256::digest(serde_json::to_vec(&(
+            "prediction-v1",
+            factors,
+            folds,
+            &training["models"],
+            &training["feature_order"],
+            &request.quality_policy,
+            crate::research::worker::runtime_signature()
+        ))?)
+    ))
+}
+fn root(request: &ResearchRequest, key: &str) -> PathBuf {
+    request
+        .output
+        .parent()
+        .unwrap_or(&request.output)
+        .join(".predictions-v1")
+        .join(key.trim_start_matches("sha256:"))
+}
+pub(super) fn publish(
+    request: &ResearchRequest,
+    factors: &str,
+    folds: &[ResolvedFold],
+    signals: &[(Date, String, f64)],
+    reports: &[FoldReport],
+) -> Result<()> {
+    if signals.iter().any(|(_, _, score)| !score.is_finite()) {
+        return Err("nonfinite prediction cannot be published".into());
+    }
+    let key = identity(request, factors, folds)?;
+    let dest = root(request, &key);
+    if dest.join("manifest.json").exists() {
+        restore(request, factors, folds)?;
+        return Ok(());
+    }
+    let staging = dest.with_extension(format!("{}.partial", uuid::Uuid::new_v4()));
+    fs::create_dir_all(staging.join("sample_masks"))?;
+    super::akquant::table(
+        &staging.join("predictions.parquet"),
+        &["date", "symbol", "score"],
+        vec![
+            std::sync::Arc::new(StringArray::from(
+                signals.iter().map(|x| x.0.to_string()).collect::<Vec<_>>(),
+            )),
+            std::sync::Arc::new(StringArray::from(
+                signals.iter().map(|x| x.1.clone()).collect::<Vec<_>>(),
+            )),
+            std::sync::Arc::new(Float64Array::from(
+                signals.iter().map(|x| x.2).collect::<Vec<_>>(),
+            )),
+        ],
+    )?;
+    save(staging.join("fold_reports.json"), &reports)?;
+    fs::copy(
+        request.output.join("sample_selection.json"),
+        staging.join("sample_selection.json"),
+    )?;
+    let admission: analytics_core::admission::AdmissionReport =
+        serde_json::from_slice(&fs::read(request.output.join("admission.json"))?)?;
+    let decisions = admission
+        .decisions
+        .into_iter()
+        .filter(|d| {
+            matches!(
+                d.code.as_str(),
+                "label_missing_or_outside_split" | "insufficient_finite_features"
+            )
+        })
+        .collect::<Vec<_>>();
+    save(staging.join("sample_decisions.json"), &decisions)?;
+    let mut files = vec![
+        "predictions.parquet".to_owned(),
+        "fold_reports.json".into(),
+        "sample_selection.json".into(),
+        "sample_decisions.json".into(),
+    ];
+    for i in 0..folds.len() {
+        for split in ["train", "validation", "prediction"] {
+            let name = format!("sample_masks/fold-{i:04}-{split}.json");
+            if request.output.join(&name).exists() {
+                fs::copy(request.output.join(&name), staging.join(&name))?;
+                files.push(name);
+            }
+        }
+    }
+    let hashes = files
+        .iter()
+        .map(|name| Ok((name.clone(), file_hash(&staging.join(name))?)))
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    save(
+        staging.join("manifest.json"),
+        &serde_json::json!({"schema_version":1,"signature":key,"rows":signals.len(),"files":hashes}),
+    )?;
+    analytics_core::task::TaskContext::current().check()?;
+    fs::rename(&staging, &dest)?;
+    fs::copy(
+        dest.join("predictions.parquet"),
+        request.output.join("predictions.parquet"),
+    )?;
+    save(
+        request.output.join("prediction_manifest.json"),
+        &serde_json::json!({"schema_version":1,"signature":key,"sha256":file_hash(&dest.join("predictions.parquet"))?,"rows":signals.len(),"status":"completed","cache_hit":false}),
+    )?;
+    Ok(())
+}
+pub(super) fn restore(
+    request: &ResearchRequest,
+    factors: &str,
+    folds: &[ResolvedFold],
+) -> Result<Option<Restored>> {
+    let key = identity(request, factors, folds)?;
+    let dir = root(request, &key);
+    if !dir.join("manifest.json").is_file() {
+        return Ok(None);
+    }
+    let m: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("manifest.json"))?)?;
+    if m["schema_version"] != 1 || m["signature"] != key {
+        return Err("prediction cache identity mismatch".into());
+    }
+    let hashes: BTreeMap<String, String> = serde_json::from_value(m["files"].clone())?;
+    for required in [
+        "predictions.parquet",
+        "sample_selection.json",
+        "sample_decisions.json",
+        "fold_reports.json",
+    ] {
+        if !hashes.contains_key(required) {
+            return Err("prediction cache incomplete".into());
+        }
+    }
+    for (name, hash) in &hashes {
+        if Path::new(name)
+            .components()
+            .any(|c| !matches!(c, std::path::Component::Normal(_)))
+            || file_hash(&dir.join(name))? != *hash
+        {
+            return Err("prediction cache damaged".into());
+        }
+    }
+    // Required split masks are explicit; an incomplete manifest cannot reuse a
+    // prediction produced before the full phase was published.
+    for (i, fold) in folds.iter().enumerate() {
+        for split in ["train", "prediction"]
+            .into_iter()
+            .chain(fold.actual.validation.as_ref().map(|_| "validation"))
+        {
+            if !hashes.contains_key(&format!("sample_masks/fold-{i:04}-{split}.json")) {
+                return Err("prediction cache sample receipt missing".into());
+            }
+        }
+    }
+    let mut signals = vec![];
+    let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+        fs::File::open(dir.join("predictions.parquet"))?,
+    )?;
+    if builder
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().as_str())
+        .ne(["date", "symbol", "score"])
+    {
+        return Err("prediction cache schema mismatch".into());
+    }
+    for batch in builder.build()? {
+        let b = batch?;
+        let dates = b
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or("prediction dates type")?;
+        let ids = b
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or("prediction symbols type")?;
+        let scores = b
+            .column(2)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .ok_or("prediction score type")?;
+        for i in 0..b.num_rows() {
+            if dates.is_null(i)
+                || ids.is_null(i)
+                || scores.is_null(i)
+                || !scores.value(i).is_finite()
+            {
+                return Err("prediction cache missing/nonfinite row".into());
+            }
+            signals.push((
+                dates.value(i).parse()?,
+                ids.value(i).into(),
+                scores.value(i),
+            ));
+        }
+    }
+    if m["rows"] != signals.len() {
+        return Err("prediction cache row count mismatch".into());
+    }
+    let reports: Vec<FoldReport> =
+        serde_json::from_slice(&fs::read(dir.join("fold_reports.json"))?)?;
+    if reports.len() != folds.len() || reports.iter().any(|r| r.performance.is_some()) {
+        return Err("prediction cache fold phase mismatch".into());
+    }
+    let selection = serde_json::from_slice(&fs::read(dir.join("sample_selection.json"))?)?;
+    fs::create_dir_all(request.output.join("sample_masks"))?;
+    for name in hashes.keys() {
+        fs::copy(dir.join(name), request.output.join(name))?;
+    }
+    save(
+        request.output.join("prediction_manifest.json"),
+        &serde_json::json!({"schema_version":1,"signature":key,"sha256":hashes["predictions.parquet"],"rows":signals.len(),"status":"completed","cache_hit":true}),
+    )?;
+    Ok(Some((signals, reports, selection)))
+}

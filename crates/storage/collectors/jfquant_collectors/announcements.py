@@ -39,11 +39,24 @@ def security_identity(symbol):
     ]
     if len(matches) != 1 or not re.fullmatch(r"[A-Za-z0-9_-]+", str(matches[0].get("orgId", ""))):
         raise ValueError("missing/ambiguous disclosure institution identity: " + symbol)
+    # orgId is an opaque directory key. Recent issuers use numeric 99... IDs,
+    # while historical gssh/gssz IDs additionally encode their venue.
+    venue = symbol[:2]
+    if not (
+        (venue == "SH" and code.startswith("6"))
+        or (venue == "SZ" and code.startswith(("0", "3")))
+        or (venue == "BJ" and code.startswith(("4", "8", "920")))
+    ):
+        raise ValueError("disclosure security/exchange conflict")
     org = matches[0]["orgId"]
+    if re.fullmatch(r"99[0-9]{8}", org):
+        return org
     if (symbol.startswith("SH") and not org.startswith("gssh")) or (
         symbol.startswith("SZ") and not org.startswith("gssz")
     ):
         raise ValueError("disclosure institution/exchange conflict")
+    if not org.startswith(("gssh", "gssz")):
+        raise ValueError("unrecognized disclosure institution identity")
     return org
 
 
@@ -155,7 +168,7 @@ def collect(request, report):
             payload = {
                 "pageNum": page,
                 "pageSize": 30,
-                "column": "szse",
+                "column": {"SH": "sse", "SZ": "szse", "BJ": "bse"}[symbol[:2]],
                 "tabName": "fulltext",
                 "stock": code + "," + org,
                 "searchkey": "",
@@ -182,7 +195,11 @@ def collect(request, report):
             if total != expected:
                 raise ValueError("announcement pagination changed during collection")
             for row in rows:
-                if str(row.get("secCode")) != code or row.get("orgId") != org:
+                if (
+                    str(row.get("secCode")) != code
+                    or row.get("orgId") != org
+                    or row.get("announcementColumn", payload["column"]) != payload["column"]
+                ):
                     raise ValueError("announcement security conflict")
                 key = str(row["announcementId"])
                 if not re.fullmatch(r"[A-Za-z0-9_-]+", key) or key in seen:

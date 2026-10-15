@@ -3,7 +3,9 @@
 mod adjustment;
 mod akquant;
 mod data;
+mod execution;
 mod portfolio;
+mod predictions;
 /// Shared dated input qualification and audit artifacts.
 pub mod quality;
 mod report;
@@ -46,7 +48,7 @@ const SUPPORTED_RESEARCH_INPUTS: [&str; 15] = [
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// Current strict integer-share research result format.
-pub const RESEARCH_SCHEMA_VERSION: u32 = 14;
+pub const RESEARCH_SCHEMA_VERSION: u32 = 16;
 
 /// A result cannot be interpreted using the current research contract.
 #[derive(Debug, thiserror::Error)]
@@ -141,7 +143,7 @@ pub fn validate_result(
                 Some("completed" | "no_valid_trades" | "execution_data_not_ready")
             )
         {
-            return Err("requires research schema 14 and akquant_ex_date execution".into());
+            return Err("requires research schema 16 and akquant_ex_date execution".into());
         }
         let hash = |value: &serde_json::Value| {
             value.as_str().is_some_and(|s| {
@@ -167,8 +169,27 @@ pub fn validate_result(
         {
             return Err("missing or invalid research provenance".into());
         }
+        let warnings = value["execution_warnings"]
+            .as_array()
+            .ok_or("missing execution warnings")?;
+        let skipped = value["skipped_events"]
+            .as_array()
+            .ok_or("missing skipped events")?;
+        if value["unsupported_event_policy"] != "warn_and_skip"
+            || value["event_simulation_complete"] != warnings.is_empty()
+            || value["skipped_event_count"] != skipped.len()
+            || skipped
+                != &warnings
+                    .iter()
+                    .filter(|w| w["code"] == "execution_event_unsupported_skipped")
+                    .cloned()
+                    .collect::<Vec<_>>()
+        {
+            return Err("invalid unsupported event disclosure".into());
+        }
         let execution = &value["execution"];
-        if execution["engine"] != "akquant"
+        if execution["unsupported_event_policy"] != "warn_and_skip"
+            || execution["engine"] != "akquant"
             || execution["engine_version"] != "0.3.66"
             || execution["corporate_action_policy"] != "ex_date"
             || !hash(&execution["runtime_signature"])
@@ -442,6 +463,9 @@ pub fn validate_result(
         let reports: Vec<FoldReport> = serde_json::from_value(value["fold_reports"].clone())?;
         if reports.len() != frozen.len()
             || reports.is_empty()
+            || reports
+                .iter()
+                .any(|r| r.performance.as_ref().is_none_or(|p| p.observations == 0))
             || reports.windows(2).any(|r| r[0].test_end >= r[1].test_start)
         {
             return Err("missing or unordered annual reports".into());
@@ -640,7 +664,7 @@ struct FoldReport {
     features: usize,
     rank_ic: Option<f64>,
     ic: Option<f64>,
-    performance: portfolio::Performance,
+    performance: Option<portfolio::Performance>,
 }
 
 fn save(path: impl AsRef<Path>, value: &impl Serialize) -> Result<()> {
@@ -662,7 +686,37 @@ pub fn run_with_context(
     request: &ResearchRequest,
     context: &analytics_core::task::TaskContext,
 ) -> Result<()> {
-    context.execute(|| crate::research::worker::scoped(|| run_scoped(request)))
+    let result = context.execute(|| crate::research::worker::scoped(|| run_scoped(request)));
+    // Persist stage truth even after cooperative cancellation; never publish summary here.
+    if request.output.is_dir() {
+        let readiness = fs::read(request.output.join("execution_readiness.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .unwrap_or_default();
+        let account_status = if request.output.join("summary.json").is_file() {
+            "completed"
+        } else if request.train_only || request.audit_only {
+            "not_started"
+        } else if context.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            "cancelled"
+        } else if readiness["stages"]["backtest"] == "blocked" {
+            "blocked"
+        } else if readiness["stages"]["backtest"] == "failed"
+            || request.output.join("prediction_manifest.json").is_file()
+        {
+            "failed"
+        } else {
+            "not_started"
+        };
+        let stages = serde_json::json!({"schema_version":1,
+            "training":if request.output.join("training.json").is_file() || request.reuse_training.is_some(){"completed"}else if request.output.join("fold-0000/model.txt").is_file(){"incomplete"}else{"not_started"},
+            "prediction":if request.output.join("prediction_manifest.json").is_file(){"completed"}else if request.output.join("fold_reports.json").is_file(){"incomplete"}else{"not_started"},
+            "backtest":account_status});
+        let part = request.output.join("stages.json.partial");
+        fs::write(&part, serde_json::to_vec_pretty(&stages)?)?;
+        fs::rename(part, request.output.join("stages.json"))?;
+    }
+    result
 }
 
 fn file_hash(path: &Path) -> Result<String> {
@@ -673,7 +727,7 @@ fn adjustment_basis_signature(
     start: Date,
     end: Date,
 ) -> Result<String> {
-    let events:Vec<_>=book.into_iter().flat_map(|b|&b.actions).filter(|a|a.ex_date>=start&&a.ex_date<=end).map(|a|serde_json::json!({"instrument":a.instrument,"ex_date":a.ex_date,"cash":a.cash_per_share,"shares":a.shares_per_share,"reference":a.terms.reference()})).collect();
+    let events:Vec<_>=book.into_iter().flat_map(|b|&b.actions).filter(|a|a.ex_date>=start&&a.ex_date<=end).map(|a|serde_json::json!({"instrument":a.instrument,"ex_date":a.ex_date,"cash":a.cash(),"shares":a.shares(),"reference":a.terms.reference()})).collect();
     Ok(format!(
         "sha256:{:x}",
         Sha256::digest(serde_json::to_vec(&events)?)
@@ -864,6 +918,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         .ok_or("provider needs source parent")?
         .join("jfquant_source.json");
     let source: serde_json::Value = serde_json::from_slice(&fs::read(&source_path)?)?;
+    let market_content_sha256 = crate::market_content_hash(&request.data_root)?;
     let synthetic = source["generator"] == "JFQuant analytics-workflow synthetic-demo-v1"
         && source["synthetic_fixture"] == true;
     if !synthetic
@@ -912,7 +967,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
     let history_start = folds.iter().map(|f| f.actual.train.start).min().unwrap();
     let first_required = history_start;
     let execution_start = folds[0].actual.test.start;
-    let needed_end = if request.train_only || request.audit_only {
+    let needed_end = if request.train_only {
         folds
             .iter()
             .map(|f| f.actual.validation.as_ref().unwrap_or(&f.actual.train).end)
@@ -1139,6 +1194,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
             evidence.sort();
             evidence.dedup();
             admission.checks.push(AdmissionCheck {
+                stage: Default::default(),
                 kind: if failed {
                     ProblemKind::ExecutionDependency
                 } else {
@@ -1230,6 +1286,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
     }
     for (id, problems) in &allowed_market_missing {
         admission.checks.push(AdmissionCheck {
+            stage: Default::default(),
             kind: ProblemKind::Missing,
             disposition: ProblemDisposition::KeepNull,
             category: "market".into(),
@@ -1280,6 +1337,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         }
     }
     admission.checks.push(AdmissionCheck {
+        stage: analytics_core::admission::AdmissionStage::Account,
         kind: ProblemKind::ExecutionDependency,
         disposition: ProblemDisposition::Warn,
         category: "account_events".into(),
@@ -1290,11 +1348,32 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         }),
         status: CheckStatus::NotRun,
         code: "account_path_not_run".into(),
-        message: "尚未检查实际账户路径；订单、持仓和权益资料在回测执行时核验".into(),
+        message: "静态执行前提单独核验；持仓估值与订单结果在账户运行时检查".into(),
         evidence: vec![],
         affected_factors: vec![],
     });
+    if !request.train_only {
+        let execution_checks = execution::checks(
+            request,
+            &dataset,
+            action_book.as_ref(),
+            &pool,
+            &DateRange {
+                start: execution_start,
+                end: folds.last().unwrap().actual.test.end,
+            },
+        )?;
+        if execution_checks
+            .iter()
+            .any(|c| c.status == CheckStatus::Failed)
+        {
+            admission_issues
+                .push("execution dependencies unavailable; see admission execution checks".into());
+        }
+        admission.checks.extend(execution_checks);
+    }
     admission.checks.push(AdmissionCheck {
+        stage: Default::default(),
         kind: ProblemKind::Missing,
         disposition: ProblemDisposition::Block,
         category: "feature_eligibility".into(),
@@ -1328,8 +1407,17 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
                     .collect()
             };
         save(
+            request.output.join("input_issues.json"),
+            &serde_json::json!({"market_issues":market_issues,"factor_basis_issues":factor_basis_issues,"adjustment_issues":adjustment_issues,"settlement_issues":settlement_issues,"successor_issues":successor_issues}),
+        )?;
+        save(
             request.output.join("execution_readiness.json"),
-            &serde_json::json!({"schema_version":5,"quality":quality_snapshot,"admission":admission,"ready":false,"reason":admission_issues.join("; "),"issues":admission_issues,"required_start":first_required,"pool_coverage":pool.coverage,"verified_raw_prices":dataset.has_raw_prices(),"market_issues":market_issues,"factor_basis_issues":factor_basis_issues,"adjustment_issues":adjustment_issues,"settlement_issues":settlement_issues,"successor_issues":successor_issues,"checks":{"schedule":"passed","membership":if pool_problem.is_some(){"failed"}else{"passed"},"factor_basis":if factor_basis_issues.is_empty(){"passed"}else{"failed"},"historical_events":if action_book.is_none(){"not_run"}else if adjustment_issues.is_empty(){"passed"}else{"failed"},"account_events":"not_run","benchmark":if benchmark_check.is_ok(){"passed"}else{"failed"}},"resolved_folds":folds,"sample_readiness":sample_readiness,"affected_factor_ids":affected_factor_ids}),
+            &serde_json::json!({"schema_version":8,"ready":false,
+            "stages":{"training":if request.reuse_training.is_some(){"completed"}else{"not_started"},"prediction":"not_started","backtest":"blocked"},
+            "training_complete":request.reuse_training.is_some(),"backtest_complete":false,"reason":admission_issues.join("; "),"issues":admission_issues,"affected_factor_ids":affected_factor_ids,
+            "references":{"admission":{"path":"admission.json","sha256":file_hash(&request.output.join("admission.json"))?},"quality":{"path":"quality.json","sha256":file_hash(&request.output.join("quality.json"))?},"input_issues":{"path":"input_issues.json","sha256":file_hash(&request.output.join("input_issues.json"))?}},
+            "blocking_checks":admission.checks.iter().filter(|c|c.status==CheckStatus::Failed && c.disposition==ProblemDisposition::Block).collect::<Vec<_>>(),
+            "warnings":admission.checks.iter().filter(|c|c.disposition==ProblemDisposition::Warn && c.stage==analytics_core::admission::AdmissionStage::Execution).collect::<Vec<_>>(),"resolved_folds":folds}),
         )?;
         return if request.audit_only {
             Ok(())
@@ -1337,14 +1425,11 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
             Err("data_not_ready: input admission failed; see execution_readiness.json".into())
         };
     }
-    let mut price_symbols: BTreeSet<String> = members
+    let price_symbols: BTreeSet<String> = members
         .keys()
         .chain(std::iter::once(&request.benchmark))
         .cloned()
         .collect();
-    if let Some(book) = &action_book {
-        price_symbols = book.required_symbols(&price_symbols, execution_start, needed_end);
-    }
     let price_inputs = dataset.price_inputs(&price_symbols)?;
     let price_input_sha256 = format!(
         "sha256:{:x}",
@@ -1395,6 +1480,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         "sha256:{:x}",
         Sha256::digest(serde_json::to_vec(&(
             source.clone(),
+            &market_content_sha256,
             &ids,
             &formula_version,
             &pool,
@@ -1414,7 +1500,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         } else {
             "provider-quotations;events-not-training-input".into()
         };
-    let mut execution = serde_json::json!({"runtime_signature":crate::research::worker::runtime_signature(),"dependency_signature":crate::research::worker::dependency_signature(),"engine":"akquant","engine_version":"0.3.66","target_exposure":0.98,"volume_limit_pct":0.1,"trade_unit_policy":"AKQuant lot_size uses board increment; distinct minimum quantity and price-limit rules are not modeled","corporate_action_policy":"ex_date","mode":"akquant_ex_date","factor_set":request.factor_set,"price_basis":request.price_basis,
+    let mut execution = serde_json::json!({"unsupported_event_policy":"warn_and_skip","market_content_sha256":market_content_sha256,"runtime_signature":crate::research::worker::runtime_signature(),"dependency_signature":crate::research::worker::dependency_signature(),"engine":"akquant","engine_version":"0.3.66","target_exposure":0.98,"volume_limit_pct":0.1,"trade_unit_policy":"AKQuant lot_size uses board increment; distinct minimum quantity and price-limit rules are not modeled","corporate_action_policy":"ex_date","mode":"akquant_ex_date","factor_set":request.factor_set,"price_basis":request.price_basis,
         "quality_policy":request.quality_policy,"quality":quality_snapshot,"quality_sha256":format!("sha256:{:x}",Sha256::digest(serde_json::to_vec(&quality_snapshot)?)),
         "fee_application":"latest_only_for_all_dates", "market_rules":request.market_rules, "initial_cash_cny":request.initial_cash_cny,
 
@@ -1466,24 +1552,53 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         dataset.calendar[first_member],
         ids.len()
     );
-    let shared = request
-        .output
-        .parent()
-        .unwrap_or(&request.output)
-        .join(".factor-cache")
-        .join(signature.trim_start_matches("sha256:"));
+    if request.reuse_training.is_some()
+        && let Some((signals, reports, selection)) =
+            predictions::restore(request, &signature, &folds)?
+    {
+        if let Some(check) = admission.checks.last_mut() {
+            check.status = CheckStatus::Passed;
+            check.code = "feature_samples_verified".into();
+            check.message = "verified immutable prediction cache and sample receipts".into();
+        }
+        let sample_decisions: Vec<analytics_core::research_quality::QualityDecision> =
+            serde_json::from_slice(&fs::read(request.output.join("sample_decisions.json"))?)?;
+        admission.decisions.extend(sample_decisions);
+        save(request.output.join("admission.json"), &admission)?;
+        execution["unsupported_event_policy"] = "warn_and_skip".into();
+        execution["sample_selection_sha256"] = format!(
+            "sha256:{:x}",
+            Sha256::digest(serde_json::to_vec(&selection)?)
+        )
+        .into();
+        execution["sample_selection"] = selection;
+        run_signature = format!(
+            "sha256:{:x}",
+            Sha256::digest(serde_json::to_vec(&(&signature, &execution))?)
+        );
+        save(request.output.join("execution.json"), &execution)?;
+        let mut audit: serde_json::Value =
+            serde_json::from_slice(&fs::read(request.output.join("data_audit.json"))?)?;
+        audit["execution"] = execution;
+        audit["research_signature"] = run_signature.clone().into();
+        save(request.output.join("data_audit.json"), &audit)?;
+        context.report("预测缓存命中，直接执行账户回测")?;
+        return execute_account(
+            request,
+            &dataset,
+            action_book.as_ref(),
+            &pool,
+            &folds,
+            signals,
+            reports,
+            &run_signature,
+            &signature,
+        );
+    }
     let cache = request.output.join(".factor-staging");
     fs::create_dir_all(&cache)?;
     for year in history_start.year()..=needed_end.year() {
         context.report(format!("因子年度 {year}"))?;
-        for ext in ["json", "bin"] {
-            let source = shared.join(format!("{year}.{ext}"));
-            let dest = cache.join(format!("{year}.{ext}"));
-            if source.is_file() && !dest.exists() {
-                fs::copy(source, dest)?;
-            }
-        }
-
         data::prepare_year(
             data::YearInputs {
                 dataset: &dataset,
@@ -1491,6 +1606,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
                 benchmark: &request.benchmark,
                 universe_id: &request.universe_id,
                 pool_start: pool.coverage.start,
+                price_basis: request.price_basis,
                 allow_missing: request.quality_policy.strictness
                     != analytics_core::research_quality::ResearchStrictness::Strict,
             },
@@ -1651,7 +1767,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
     if !feature_issues.is_empty() || !admission.ready() {
         save(
             request.output.join("execution_readiness.json"),
-            &serde_json::json!({"schema_version":5,"admission":admission,"quality":quality_snapshot,"sample_selection":execution["sample_selection"],"ready":false,"reason":"factor/sample eligibility failed before training","feature_issues":feature_issues,"resolved_folds":folds}),
+            &serde_json::json!({"schema_version":8,"references":{"admission":{"path":"admission.json","sha256":file_hash(&request.output.join("admission.json"))?},"quality":{"path":"quality.json","sha256":file_hash(&request.output.join("quality.json"))?},"samples":{"path":"sample_selection.json"}},"ready":false,"reason":"factor/sample eligibility failed before training","feature_issues":feature_issues,"resolved_folds":folds}),
         )?;
         return if request.audit_only {
             Ok(())
@@ -1662,7 +1778,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
     if request.audit_only {
         save(
             request.output.join("execution_readiness.json"),
-            &serde_json::json!({"schema_version":5,"ready":admission.ready(),"quality":quality_snapshot,"sample_selection":execution["sample_selection"],"admission":admission,"resolved_folds":folds,"sample_readiness":sample_readiness,"backtest_checks":{"status":"not_run","reason":"账户检查在实际订单、持仓和权益执行时进行"}}),
+            &serde_json::json!({"schema_version":8,"ready":admission.ready(),"references":{"admission":{"path":"admission.json","sha256":file_hash(&request.output.join("admission.json"))?},"quality":{"path":"quality.json","sha256":file_hash(&request.output.join("quality.json"))?},"samples":{"path":"sample_selection.json"}},"resolved_folds":folds,"sample_readiness":sample_readiness,"backtest_checks":{"status":"not_run","reason":"账户检查在实际订单、持仓和权益执行时进行"}}),
         )?;
         return Ok(());
     }
@@ -1676,18 +1792,6 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
     }
     fs::rename(&cache, &published)?;
     let cache = published;
-    fs::create_dir_all(&shared)?;
-    for year in history_start.year()..=needed_end.year() {
-        for ext in ["json", "bin"] {
-            let dest = shared.join(format!("{year}.{ext}"));
-            if !dest.exists() {
-                let tmp = shared.join(format!("{year}.{ext}.{}", uuid::Uuid::new_v4()));
-                fs::copy(cache.join(format!("{year}.{ext}")), &tmp)?;
-                fs::rename(tmp, dest)?;
-            }
-        }
-    }
-
     let mut signals = Vec::<(Date, String, f64)>::new();
     let mut reports = Vec::new();
 
@@ -1838,7 +1942,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
                 .zip(&scores)
                 .map(|(r, s)| (dataset.calendar[r.day], r.instrument.clone(), *s)),
         );
-        let performance = portfolio::performance(&[]);
+        let performance = None;
         let report = FoldReport {
             year,
             train_start: f.train.start.to_string(),
@@ -1907,6 +2011,33 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
             return Ok(());
         }
     }
+    predictions::publish(request, &signature, &folds, &signals, &reports)?;
+    execute_account(
+        request,
+        &dataset,
+        action_book.as_ref(),
+        &pool,
+        &folds,
+        signals,
+        reports,
+        &run_signature,
+        &signature,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_account(
+    request: &ResearchRequest,
+    dataset: &DailyDataset,
+    action_book: Option<&analytics_storage::corporate_actions::ActionBundle>,
+    pool: &analytics_core::pool::PoolMembership,
+    folds: &[analytics_core::schedule::ResolvedFold],
+    signals: Vec<(Date, String, f64)>,
+    mut reports: Vec<FoldReport>,
+    run_signature: &str,
+    signature: &str,
+) -> Result<()> {
+    let context = analytics_core::task::TaskContext::current();
     context.report("AKQuant 连续账户回测")?;
     let signal_dates = dataset
         .calendar
@@ -1920,32 +2051,33 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         .collect::<Vec<_>>();
     let all_returns = match akquant::simulate(
         request,
-        &dataset,
-        action_book.as_ref(),
+        dataset,
+        action_book,
         &signals,
         &DateRange {
             start: folds.first().unwrap().actual.test.start,
             end: folds.last().unwrap().actual.test.end,
         },
-        &pool,
+        pool,
         &signal_dates,
     ) {
         Ok(days) => days,
         Err(error) => {
             save(
                 request.output.join("execution_readiness.json"),
-                &serde_json::json!({"schema_version":6,"ready":false,"training_complete":true,"backtest_complete":false,"reason":error.to_string()}),
+                &serde_json::json!({"schema_version":6,"ready":false,"training_complete":true,"prediction_complete":true,"backtest_complete":false,"stages":{"training":"completed","prediction":"completed","backtest":"failed"},"aggregate":null,"reason":error.to_string()}),
             )?;
             return Err(error);
         }
     };
     for (i, report) in reports.iter_mut().enumerate() {
+        fs::create_dir_all(request.output.join(format!("fold-{i:04}")))?;
         let days = all_returns
             .iter()
             .filter(|d| d.date >= report.test_start && d.date <= report.test_end)
             .cloned()
             .collect::<Vec<_>>();
-        report.performance = portfolio::performance(&days);
+        report.performance = Some(portfolio::performance(&days));
         save(
             request.output.join(format!("fold-{i:04}/daily.json")),
             &days,
@@ -1960,8 +2092,8 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         request,
         &reports,
         &all_returns,
-        &run_signature,
-        &signature,
+        run_signature,
+        signature,
         &dataset.calendar,
     )?;
     render_report(&request.output)?;
@@ -2012,9 +2144,59 @@ fn finish(
         serde_json::json!({"year":y,"performance":portfolio::performance(ds),"partial_year":partial})
     }).collect();
     save(request.output.join("annual_reports.json"), &annual)?;
+    let mut admission: analytics_core::admission::AdmissionReport =
+        serde_json::from_slice(&fs::read(request.output.join("admission.json"))?)?;
+    for check in &mut admission.checks {
+        if check.stage == analytics_core::admission::AdmissionStage::Account {
+            check.status = analytics_core::admission::CheckStatus::Passed;
+            check.code = "account_path_verified".into();
+            check.message =
+                "continuous account execution and held-position valuation completed".into();
+        }
+    }
+    save(request.output.join("admission.json"), &admission)?;
     let has_trades = days.iter().any(|d| d.turnover > 0.);
+    let events = fs::read_to_string(request.output.join("order_events.jsonl"))?;
+    let events = events
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let diagnostics = serde_json::json!({"valid_signals":reports.iter().map(|r|r.test_rows).sum::<usize>(),"filled_events":events.iter().filter(|e|e["status"]=="filled").count(),"rejected_events":events.iter().filter(|e|e["status"]=="rejected").count(),"submitted_orders":null,"reason":if has_trades{"filled"}else if events.iter().any(|e|e["status"]=="rejected"){"orders_rejected"}else if reports.iter().all(|r|r.test_rows==0){"no_valid_signals"}else{"no_fills"}});
+
+    let mut warnings: Vec<serde_json::Value> =
+        if request.output.join("execution_warnings.json").exists() {
+            serde_json::from_slice(&fs::read(request.output.join("execution_warnings.json"))?)?
+        } else {
+            vec![]
+        };
+    let snapshots: serde_json::Value =
+        serde_json::from_slice(&fs::read(request.output.join("portfolio_snapshots.json"))?)?;
+    for warning in &mut warnings {
+        if warning["code"] == "execution_event_unsupported_skipped" {
+            let quantity = warning["date"].as_str().and_then(|date| {
+                snapshots
+                    .as_object()
+                    .and_then(|m| m.iter().rev().find(|(d, _)| d.as_str() < date))
+                    .map(|(_, s)| {
+                        s["positions"][warning["instrument"].as_str().unwrap_or("")]
+                            .as_f64()
+                            .unwrap_or(0.)
+                    })
+            });
+            warning["held_across_event"] = quantity
+                .map(|q| q != 0.)
+                .map(serde_json::Value::Bool)
+                .unwrap_or(serde_json::Value::Null);
+        }
+    }
+    let skipped: Vec<_> = warnings
+        .iter()
+        .filter(|w| w["code"] == "execution_event_unsupported_skipped")
+        .cloned()
+        .collect();
+    save(request.output.join("execution_warnings.json"), &warnings)?;
     let summary = serde_json::json!({
-        "schema_version":RESEARCH_SCHEMA_VERSION,"backtest_status":if has_trades{"completed"}else{"no_valid_trades"},"execution_warnings":if request.output.join("execution_warnings.json").exists(){serde_json::from_slice::<serde_json::Value>(&fs::read(request.output.join("execution_warnings.json"))?)?}else{serde_json::json!([])},"input_kind":if audit["source"]["synthetic_fixture"]==true{"synthetic_fixture"}else{"public_market"},"method":"JFQuant Rust factors + Python LightGBM + AKQuant",
+        "unsupported_event_policy":"warn_and_skip","event_simulation_complete":warnings.is_empty(),"skipped_event_count":skipped.len(),"skipped_events":skipped,"schema_version":RESEARCH_SCHEMA_VERSION,"stages":{"training":"completed","prediction":"completed","backtest":"completed"},"execution_diagnostics":diagnostics,"backtest_status":if has_trades{"completed"}else{"no_valid_trades"},"execution_warnings":warnings,"input_kind":if audit["source"]["synthetic_fixture"]==true{"synthetic_fixture"}else{"public_market"},"method":"JFQuant Rust factors + Python LightGBM + AKQuant",
         "fold_reports":reports,"annual_reports":annual,"aggregate":aggregate,"source":audit["source"],
         "formula_version":audit["formula_version"],"signature":run_signature,"factor_signature":factor_signature,
         "admission":serde_json::from_slice::<serde_json::Value>(&fs::read(request.output.join("admission.json"))?)?,"sample_selection":serde_json::from_slice::<serde_json::Value>(&fs::read(request.output.join("sample_selection.json"))?)?,"research_scope":if request.quality_policy.strictness==analytics_core::research_quality::ResearchStrictness::QualifiedOnly{"经数据筛选的研究股票池"}else{"原股票池"},

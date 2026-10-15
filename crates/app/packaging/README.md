@@ -33,3 +33,5 @@ LightGBM 4.7.0与AKQuant 0.3.66来自哈希锁定wheel，不编译或携带旧Ru
 
 本机审核不能替代另一台干净Apple Silicon/macOS14机器的安装、运行、取消及离线读取。
 开发签名不等同Developer ID或Apple公证；安装方式见INSTALL.txt。
+
+研究结果格式16／服务协议16：打包CLI验收覆盖静态准入、模型复用和完整结果格式；研究worker与依赖锁保持不变；采集模块改动后必须同步重建共享Python中的采集包。打包必须等待使用开发Python目录的采集任务结束，避免重建运行时影响请求。

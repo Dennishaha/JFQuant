@@ -33,8 +33,7 @@ limits are not modeled. Fees are the upstream total, recorded from each fill, wi
 invented exchange/broker breakdowns. Gross commission or AllInclusive maps to the
 upstream model; Net, unequal global transfer/stamp rates and nonzero dividend tax
 are rejected. Custom legacy tick, sale-delay, minimum-quantity and price-limit settings
-are also rejected instead of silently ignored. Distribution/split rights apply on ex-date. Known unsupported events
-stop execution. There is no registration/pay/listing-date rights ledger.
+are also rejected instead of silently ignored. Distribution/split rights apply on ex-date. Known unsupported events use the Rust adapter’s fixed `warn_and_skip` projection: they are disclosed and omitted without changing signals or account positions. Ordinary event conflicts still block execution. There is no registration/pay/listing-date rights ledger.
 
 The bundled interpreter and hash-locked dependencies are shared with collectors;
 processes and lifetimes remain independent. Runtime changes invalidate model reuse.

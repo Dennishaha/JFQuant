@@ -1,4 +1,4 @@
-"""One supervised task per process. stdout is exclusively JSON Lines protocol v10."""
+"""One supervised task per process. stdout is exclusively JSON Lines protocol v12."""
 
 import contextlib
 import hashlib
@@ -12,14 +12,10 @@ from pathlib import Path
 
 from . import PROTOCOL_VERSION
 from .announcements import collect as announcements
-from .cninfo import collect as cninfo_actions
 from .evidence import EvidenceCapture
-from .providers import coefficients, corporate_actions, market
 from .reconcile import replay
 from .tdx import collect as tdx_collect
 from .tdx import reference
-from .tushare import collect as tushare_actions
-from .tushare import permissions as tushare_permissions
 
 
 def main():
@@ -32,10 +28,7 @@ def main():
         "__main__.py",
         "providers.py",
         "evidence.py",
-        "adjustment.py",
         "announcements.py",
-        "tushare.py",
-        "cninfo.py",
         "tdx.py",
         "reconcile.py",
     ):
@@ -74,7 +67,6 @@ def main():
             "actions",
             "announcements",
             "coefficients",
-            "permissions",
             "calendar",
             "members",
             "reconcile_actions",
@@ -84,8 +76,6 @@ def main():
         if request["expected_collector_signature"] != signature:
             raise ValueError("collector code signature mismatch; rebuild the bundled runtime")
         versions = {
-            "akshare": importlib.metadata.version("akshare"),
-            "yfinance": importlib.metadata.version("yfinance"),
             "python": platform.python_version(),
             "tdxaidata": importlib.metadata.version("tdxaidata"),
         }
@@ -107,26 +97,12 @@ def main():
             if operation == "reconcile_actions":
                 replay(request, report)
                 return 0
-            execute = {
-                "market": market,
-                "quotes": market,
-                "coefficients": coefficients,
-                "actions": tushare_actions
-                if request["provider"] == "tushare"
-                else cninfo_actions
-                if request["provider"] == "akshare"
-                else corporate_actions,
-                "announcements": announcements,
-                "permissions": tushare_permissions,
-                "calendar": reference,
-                "members": reference,
-            }[operation]
-            if operation in ("calendar", "members"):
-                execute = reference
+            if operation == "announcements" and request["provider"] == "cninfo":
+                execute = announcements
             elif request["provider"] == "tdxaidata":
-                if operation not in ("market", "quotes", "coefficients", "actions"):
-                    raise ValueError("unsupported_tdxaidata_operation")
-                execute = tdx_collect
+                execute = reference if operation in ("calendar", "members") else tdx_collect
+            else:
+                raise ValueError("unsupported_collector_provider")
             completed = []
             failures = {}
 

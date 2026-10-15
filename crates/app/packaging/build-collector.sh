@@ -37,5 +37,5 @@ codesign --force --sign - "$site_root/lightgbm/lib/lib_lightgbm.dylib"
 cp "$collector_root/requirements.lock" "$collector_root/python-runtime.lock.json" "$python_root/"
 "$python_root/bin/python3" -I -B "$repo_root/crates/app/packaging/rewrite-python.py" "$python_root"
 "$python_root/bin/python3" -I -B "$repo_root/crates/app/packaging/verify-python.py" "$python_root" "$build_root/native-audit.json"
-"$python_root/bin/python3" -I -B -c 'import akshare, yfinance, importlib.metadata; assert importlib.metadata.version("tdxaidata") == "1.2.2"; assert akshare.__version__ == "1.19.1"; assert yfinance.__version__ == "1.7.0"'
+"$python_root/bin/python3" -I -B -c 'import requests,pandas,importlib.metadata; assert importlib.metadata.version("tdxaidata") == "1.2.2"; assert importlib.util.find_spec("akshare") is None; assert importlib.util.find_spec("yfinance") is None; assert importlib.util.find_spec("tushare") is None'
 "$python_root/bin/python3" -I -B -c 'import akquant,lightgbm,jfquant_research; assert akquant.__version__ == "0.3.66"; assert lightgbm.__version__ == "4.7.0"'

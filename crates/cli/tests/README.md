@@ -27,7 +27,7 @@ flowchart TB
 | 服务竞争与崩溃 | 多客户端启动只有一个持锁者；异常退出后记录变 interrupted |
 | SQL 会话和事件 | 两个 query_id 分页互不影响；NULL/重复值/非有限值、大响应及事件预算可读取 |
 | 当前研究与只读导入 | CLI/API 的完整结果、冻结特征顺序、年度账本和费用相同；旧结果拒绝且源文件不变 |
-| 数据恢复与证据 repair | 标准 download 从完整归档离线恢复、owner 不匹配不发布；去重仍保留本次 coverage |
+| 数据恢复与废弃入口拒绝 | 标准 download 从完整归档离线恢复、owner 不匹配不发布；旧补采与重试命令拒绝 |
 | 正式流水线 | SQL 导出生成 Parquet，因子有序，产物绑定 UUID，不覆盖调用方给出的旧目录 |
 
 失败时先查看测试名、stderr 和错误 JSON。`Sandbox::Drop` 清理服务，进程测试故意 SIGKILL 的范围只限该测试新建服务。不要把网络波动、真实缓存或其他 App 工作区引入测试。
@@ -75,7 +75,7 @@ flowchart LR
 
 为什么调整：普通市场代码无需先登记身份；独立目录、审核和权威名录下载增加了研究前置负担。特殊历史代码仍需在快照内明确区间，不能将旧证券行情或权益接到另一证券。训练使用价量和标签，到账／交付资料只在实际账户执行时检查。
 
-当前格式：模板10、需求3、准入5、股票池3、公司行动5、规范行情5、系数3、采集7、服务14、研究结果14；快照内来源映射1、训练产物3。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
+当前格式：模板10、需求3、准入5、股票池3、公司行动5、规范行情5/HiThink6、系数3、采集7、服务14、研究结果14；快照内来源映射1、训练产物3。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
 
 ```bash
 jfquant --workspace "$JFQUANT_WORKSPACE" research train --template recipe.json --market MARKET_ID --actions HISTORY_ACTIONS_ID
@@ -102,7 +102,7 @@ flowchart LR
 
 ## 来源优先级回归
 
-为什么：命令可以解析成功但并未复用App规则，或JSON断言读错同步包装。`source_priorities_and_refresh_preview_share_the_public_backend_without_credentials`通过真实服务核对五类默认通达信第一、固定来源和独立workflow读取、预览不下载；配置缺少`--key-stdin`须在启动服务前被clap拒绝。
+为什么：命令可以解析成功但并未复用App规则，或JSON断言读错同步包装。`source_priorities_and_refresh_preview_share_the_public_backend_without_credentials`通过真实服务核对HiThink默认角色、通达信备用及空执行资料来源、固定来源和独立workflow读取、预览不下载；配置缺少`--key-stdin`须在启动服务前被clap拒绝。
 
 ```mermaid
 flowchart LR

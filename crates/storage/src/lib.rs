@@ -15,6 +15,7 @@ pub mod acquisition;
 pub mod collector;
 pub mod corporate_actions;
 pub mod daily;
+pub mod hithink;
 pub mod qlib;
 
 use analytics_core::{ColumnSchema, DataType, DatasetFile};

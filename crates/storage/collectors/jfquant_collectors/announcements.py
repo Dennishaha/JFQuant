@@ -288,16 +288,4 @@ def collect(request, report):
                 "event_category_completeness": "not_reviewed",
             },
         )
-    import platform
-
-    import akshare
-    import yfinance
-
-    report(
-        "complete",
-        versions={
-            "akshare": akshare.__version__,
-            "yfinance": yfinance.__version__,
-            "python": platform.python_version(),
-        },
-    )
+    report("complete")

@@ -28,7 +28,7 @@ pub struct SourcePolicy {
 impl Default for SourcePolicy {
     fn default() -> Self {
         Self {
-            schema_version: 1,
+            schema_version: 2,
             overlap_sessions: 5,
             priorities: [
                 DataRole::Quotes,
@@ -41,7 +41,11 @@ impl Default for SourcePolicy {
             .map(|role| {
                 (
                     role,
-                    vec![Provider::Tdxaidata, Provider::Akshare, Provider::Tushare],
+                    if role == DataRole::Execution {
+                        vec![]
+                    } else {
+                        vec![Provider::Hithink, Provider::Tdxaidata]
+                    },
                 )
             })
             .collect(),
@@ -50,8 +54,10 @@ impl Default for SourcePolicy {
 }
 impl SourcePolicy {
     pub fn validate(&self) -> Result<()> {
-        if self.schema_version != 1 || self.overlap_sessions > 60 || self.priorities.len() != 5 {
-            return Err("invalid_source_policy".into());
+        if self.schema_version != 2 || self.overlap_sessions > 60 || self.priorities.len() != 5 {
+            return Err(
+                "unsupported_source_policy: reconfigure sources using policy format 2".into(),
+            );
         }
         for role in [
             DataRole::Quotes,
@@ -61,7 +67,8 @@ impl SourcePolicy {
             DataRole::Calendar,
         ] {
             let list = self.priorities.get(&role).ok_or("source_role_missing")?;
-            if list.is_empty()
+            if (list.is_empty() && role != DataRole::Execution)
+                || list.contains(&Provider::Cninfo)
                 || list.len() > 4
                 || list.iter().enumerate().any(|(i, p)| list[..i].contains(p))
             {
@@ -73,7 +80,9 @@ impl SourcePolicy {
     pub fn load(w: &Workspace) -> Result<Self> {
         let p = w.resolve(".jfquant/source-policy.json");
         let value = if p.exists() {
-            serde_json::from_slice(&fs::read(p)?)?
+            let raw: Value = serde_json::from_slice(&fs::read(p)?)?;
+            analytics_core::source_map::reject_removed_sources(&raw)?;
+            serde_json::from_value(raw)?
         } else {
             Self::default()
         };
@@ -323,7 +332,7 @@ pub fn plan(w: &Workspace, request: &RefreshRequest, policy: &SourcePolicy) -> R
         membership,
         notes: vec![
             "训练价量、成员覆盖与实际账户依赖分别核验；下载成功不等于研究准入".into(),
-            "所有类别通达信优先；接口不支持或未验证的能力明确记录后尝试备用来源".into(),
+            "按用途优先HiThink，通达信备用；不支持或覆盖不足记录后尝试下一来源".into(),
             "历史成员保持所选版本覆盖，当前成分及当前停牌/涨跌停不回填历史".into(),
             "切换行情来源重取该证券所需历史，禁止逐字段拼接".into(),
         ],
@@ -333,9 +342,8 @@ pub fn plan(w: &Workspace, request: &RefreshRequest, policy: &SourcePolicy) -> R
 pub fn catalog(w: &Workspace) -> Result<Value> {
     Ok(json!({"policy":SourcePolicy::load(w)?,"providers":[
         {"provider":"tdxaidata","roles":["quotes","calendar","members_current","adjustment","actions_reference"],"account_dates":"requires_supplement","historical_members":"not_supported","historical_execution":"not_verified","credential_required":true},
-        {"provider":"akshare","roles":["quotes","calendar","members_current","actions"],"actions_source":"cninfo_then_sina","credential_required":false},
-        {"provider":"tushare","roles":["actions","execution"],"credential_required":true},
-        {"provider":"yfinance","roles":["candidate_verification"],"automatic_a_share_execution":false}
+        {"provider":"hithink","roles":["quotes","calendar","members_current","actions"],"training":"supplier_forward_ohlc_raw_shares_cny_vwap_null","calendar_window":"one_year","index_window":"five_years","historical_members":"not_supported","credential_required":true},
+        {"provider":"cninfo","roles":["announcements"],"candidate_only":true,"credential_required":false}
     ]}))
 }
 fn collection(provider: Provider, id: &str, r: &DateRange, benchmark: &str) -> CollectionRequest {
@@ -343,7 +351,7 @@ fn collection(provider: Provider, id: &str, r: &DateRange, benchmark: &str) -> C
         provider,
         adjustment_source: match provider {
             Provider::Tdxaidata => AdjustmentSource::TdxForward,
-            Provider::Akshare => AdjustmentSource::SinaHfq,
+            Provider::Hithink => AdjustmentSource::HithinkForward,
             _ => AdjustmentSource::None,
         },
         source_bindings: Default::default(),
@@ -438,7 +446,7 @@ pub fn execute(
         let mut selected = None;
         for provider in &security.quote_sources {
             context.check()?;
-            if !matches!(provider, Provider::Tdxaidata | Provider::Akshare) {
+            if !matches!(provider, Provider::Tdxaidata | Provider::Hithink) {
                 attempts.push(json!({"provider":provider,"status":"not_run","code":"quotation_route_unsupported"}));
                 continue;
             }
@@ -448,6 +456,19 @@ pub fn execute(
                     .join("daily_manifest.json")
                     .is_file();
             let result = (|| -> Result<_> {
+                if *provider == Provider::Hithink {
+                    let req = collection(*provider, id, &p.history, &request.template.benchmark);
+                    let m = analytics_storage::hithink::collect_with_calendar(
+                        &req,
+                        &root,
+                        context,
+                        "market",
+                        Some(&calendar),
+                    )?;
+                    let adjustment = AdjustmentRecord::read(&m, id)?;
+                    let rows = read_bars(&m.join("bars").join(format!("{id}.parquet")))?;
+                    return Ok((rows, adjustment, root.clone()));
+                }
                 let mut rows: BTreeMap<_, _> = BTreeMap::new();
                 // Same-source updates reuse raw rows, while factors are re-read across the
                 // whole requested span. A fallback starts a coherent history from scratch.
@@ -586,12 +607,21 @@ pub fn execute(
             }
         }
         let manifest = DailyManifest {
-            schema_version: 5,
+            schema_version: 6,
             calendar,
             universes,
             instruments: p.securities.iter().map(|s| s.instrument.clone()).collect(),
             price_basis: "unadjusted".into(),
-            normalization: analytics_storage::adjustment::NORMALIZATION.into(),
+            normalization: if sources.values().any(|s| s["provider"] == "hithink")
+                && sources.values().any(|s| s["provider"] == "tdxaidata")
+            {
+                analytics_storage::adjustment::MIXED_NORMALIZATION
+            } else if sources.values().any(|s| s["provider"] == "hithink") {
+                analytics_storage::adjustment::HITHINK_NORMALIZATION
+            } else {
+                analytics_storage::adjustment::NORMALIZATION
+            }
+            .into(),
             adjustment_anchors: anchors,
         };
         atomic_json(&output.join("market/daily_manifest.json"), &manifest)?;
@@ -604,7 +634,7 @@ pub fn execute(
         }
         atomic_json(
             &output.join("market/acquisition.json"),
-            &json!({"schema_version":1,"plan":p,"security_sources":sources,"provider_training_verified":sources.values().all(|s|s["provider"]=="tdxaidata")}),
+            &json!({"schema_version":1,"plan":p,"security_sources":sources,"provider_training_verified":sources.values().all(|s|matches!(s["provider"].as_str(),Some("tdxaidata"|"hithink")))}),
         )?;
         atomic_json(
             &output.join("jfquant_source.json"),
@@ -635,7 +665,7 @@ fn reference_route(
     };
     let mut attempts = vec![];
     for provider in p.source_policy.routes(role, request.provider) {
-        if !matches!(provider, Provider::Tdxaidata | Provider::Akshare) {
+        if !matches!(provider, Provider::Tdxaidata | Provider::Hithink) {
             attempts.push(json!({"provider":provider,"status":"not_run","code":"reference_capability_unavailable"}));
             continue;
         }
@@ -722,10 +752,7 @@ fn refresh_actions(
         }
         for provider in routes {
             context.check()?;
-            if !matches!(
-                provider,
-                Provider::Tdxaidata | Provider::Akshare | Provider::Tushare
-            ) {
+            if !matches!(provider, Provider::Tdxaidata | Provider::Hithink) {
                 action_attempts.push(json!({"provider":provider,"status":"not_run","code":"action_route_unsupported"}));
                 continue;
             }
@@ -761,16 +788,8 @@ fn refresh_actions(
             }
         }
         for provider in execution_routes {
-            let status = if provider == Provider::Tushare
-                && choices
-                    .iter()
-                    .any(|(_, path)| path.to_string_lossy().ends_with("Tushare"))
-            {
-                "available_or_partial"
-            } else {
-                "not_run"
-            };
-            execution_attempts.push(json!({"provider":provider,"status":status,"code":if provider==Provider::Tdxaidata {"historical_execution_not_verified"}else if provider==Provider::Akshare {"historical_execution_route_unavailable"}else{"see_source_capabilities"}}));
+            let status = "not_run";
+            execution_attempts.push(json!({"provider":provider,"status":status,"code":if provider==Provider::Tdxaidata {"historical_execution_not_verified"}else if provider==Provider::Hithink {"historical_execution_route_unavailable"}else{"see_source_capabilities"}}));
         }
         if !choices.is_empty() {
             let mut chosen = choices.remove(0);
@@ -939,7 +958,7 @@ fn refresh_actions(
     let all_evidence = dest.join("source-evidence");
     fs::create_dir_all(&all_evidence)?;
     for s in &p.securities {
-        for provider in [Provider::Tdxaidata, Provider::Akshare, Provider::Tushare] {
+        for provider in [Provider::Hithink, Provider::Tdxaidata] {
             let root = staging.join(format!("actions-{}-{provider:?}", s.instrument));
             if root.is_dir() {
                 copy_tree(
@@ -1012,11 +1031,11 @@ pub fn check_source(
     provider: Provider,
     context: &TaskContext,
 ) -> Result<Value> {
-    if matches!(provider, Provider::Tdxaidata | Provider::Tushare) {
+    if matches!(provider, Provider::Tdxaidata | Provider::Hithink) {
         analytics_storage::credentials::load_source(if provider == Provider::Tdxaidata {
             "tdxaidata"
         } else {
-            "tushare"
+            "hithink"
         })?;
     }
     let today = chrono::Local::now();
@@ -1028,20 +1047,37 @@ pub fn check_source(
     let mut checks = vec![];
     let mut common: BTreeMap<String, Vec<BTreeMap<Date, Value>>> = BTreeMap::new();
     let mut native_requests = 0;
-    let windows = [
-        DateRange {
-            start: "2006-12-04".parse()?,
-            end: "2006-12-08".parse()?,
-        },
-        DateRange {
-            start: "2016-06-13".parse()?,
-            end: "2016-06-24".parse()?,
-        },
-        DateRange {
-            start: end - chrono::Duration::days(7),
-            end,
-        },
-    ];
+    let windows = if provider == Provider::Hithink {
+        [
+            DateRange {
+                start: end - chrono::Duration::days(30),
+                end,
+            },
+            DateRange {
+                start: end - chrono::Duration::days(60),
+                end,
+            },
+            DateRange {
+                start: end - chrono::Duration::days(90),
+                end,
+            },
+        ]
+    } else {
+        [
+            DateRange {
+                start: "2006-12-04".parse()?,
+                end: "2006-12-08".parse()?,
+            },
+            DateRange {
+                start: "2016-06-13".parse()?,
+                end: "2016-06-24".parse()?,
+            },
+            DateRange {
+                start: end - chrono::Duration::days(7),
+                end,
+            },
+        ]
+    };
     for round in 0..3 {
         for id in [
             "SH600000", "SH600018", "SZ000001", "SH000300", "SH600030", "SH600068",
@@ -1052,7 +1088,11 @@ pub fn check_source(
                     start: range.start - chrono::Duration::days(round * 3),
                     end: range.end,
                 };
-                let r = if round == 0 && i == 1 && id == "SH600000" {
+                let r = if provider == Provider::Tdxaidata
+                    && round == 0
+                    && i == 1
+                    && id == "SH600000"
+                {
                     DateRange {
                         start: "2006-12-04".parse()?,
                         end,
@@ -1061,7 +1101,7 @@ pub fn check_source(
                     r
                 };
                 context.report(format!(
-                    "通达信小样本 第{}轮 · {} · {}—{}",
+                    "来源小样本 第{}轮 · {} · {}—{}",
                     round + 1,
                     id,
                     r.start,
@@ -1147,7 +1187,7 @@ mod tests {
             end: "2017-07-01".parse().unwrap(),
         };
         let request = WorkflowRequest::CollectAnnouncements {
-            request: collection(Provider::Akshare, "SH600000", &scope, ""),
+            request: collection(Provider::Cninfo, "SH600000", &scope, ""),
             resume: None,
         };
         let snapshot = crate::snapshot(&w, &request).unwrap();
@@ -1170,24 +1210,32 @@ mod tests {
         );
     }
     #[test]
-    fn every_default_purpose_tries_tdx_first_and_policy_is_separate_from_templates() {
+    fn defaults_use_hithink_for_supported_roles_and_policy_is_separate_from_templates() {
         let temp = tempfile::tempdir().unwrap();
         let w = Workspace::open(temp.path()).unwrap();
         let mut policy = SourcePolicy::load(&w).unwrap();
         assert_eq!(policy.priorities.len(), 5);
-        for order in policy.priorities.values() {
-            assert_eq!(order[0], Provider::Tdxaidata);
+        for (role, order) in &policy.priorities {
+            if *role == DataRole::Execution {
+                assert!(order.is_empty());
+            } else {
+                assert_eq!(order[0], Provider::Hithink);
+                assert_eq!(order[1], Provider::Tdxaidata);
+            }
         }
         assert_eq!(
-            policy.routes(DataRole::Quotes, Some(Provider::Akshare)),
-            vec![Provider::Akshare]
+            policy.routes(DataRole::Quotes, Some(Provider::Hithink)),
+            vec![Provider::Hithink]
         );
+        let mut old = policy.clone();
+        old.schema_version = 1;
+        assert!(old.validate().is_err());
         let original = signature(&ResearchTemplate::builtin().unwrap()).unwrap();
         policy
             .priorities
             .get_mut(&DataRole::Actions)
             .unwrap()
-            .swap(1, 2);
+            .swap(0, 1);
         policy.save(&w).unwrap();
         assert_eq!(SourcePolicy::load(&w).unwrap(), policy);
         assert_eq!(
@@ -1244,7 +1292,7 @@ mod tests {
         let frozen = crate::snapshot(&w, &task).unwrap();
         assert_eq!(
             frozen["source_policy"]["priorities"]["actions"][0],
-            "tdxaidata"
+            "hithink"
         );
         let ctx = TaskContext::current();
         let run = w.begin(Uuid::new_v4(), "preview", frozen).unwrap();
@@ -1261,5 +1309,25 @@ mod tests {
             fs::read_dir(w.resolve(".jfquant/staging")).unwrap().count(),
             0
         );
+    }
+}
+
+#[cfg(test)]
+mod retired_policy_tests {
+    use super::*;
+    #[test]
+    fn retired_policy_is_rejected_and_preserved_for_reconfiguration() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(temp.path()).unwrap();
+        let path = workspace.resolve(".jfquant/source-policy.json");
+        let bytes = br#"{"schema_version":2,"priorities":{"quotes":["eastmoney"]}}"#;
+        fs::write(&path, bytes).unwrap();
+        assert!(
+            SourcePolicy::load(&workspace)
+                .unwrap_err()
+                .to_string()
+                .contains("removed_provider")
+        );
+        assert_eq!(fs::read(path).unwrap(), bytes);
     }
 }

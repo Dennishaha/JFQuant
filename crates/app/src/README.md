@@ -1,3 +1,11 @@
+## 当前采集契约（2026-10-15）
+
+HiThink 为默认主源，由 Rust 直接调用 REST；通达信备用，维持内置 Python `tdxaidata==1.2.2`；巨潮公告使用独立 `cninfo` 来源。旧来源依赖、配置、权限检查及历史兼容入口已移除；旧数据不迁移、不删除，重新配置来源并采集。
+
+公共来源为 `hithink|tdxaidata|cninfo`，复权选项为 `hithink-forward|tdx-forward|none`。服务协议18、采集协议12、来源策略2；HiThink 行情格式6，通达信格式5与 Qlib 读取保留。HiThink 训练选择供应商口径（`price_basis=provider`），前复权 OHLC、原始股数及人民币成交额、VWAP null；回测使用原价。训练缓存与 manifest 冻结口径、来源和证据哈希，特征顺序及公式版本保持。
+
+接口、凭据、覆盖范围与复现命令见[采集组件](../../storage/collectors/README.md)。当前成分不能回填历史，下载成功不代表研究或账户资料完整。
+
 # App 源码：表单、状态与服务事件
 
 [上级：analytics-desktop](../README.md) · [打包与安装](../packaging/README.md) · [公共后台](../../workflow/src/README.md)
@@ -68,7 +76,7 @@ cargo clippy -p analytics-desktop --all-targets -- -D warnings
 flowchart LR
   CLIENT["App / jfquant"] --> SERVICE["协议14公共服务"]
   SERVICE --> POOL["保存/预览不可变股票池"]
-  SERVICE --> COLLECT["Rust监督内置Python双源采集"]
+  SERVICE --> COLLECT["Rust HiThink REST / 监督内置Python备用采集"]
   COLLECT --> SNAPSHOT["验证后的Parquet版本与公司行动候选"]
   POOL --> FREEZE["模板10：池、基准、退出策略、签名"]
   SNAPSHOT --> READY["原价、历史覆盖、公司行动准入"]
@@ -78,25 +86,13 @@ flowchart LR
   RESEARCH --> RESULT["结果14：成员变化、退出/阻碍、账户快照、上游总费用"]
 ```
 
-`pools create/validate/import/export/list/versions/preview` 使用公共定义及解析器；`data collect --provider akshare|yfinance --kind market|actions` 提交后台任务，使用 jobs wait 显式等待。`run --request` 可提交完整公共请求。App提供来源、采集日期/证券、股票池JSON编辑、日期预览、退出策略及失败采集恢复按钮。包内Python和依赖只用于采集，不需要外部Python；日常操作不调用Cargo。
 
-```bash
-jfquant templates default --universe csi300 --output csi300-template.json
-jfquant pools validate --definition pool.json
-jfquant pools create --definition pool.json
-jfquant pools preview pool-0123456789abcdef --market market-0123456789abcdef --date 2026-10-12
-jfquant data collect --provider akshare --start 2004-01-01 --end 2026-10-13 --instruments SH600000,SZ000001,SH000300 --benchmarks SH000300
-jfquant data collect --kind actions --provider akshare --start 2004-01-01 --end 2026-10-13 --instruments SH600000,SZ000001
-jfquant research demo-parquet
-```
 
 示例ID须换为实际版本。下载可恢复验证过的证券；重新提交时参数必须与owner一致。临时/缺失输入不会自动换源、补字段或启动训练。原价撮合不使用Yahoo拆股调整价；指数历史成员缺失停止训练，回测按上游除权除息日处理分红与拆股，已知不支持事件阻断。2010样本外的5+1窗口需要2004—2009完整历史池及行情，不能以当前成分回填。
 
 开发验收先运行 `crates/app/packaging/build-collector.sh`，再执行workspace nextest、严格Clippy/Rustdoc和格式检查。解释器、依赖、数据、模型、缓存、日志、运行记录及DMG均留在忽略目录。另一台Apple Silicon/macOS14实机验收待完成。
 
 `interaction_tests::packaging_load_command_rejection_fixtures` 通过内置解释器运行打包加载命令 fixture，验证严格macOS14.0边界、旧Mach-O版本命令、rpath目标缺失与路径越界。
-
-来源选择同时设置adjustment_source：AKShare固定新浪系数，Yahoo固定none候选；GUI展示来源并调用公共请求校验。后台返回逐证券错误及受影响因子，GUI不自行计算价量或豁免公司行动。
 
 [schedule_ui.rs](schedule_ui.rs)只编辑公共Schedule，完整合法日期立即更新共享模型，非法输入保留、显示错误并阻止运行/保存；不在UI计算日历。platform.rs提供日期预览表、需求补采、原事件/哈希/公告候选查看及修订JSON入口，统一提交WorkflowRequest；DuckDB/LightGBM仍留在worker内。交互测试覆盖日程请求及重复点击防护，原后台合成研究测试继续覆盖跨折账户和CLI结果一致。
 
@@ -129,7 +125,7 @@ flowchart LR
 
 为什么调整：普通市场代码无需先登记身份；独立目录、审核和权威名录下载增加了研究前置负担。特殊历史代码仍需在快照内明确区间，不能将旧证券行情或权益接到另一证券。训练使用价量和标签，到账／交付资料只在实际账户执行时检查。
 
-当前格式：模板10、需求3、准入5、股票池3、公司行动5、规范行情5、系数3、采集7、服务14、研究结果14；快照内来源映射1、训练产物3。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
+当前格式：模板10、需求3、准入5、股票池3、公司行动5、规范行情5/HiThink6、系数3、采集7、服务14、研究结果14；快照内来源映射1、训练产物3。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
 
 界面移除身份管理和目录选择。研究面板提供“仅训练模型”、训练任务ID及“使用已有模型回测”；原“执行年度研究”为两阶段组合。界面展示事实状态，无有效交易和未完成回测不得当作策略收益验收通过。
 
@@ -153,7 +149,7 @@ platform.rs仅选择价格口径、因子profile和标的profile；panels.rs选�
 
 ## 来源设置为何仍经公共后台
 
-`platform.rs`只维护来源选择、密码输入及策略编辑；保存、预览、刷新和小样本检查统一发送workflow请求。五类用途默认通达信第一，忙碌时禁止重复提交；返回的实际来源、能力缺口和新版本显示在同一任务详情中，UI不自行把失败改为通过。
+`platform.rs`只维护来源选择、密码输入及策略编辑；保存、预览、刷新和小样本检查统一发送workflow请求。行情、日历、成员及行动默认HiThink第一，通达信备用，完整执行资料来源为空，忙碌时禁止重复提交；返回的实际来源、能力缺口和新版本显示在同一任务详情中，UI不自行把失败改为通过。
 
 ```mermaid
 flowchart LR
@@ -166,8 +162,6 @@ flowchart LR
 
 ## 按缺口补采实施证据
 
-为什么独立任务：补齐一只股票的支付/上市日不应重取全池或重训模型。`CollectAnnouncements`接收固定AKShare/巨潮来源、证券、日期和可选resume，App和CLI提交同一请求。先验证再接受，失败不登记事件版本；成功返回公告manifest及`candidate_only=true`，必须经`InspectActions/ReviseActions`核对原值哈希、实施字段引用后生成不可变修订。App历史可恢复公告采集。新增请求采用服务协议14。
-
 ```mermaid
 flowchart LR
  U[App / jfquant collect announcements] --> W[公共请求与任务记录]
@@ -176,5 +170,3 @@ flowchart LR
  M --> R[原值及实施证据审阅]
  R --> V[新公司行动版本 / 旧值保留]
 ```
-
-复现：`jfquant data collect --kind announcements --provider akshare --start 2016-05-01 --end 2017-07-01 --instruments SH600000,SZ000001`，然后`jfquant jobs wait TASK_ID`。候选解析v3支持空格日期、沪市六列换行表和深市起始交易日，矛盾不自动裁决。真实研究本轮不使用Qlib快照；通达信行情完整时不要求其他来源背书，备用来源仅补用途缺口。详见[设计决定](../../workflow/DECISIONS.md)。

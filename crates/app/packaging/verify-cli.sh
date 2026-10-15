@@ -24,9 +24,22 @@ recipe="$(plutil -extract details.demo_template_path raw -o - "$check_root/demo.
 market="$(plutil -extract data.id raw -o - "$check_root/demo.json")"
 actions="$(plutil -extract details.demo_actions raw -o - "$check_root/demo.json")"
 run_cli data sources list > "$check_root/sources.json"
-for role in quotes actions execution members calendar; do
-  [ "$(plutil -extract "result.results.details.policy.priorities.$role.0" raw -o - "$check_root/sources.json")" = tdxaidata ]
+for role in quotes actions members calendar; do
+  [ "$(plutil -extract "result.results.details.policy.priorities.$role.0" raw -o - "$check_root/sources.json")" = hithink ]
 done
+"$app/Contents/Resources/python/bin/python3" -I -B - "$check_root/sources.json" <<'PY_CHECK'
+import json, sys
+with open(sys.argv[1]) as handle:
+    policy = json.load(handle)["result"]["results"]["details"]["policy"]
+assert policy["schema_version"] == 2
+assert policy["priorities"]["execution"] == []
+PY_CHECK
+# The same private stdin interface configures the Rust REST provider.
+printf '%s' 'fixture-packaged-hithink-key' | run_cli data sources configure --provider hithink --key-stdin > "$check_root/hithink-credential.json"
+[ "$(stat -f '%Lp' "$check_root/home/Library/Application Support/JFQuant/credentials/hithink.json")" = 600 ]
+if run_cli data supplement > "$check_root/retired-command.json" 2> "$check_root/retired-command.stderr"; then
+  echo "Retired action command unexpectedly accepted" >&2; exit 1
+fi
 run_cli data refresh --template "$recipe" --market "$market" --actions "$actions" --preview > "$check_root/refresh-preview.json"
 [ "$(plutil -extract result.results.details.plan.schema_version raw -o - "$check_root/refresh-preview.json")" = 1 ]
 [ "$(plutil -extract result.results.details.account.status raw -o - "$check_root/refresh-preview.json")" = not_run ]
@@ -118,9 +131,9 @@ run_cli jobs results "$training_id" > "$check_root/train-results.json"
 run_cli research backtest --training "$training_id" --actions "$actions" --template "$recipe" > "$check_root/backtest-submit.json"
 backtest_id="$(plutil -extract task_id raw -o - "$check_root/backtest-submit.json")"
 run_cli jobs wait "$backtest_id" --timeout 60 > "$check_root/backtest-wait.json"
-[ "$(plutil -extract results.schema_version raw -o - "$check_root/backtest-wait.json")" = 15 ]
+[ "$(plutil -extract results.schema_version raw -o - "$check_root/backtest-wait.json")" = 16 ]
 
-# A provider profile is explicit and supported only by a frozen original Qlib source.
+# Exercise provider training on the retained Qlib reader; HiThink has separate REST fixtures.
 run_cli research demo > "$check_root/qlib-demo-submit.json"
 qlib_demo_id="$(plutil -extract task_id raw -o - "$check_root/qlib-demo-submit.json")"
 run_cli jobs wait "$qlib_demo_id" --timeout 30 > "$check_root/qlib-demo-wait.json"

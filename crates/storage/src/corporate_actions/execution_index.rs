@@ -162,41 +162,6 @@ impl ExecutionIndex {
             .and_then(|d| d.get(&date))
             .is_some_and(|v| v == "full_day")
     }
-    /// Sparse independent Sina coefficients are effective until the next dated point.
-    /// Qlib's restoration factor is deliberately not used as this event coefficient.
-    pub fn independent_ratio(
-        &self,
-        id: &str,
-        previous: Date,
-        date: Date,
-    ) -> io::Result<Option<f64>> {
-        let Some(data) = &self.data else {
-            return Ok(None);
-        };
-        let Some(source) = data
-            .capabilities
-            .get(&format!("{id}:independent_sina_factor"))
-        else {
-            return Ok(None);
-        };
-        if source["status"] != "available"
-            || source["verified_through"]
-                .as_str()
-                .and_then(|s| s.parse::<Date>().ok())
-                .is_none_or(|through| through < date)
-        {
-            return Err(invalid("independent_coefficient_coverage_missing"));
-        }
-        let points = data
-            .coefficients
-            .get(id)
-            .ok_or_else(|| invalid("independent_coefficient_missing"))?;
-        let old = points.range(..=previous).next_back().map(|(_, v)| *v);
-        let new = points.range(..=date).next_back().map(|(_, v)| *v);
-        old.zip(new)
-            .map(|(p, n)| Some(n / p))
-            .ok_or_else(|| invalid("independent_coefficient_coverage_missing"))
-    }
     /// Unknown special-category coverage is a warning under the explicit supplier policy.
     pub fn warnings(&self) -> Vec<String> {
         if self.policy == EventCheckPolicy::Audited || self.synthetic {
@@ -258,7 +223,7 @@ mod tests {
                         start: date("2024-01-01"),
                         end: date("2024-12-31"),
                     },
-                    source: "tushare.dividend/implemented/per-share-v1".into(),
+                    source: "hithink.events/per-share-v1".into(),
                     evidence: vec!["fixture".into()],
                 },
             )]),
@@ -278,40 +243,6 @@ mod tests {
                 .check("SH600000", date("2024-02-01"))
                 .is_err()
         );
-    }
-    #[test]
-    fn cninfo_uses_independent_coefficients_without_future_backfill() {
-        let mut b = book();
-        b.structured_coverage.get_mut("SH600000").unwrap().source =
-            "akshare.cninfo/implemented/per-ten-shares-v1".into();
-        b.execution_data = Some(crate::execution_data::ExecutionData {
-            schema_version: 1,
-            coefficients: BTreeMap::from([(
-                "SH600000".into(),
-                BTreeMap::from([(date("2024-01-01"), 1.), (date("2024-09-01"), 1.1)]),
-            )]),
-            capabilities: BTreeMap::from([(
-                "SH600000:independent_sina_factor".into(),
-                serde_json::json!({"status":"available","verified_through":"2024-12-31"}),
-            )]),
-            ..Default::default()
-        });
-        let p = ExecutionIndex::build(&b, EventCheckPolicy::Provider).unwrap();
-        p.check("SH600000", date("2024-02-01")).unwrap();
-        assert_eq!(
-            p.independent_ratio("SH600000", date("2024-02-01"), date("2024-02-02"))
-                .unwrap(),
-            Some(1.)
-        );
-        assert!(
-            p.independent_ratio("SH600000", date("2023-12-31"), date("2024-01-01"))
-                .is_err()
-        );
-        assert!(
-            p.independent_ratio("SH600000", date("2024-12-31"), date("2025-01-01"))
-                .is_err()
-        );
-        assert!(p.check("SH600000", date("2024-09-01")).is_err());
     }
     #[test]
     fn future_missing_payment_does_not_retroactively_remove_candidates() {

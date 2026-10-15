@@ -90,7 +90,7 @@ pub(crate) fn prepare(
     acquisition["company_action_source"] = json!(if announcements {
         "cninfo-announcements"
     } else {
-        "akshare.cninfo/implemented/per-ten-shares-v1"
+        "hithink.events/per-share-v1"
     });
     collect_independent(
         &root,
@@ -106,7 +106,7 @@ pub(crate) fn prepare(
                     .as_str()
                     .map_or_else(|| requirements["execution_end"].clone(), |s| json!(s)),
             )?;
-            let provider = if announcements { "cninfo" } else { "akshare" };
+            let provider = if announcements { "cninfo" } else { "hithink" };
             let (code, start, end) = if let Some(e) = mapping.exceptions.get(id) {
                 let l = e
                     .locators
@@ -127,8 +127,8 @@ pub(crate) fn prepare(
             if announcements {
                 let request = analytics_storage::collector::CollectionRequest {
                     source_bindings: Default::default(),
-                    provider: analytics_storage::collector::Provider::Akshare,
-                    adjustment_source: analytics_storage::adjustment::AdjustmentSource::SinaHfq,
+                    provider: analytics_storage::collector::Provider::Cninfo,
+                    adjustment_source: analytics_storage::adjustment::AdjustmentSource::None,
                     start,
                     end,
                     instruments: [code].into(),
@@ -142,8 +142,9 @@ pub(crate) fn prepare(
             } else {
                 let request = analytics_storage::collector::CollectionRequest {
                     source_bindings: Default::default(),
-                    provider: analytics_storage::collector::Provider::Akshare,
-                    adjustment_source: analytics_storage::adjustment::AdjustmentSource::SinaHfq,
+                    provider: analytics_storage::collector::Provider::Hithink,
+                    adjustment_source:
+                        analytics_storage::adjustment::AdjustmentSource::HithinkForward,
                     start,
                     end,
                     instruments: [code.clone()].into(),

@@ -434,6 +434,7 @@ impl Workspace {
             {
                 return Err("unverified market provenance".into());
             }
+            analytics_core::source_map::reject_removed_sources(&source)?;
             source["content_sha256"] = json!(market_content_hash(path)?);
             source["source_map"] = serde_json::to_value(dataset.source_map())?;
             (
@@ -687,7 +688,7 @@ impl Workspace {
 pub enum WorkflowRequest {
     /// Fetch bounded implementation evidence independently of model/universe preparation.
     CollectAnnouncements {
-        /// Explicit CNINFO collection scope, using the AKShare collector boundary.
+        /// Explicit CNINFO collection scope, using the independent announcement collector.
         request: analytics_storage::collector::CollectionRequest,
         /// Prior checkpoint for the identical source, dates and collector code.
         resume: Option<Uuid>,
@@ -828,8 +829,6 @@ pub enum WorkflowRequest {
         /// Previous owned collection task.
         resume: Option<Uuid>,
     },
-    /// Inspect endpoint permissions without declaring source completeness.
-    TusharePermissions {},
     /// Register existing JFQuant-owned data from an explicit workspace path.
     RegisterData {
         /// Relative or absolute input path.
@@ -842,19 +841,6 @@ pub enum WorkflowRequest {
         /// Market version ID.
         market: String,
         /// Previous interrupted acquisition staging task.
-        resume: Option<Uuid>,
-    },
-    /// Enrich, detail, cash payment, or evidence repair in a new version.
-    SupplementActions {
-        /// Source action version ID.
-        actions: String,
-        /// enrich, details, payments, repair, repair-payments, retry.
-        method: String,
-        /// First requested ex date.
-        start: analytics_core::Date,
-        /// Last requested date.
-        end: analytics_core::Date,
-        /// Previous interrupted derivation task.
         resume: Option<Uuid>,
     },
     /// Train reusable fold models without validating future account settlements.
@@ -919,15 +905,13 @@ impl WorkflowRequest {
             Self::CreateDemo {} => "创建合成演示数据".into(),
             Self::CheckUpdates {} => "检查行情更新".into(),
             Self::DownloadMarket { tag, .. } => format!("下载行情快照 {tag}"),
-            Self::TusharePermissions {} => "Tushare接口权限检查".into(),
-            Self::CollectActions { .. } => "Python公司行动采集".into(),
+            Self::CollectActions { .. } => "公司行动采集".into(),
             Self::CollectCoefficients { .. } => "独立复权系数采集".into(),
             Self::ComposeMarket { .. } => "组合研究行情版本".into(),
             Self::CollectQuotes { .. } => "独立行情采集".into(),
-            Self::CollectMarket { .. } => "Python双源行情采集".into(),
+            Self::CollectMarket { .. } => "行情采集".into(),
             Self::RegisterData { .. } => "核验登记数据版本".into(),
             Self::DownloadActions { .. } => "下载公司行动历史".into(),
-            Self::SupplementActions { method, .. } => format!("补充公司行动 ({method})"),
             Self::Research {
                 template,
                 audit_only,
@@ -1093,9 +1077,9 @@ fn execute_scoped(
     let mut details = Value::Null;
     match request {
         WorkflowRequest::CollectAnnouncements { request, resume } => {
-            if request.provider != analytics_storage::collector::Provider::Akshare {
+            if request.provider != analytics_storage::collector::Provider::Cninfo {
                 return Err(
-                    "announcement_source_unsupported: select akshare for CNINFO evidence".into(),
+                    "announcement_source_unsupported: select cninfo for CNINFO evidence".into(),
                 );
             }
             let staging = w.resolve(format!(
@@ -1389,24 +1373,6 @@ fn execute_scoped(
             fs::rename(&staging, &output)?;
             data = Some(w.register(&output.join("market"))?);
         }
-        WorkflowRequest::TusharePermissions {} => {
-            let date = chrono::Utc::now().date_naive();
-            let request = analytics_storage::collector::CollectionRequest {
-                source_bindings: Default::default(),
-                provider: analytics_storage::collector::Provider::Tushare,
-                adjustment_source: analytics_storage::adjustment::AdjustmentSource::None,
-                start: date,
-                end: date,
-                instruments: BTreeSet::from(["SH600018".into()]),
-                benchmarks: Default::default(),
-                universes: Default::default(),
-            };
-            let staging = w.resolve(format!(".jfquant/staging/tushare-permissions-{}", run.id));
-            let path = analytics_storage::collector::check_tushare_permissions(
-                &request, &staging, context,
-            )?;
-            details = serde_json::from_slice(&fs::read(path)?)?;
-        }
         WorkflowRequest::CollectActions { request, resume } => {
             let owner = resume.unwrap_or(run.id);
             let staging = w
@@ -1453,8 +1419,8 @@ fn execute_scoped(
             let dataset = DailyDataset::open(w.resolve(&market_version.path))?;
             let request = analytics_storage::collector::CollectionRequest {
                 source_bindings: Default::default(),
-                provider: analytics_storage::collector::Provider::Akshare,
-                adjustment_source: analytics_storage::adjustment::AdjustmentSource::SinaHfq,
+                provider: analytics_storage::collector::Provider::Hithink,
+                adjustment_source: analytics_storage::adjustment::AdjustmentSource::HithinkForward,
                 start: *dataset.calendar.first().ok_or("empty market calendar")?,
                 end: *dataset.calendar.last().ok_or("empty market calendar")?,
                 instruments: symbols
@@ -1465,7 +1431,7 @@ fn execute_scoped(
                 benchmarks: Default::default(),
                 universes: Default::default(),
             };
-            context.report("巨潮优先：分红派息，新浪补充上市日及独立系数")?;
+            context.report("HiThink 公司行动事件；缺失日期保持 null")?;
             let file = analytics_storage::collector::collect_actions(&request, &staging, context)?;
             let mut book = ActionBundle::read(&file)?;
             for id in symbols.iter().filter(|s| !request.instruments.contains(*s)) {
@@ -1477,55 +1443,6 @@ fn execute_scoped(
             fs::write(&file, serde_json::to_vec_pretty(&book)?)?;
             fs::rename(staging, &path)?;
             data = Some(w.register(&path.join("actions.json"))?);
-        }
-        WorkflowRequest::SupplementActions {
-            actions,
-            method,
-            start,
-            end,
-            resume,
-        } => {
-            let a = version(w, actions, "actions")?;
-            let path = w.resolve(&a.path);
-            let source = ActionBundle::read(&path)?;
-            if source.schema_version == 6 {
-                return Err("format_6_requires_reconciliation: use data reconcile-actions or evidence-backed revise-actions".into());
-            }
-            let root = path.parent().ok_or("action parent missing")?;
-            let final_output = w.root.join(format!("data/actions-{}", run.id));
-            let owner = resume.unwrap_or(run.id);
-            let output = if method == "retry" {
-                final_output.clone()
-            } else {
-                w.root.join(format!(".jfquant/staging/supplement-{owner}"))
-            };
-            context.report(format!("公司行动补充：{method}"))?;
-            use analytics_storage::corporate_actions as ca;
-            match method.as_str() {
-                "enrich" => {
-                    ca::enrich_public(&source, root, &output)?;
-                }
-                "details" => {
-                    ca::fetch_details(&source, root, &output, *start, *end)?;
-                }
-                "payments" => {
-                    ca::fetch_pay_dates(&source, root, &output, *start, *end)?;
-                }
-                "repair" => {
-                    ca::repair_from_evidence(&source, root, &output)?;
-                }
-                "repair-payments" => {
-                    ca::repair_pay_dates(&source, root, &output, *start, *end)?;
-                }
-                "retry" => {
-                    ca::retry_public(&source, root, &output)?;
-                }
-                _ => return Err("unknown action supplement".into()),
-            };
-            if output != final_output {
-                fs::rename(&output, &final_output)?;
-            }
-            data = Some(w.register(&final_output.join("actions.json"))?);
         }
         WorkflowRequest::TrainResearch {
             template,
@@ -1620,9 +1537,9 @@ pub fn snapshot(workspace: &Workspace, request: &WorkflowRequest) -> Result<Valu
         WorkflowRequest::RefreshData { request } => request.template.validate()?,
         WorkflowRequest::CollectAnnouncements { request, .. } => {
             request.validate()?;
-            if request.provider != analytics_storage::collector::Provider::Akshare {
+            if request.provider != analytics_storage::collector::Provider::Cninfo {
                 return Err(
-                    "announcement_source_unsupported: select akshare for CNINFO evidence".into(),
+                    "announcement_source_unsupported: select cninfo for CNINFO evidence".into(),
                 );
             }
         }
@@ -1680,7 +1597,6 @@ pub fn snapshot(workspace: &Workspace, request: &WorkflowRequest) -> Result<Valu
             v
         }
         WorkflowRequest::BacktestResearch { actions, .. }
-        | WorkflowRequest::SupplementActions { actions, .. }
         | WorkflowRequest::ReviseActions { actions, .. }
         | WorkflowRequest::InspectActions { actions, .. } => {
             vec![version_metadata(workspace, actions, "actions")?]

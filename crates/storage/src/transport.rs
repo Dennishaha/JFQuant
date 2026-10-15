@@ -1,19 +1,35 @@
 //! System curl transport with cooperative cancellation and child reaping.
 use analytics_core::task::TaskContext;
 use std::{
-    io::{self, Read},
+    io::{self, Read, Write},
     process::{Command, Output, Stdio},
     thread,
     time::{Duration, Instant},
 };
 /// Execute curl without a shell. Pipes are drained while the worker polls cancellation.
 pub fn curl(command: &mut Command) -> io::Result<Output> {
+    curl_input(command, None)
+}
+/// Execute curl with optional private stdin configuration; credentials never enter argv.
+pub fn curl_input(command: &mut Command, input: Option<&[u8]>) -> io::Result<Output> {
     let context = TaskContext::current();
     context.check()?;
     let mut child = command
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
+    if let Some(input) = input
+        && let Err(e) = child.stdin.take().unwrap().write_all(input)
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(e);
+    }
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
     fn read(mut stream: impl Read) -> io::Result<Vec<u8>> {

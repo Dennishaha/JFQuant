@@ -5,8 +5,6 @@ use analytics_core::DateRange;
 use serde_json::json;
 use std::path::PathBuf;
 
-#[cfg(test)]
-use crate::collector::REVIEWED_COLLECTOR_V9;
 fn verify_bytes(path: &Path, expected: &str) -> io::Result<Vec<u8>> {
     let bytes = fs::read(path)?;
     if format!("sha256:{:x}", Sha256::digest(&bytes)) != expected {
@@ -195,7 +193,7 @@ pub(super) fn announcement_evidence(
     let owner: Value = serde_json::from_slice(&owner_bytes).map_err(invalid)?;
     if !crate::collector::reviewed_collection_owner(&owner)
         || owner["operation"] != "announcements"
-        || owner["request"]["provider"] != "akshare"
+        || owner["request"]["provider"] != "cninfo"
     {
         return Err(invalid("unreviewed announcement evidence producer"));
     }
@@ -294,7 +292,13 @@ pub fn apply(
                 .ok_or_else(|| invalid("primary producer receipt missing"))?,
         )?)
         .map_err(invalid)?;
-        crate::collector::verify_coefficient_producer(&complete, Provider::Akshare)?;
+        if complete["provider"] == "hithink" {
+            if complete["collector_signature"] != crate::hithink::producer_signature() {
+                return Err(invalid("unreviewed hithink producer"));
+            }
+        } else {
+            crate::collector::verify_coefficient_producer(&complete, Provider::Tdxaidata)?;
+        }
     }
     if output.exists() {
         return Err(invalid("reconciliation output already exists"));
@@ -340,7 +344,7 @@ pub fn apply(
     let mut first = None::<Date>;
     let mut last = None::<Date>;
     for (id, coverage) in &source.structured_coverage {
-        if coverage.source != "akshare.cninfo/implemented/per-ten-shares-v1" {
+        if coverage.source != "hithink.events/per-share-v1" {
             continue;
         }
         let name = coverage
@@ -355,16 +359,11 @@ pub fn apply(
                 .ok_or_else(|| invalid("unhashed primary evidence"))?,
         )?)
         .map_err(invalid)?;
-        let e = &captured["evidence"];
-        let rows = e
-            .get("cninfo_decimal_records")
-            .unwrap_or(&e["cninfo"]["records"])
+        let rows = captured["records"]
             .as_array()
-            .ok_or_else(|| invalid("CNINFO records unavailable for replay"))?;
+            .ok_or_else(|| invalid("HiThink normalized events unavailable for replay"))?;
         let symbol = source.source_symbol(id)?;
-        inputs.insert(id.clone(), json!({"symbol":symbol,"rows":rows,"start":coverage.dates.start,"end":coverage.dates.end,
-            "sina_rows":e["sina_dividends"].as_array().cloned().unwrap_or_default(),"rights":e["sina_rights"].as_array().cloned().unwrap_or_default(),
-            "native":native.get(&(id.clone(),symbol.to_owned())).cloned().unwrap_or_default()}));
+        inputs.insert(id.clone(),json!({"symbol":symbol,"instrument":id,"events":rows,"start":coverage.dates.start,"end":coverage.dates.end,"native":native.get(&(id.clone(),symbol.to_owned())).cloned().unwrap_or_default()}));
         first = Some(first.map_or(coverage.dates.start, |d| d.min(coverage.dates.start)));
         last = Some(last.map_or(coverage.dates.end, |d| d.max(coverage.dates.end)));
     }
@@ -372,8 +371,8 @@ pub fn apply(
         return Err(invalid("no supported primary evidence to reconcile"));
     }
     let request = CollectionRequest {
-        provider: Provider::Akshare,
-        adjustment_source: crate::adjustment::AdjustmentSource::SinaHfq,
+        provider: Provider::Hithink,
+        adjustment_source: crate::adjustment::AdjustmentSource::HithinkForward,
         start: first.unwrap(),
         end: last.unwrap(),
         instruments: inputs.keys().cloned().collect(),
@@ -588,7 +587,7 @@ pub fn apply(
         .execution_issues
         .sort_by_key(|i| (i.instrument.clone(), i.id.clone(), i.code.clone()));
     bundle.schema_version = 6;
-    let receipt = json!({"schema_version":1,"rule_version":"jfquant-actions-v1","base_actions_sha256":format!("sha256:{:x}",Sha256::digest(fs::read(source_path)?)),
+    let receipt = json!({"schema_version":1,"rule_version":"jfquant-actions-v2","base_actions_sha256":format!("sha256:{:x}",Sha256::digest(fs::read(source_path)?)),
         "collector_signature":result["collector_signature"],"announcement_evidence":announcements,"inputs_sha256":input_hash,"evidence_sha256":bundle.raw_sha256,"timings_seconds":{"evidence":evidence_seconds,"replay":replay_seconds,"before_publication":started.elapsed().as_secs_f64()},"results":receipt_results,"reconciled_securities":resolved,"unresolved_count":bundle.execution_issues.iter().filter(|i| !i.skipped_by_engine()).count(),"warnings_count":bundle.execution_issues.iter().filter(|i| i.skipped_by_engine()).count()});
     // The supervised replay directory is temporary; immutable proof is the hashed receipt.
     fs::remove_dir_all(&staging)?;
@@ -615,18 +614,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let source = tmp.path().join("base");
         fs::create_dir_all(source.join("raw")).unwrap();
-        let row = json!({"F006D":"2024-06-01","F018D":"2024-06-03","F020D":"2024-06-04","F023D":null,
-            "F044V":"年度分红","F012N":"30.7","F010N":"5","F011N":"0","F007V":"10派30.7元送5股"});
-        let mut special = row.clone();
-        special["F044V"] = json!("特别分红");
-        special["F012N"] = json!("12.3");
-        special["F010N"] = json!("0");
-        let evidence = json!({"instrument":"SH600188","evidence":{"cninfo":{"records":[row.clone(),special,row]},"sina_dividends":[],"sina_rights":[]}});
+        let event = json!({"id":"SH600188:2024-06-04","instrument":"SH600188","announced":null,"record_date":null,"ex_date":"2024-06-04","pay_date":null,"listing_date":null,"cash_per_share":"4.30","shares_per_share":"0.5","terms":{"kind":"distribution","allocation":null},"source":"https://fuyao.aicubes.cn/api/a-share/corporate-actions/adjustment-factors?thscode=600188.SH"});
+        let evidence = json!({"instrument":"SH600188","records":[event]});
         let bytes = serde_json::to_vec(&evidence).unwrap();
         fs::write(source.join("raw/primary.json"), &bytes).unwrap();
         let book:ActionBundle=serde_json::from_value(json!({"schema_version":5,"downloader":"JFQuant analytics-workflow synthetic-demo-v1","downloaded_at":"fixture",
             "source_bindings":{},"coverage":{},"queried_symbols":["SH600188"],"actions":[],"failures":{"SH600188":"history coverage failure outside repaired date"},
-            "structured_coverage":{"SH600188":{"dates":{"start":"2012-01-01","end":"2026-10-12"},"source":"akshare.cninfo/implemented/per-ten-shares-v1","evidence":["primary.json"]}},
+            "structured_coverage":{"SH600188":{"dates":{"start":"2012-01-01","end":"2026-10-12"},"source":"hithink.events/per-share-v1","evidence":["primary.json"]}},
             "raw_sha256":{"primary.json":format!("sha256:{:x}",Sha256::digest(&bytes))}})).unwrap();
         let path = source.join("actions.json");
         fs::write(&path, serde_json::to_vec(&book).unwrap()).unwrap();
@@ -674,7 +668,7 @@ mod tests {
         let output = tmp.path().join("out");
         fs::create_dir_all(root.join("raw")).unwrap();
         fs::create_dir_all(output.join("raw")).unwrap();
-        let owner = json!({"operation":"actions","collector_protocol":9,"collector_signature":REVIEWED_COLLECTOR_V9,"normalization":crate::adjustment::NORMALIZATION,
+        let owner = json!({"operation":"actions","collector_protocol":12,"collector_signature":crate::collector::collector_signature(),"normalization":crate::adjustment::NORMALIZATION,
             "dependencies_sha256":format!("sha256:{:x}",Sha256::digest(include_bytes!("../../collectors/requirements.lock"))),
             "python_runtime_sha256":format!("sha256:{:x}",Sha256::digest(include_bytes!("../../collectors/python-runtime.lock.json"))),
             "request":{"provider":"tdxaidata","adjustment_source":"tdx_forward","start":"2024-01-01","end":"2024-12-31","instruments":["SH600188"],"source_bindings":{},"benchmarks":[],"universes":[]}});

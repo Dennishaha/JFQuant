@@ -1,3 +1,5 @@
+当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议18、采集协议12、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
+
 # analytics-cli / jfquant
 
 独立clap命令行客户端，和App共用同一工作区服务。stdout只输出JSON，长任务立即返回

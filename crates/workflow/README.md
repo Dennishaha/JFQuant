@@ -1,3 +1,5 @@
+当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议18、采集协议12、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
+
 # analytics-workflow
 
 本组件拥有工作区、不可变数据登记、独立因子／标的／工作流配置、Unix socket服务、
@@ -58,7 +60,7 @@ DUCKDB_DOWNLOAD_LIB=1 RUSTDOCFLAGS="-D warnings" cargo doc -p analytics-workflow
 App提交当前账户设置；CLI可用 `research backtest --training <ID> --actions <ID> --template <PATH>`。
 只提取模板的账户字段；原模型特征、训练日期和参数仍由训练产物冻结。
 
-## 研究准入与阶段缓存修复（服务协议16，结果格式16）
+## 研究准入与阶段缓存修复（服务协议18，结果格式16）
 
 完整研究和已有模型回测共用 `backtest/execution.rs` 的静态检查，计算前汇总来源失败、未查询、结构化覆盖不足、不支持条款、行情结构和交易参数问题。执行证券取测试期历史成员；资料从测试期首次入池检查至结束，覆盖出池未卖持仓。基准仅检查行情。训练入口不要求账户数据；普通分红/送转按 AKQuant 除权日条款核验，无需旧账本到账/上市日。真实持仓缺价仍在运行时阻断。
 
@@ -120,4 +122,4 @@ DUCKDB_DOWNLOAD_LIB=1 cargo build -p analytics-cli
 100股现金增加18元、价格变动后权益净增加3元，研究worker没有新增处理分支。
 
 `InspectActions`的问题项返回`issue`与其`sha256`，用于精确的`resolve_issues`修订，避免调用方
-推测序列化顺序。格式6拒绝旧`SupplementActions`路径，防止绕开统一核对规则。
+推测序列化顺序。旧补采任务不再支持提交或恢复；使用当前采集、对账与巨潮证据修订入口。

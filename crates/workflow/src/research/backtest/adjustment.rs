@@ -38,6 +38,10 @@ pub(super) fn adjustment_issues(
     let mut out = BTreeMap::new();
     for id in symbols {
         analytics_core::task::TaskContext::current().check()?;
+        if dataset.uses_supplier_prices(id) {
+            dataset.validate_factor_basis(id)?;
+            continue;
+        }
         let result = (|| -> Result<Vec<String>> {
             let range = dataset.security_range(id, start, end)?;
             let start = range.start;

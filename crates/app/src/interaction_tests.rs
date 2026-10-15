@@ -1415,15 +1415,15 @@ fn pool_benchmark_exit_policy_and_save_controls_use_shared_requests() {
 fn data_collection_controls_preserve_provider_and_prevent_duplicate_submissions() {
     let (mut h, _tmp) = platform_harness(Panel::Dataset);
     h.ctx.all_styles_mut(|s| s.animation_time = 0.0);
-    h.click("AKShare / yfinance 日线采集");
-    h.click("yfinance（候选与核验）");
+    h.click("HiThink / 通达信采集");
+    h.click("HiThink（主源）");
     h.click("采集日线并发布新版本");
     let command = h
         .commands
         .recv_timeout(std::time::Duration::from_secs(1))
         .unwrap();
     assert!(
-        matches!(command,WorkerCommand::ExecuteWorkflow{request,..} if matches!(&*request,analytics_workflow::WorkflowRequest::CollectMarket{request,..} if request.provider==analytics_storage::collector::Provider::Yfinance && request.adjustment_source==analytics_storage::adjustment::AdjustmentSource::None))
+        matches!(command,WorkerCommand::ExecuteWorkflow{request,..} if matches!(&*request,analytics_workflow::WorkflowRequest::CollectMarket{request,..} if request.provider==analytics_storage::collector::Provider::Hithink && request.adjustment_source==analytics_storage::adjustment::AdjustmentSource::HithinkForward))
     );
     h.click("采集日线并发布新版本");
     assert!(h.commands.try_recv().is_err());
@@ -1541,7 +1541,7 @@ fn alpha158_provider_training_without_actions_uses_shared_backend_and_split_prof
 #[test]
 fn credentials_are_never_in_platform_debug_output() {
     let state = crate::platform::PlatformState {
-        tushare_token: "private-fixture-token".into(),
+        hithink_key: "private-fixture-token".into(),
         tdx_key: "private-tdx-fixture-key".into(),
         ..Default::default()
     };
@@ -1552,19 +1552,23 @@ fn credentials_are_never_in_platform_debug_output() {
 }
 
 #[test]
-fn acquisition_defaults_match_all_purpose_tdx_first_policy() {
+fn acquisition_defaults_match_hithink_main_and_explicit_execution_gap() {
     let state = crate::platform::PlatformState::default();
     assert_eq!(
         state.collection_provider,
-        analytics_storage::collector::Provider::Tdxaidata
+        analytics_storage::collector::Provider::Hithink
     );
     assert_eq!(
         state.adjustment_source,
-        analytics_storage::adjustment::AdjustmentSource::TdxForward
+        analytics_storage::adjustment::AdjustmentSource::HithinkForward
     );
     let policy: analytics_workflow::refresh::SourcePolicy =
         serde_json::from_str(&state.source_policy_editor).unwrap();
-    for sources in policy.priorities.values() {
-        assert_eq!(sources[0], state.collection_provider);
+    for (role, sources) in &policy.priorities {
+        if *role == analytics_workflow::refresh::DataRole::Execution {
+            assert!(sources.is_empty());
+        } else {
+            assert_eq!(sources[0], state.collection_provider);
+        }
     }
 }

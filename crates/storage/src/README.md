@@ -1,3 +1,11 @@
+## 当前采集契约（2026-10-15）
+
+HiThink 为默认主源，由 Rust 直接调用 REST；通达信备用，维持内置 Python `tdxaidata==1.2.2`；巨潮公告使用独立 `cninfo` 来源。旧来源依赖、配置、权限检查及历史兼容入口已移除；旧数据不迁移、不删除，重新配置来源并采集。
+
+公共来源为 `hithink|tdxaidata|cninfo`，复权选项为 `hithink-forward|tdx-forward|none`。服务协议18、采集协议12、来源策略2；HiThink 行情格式6，通达信格式5与 Qlib 读取保留。HiThink 训练选择供应商口径（`price_basis=provider`），前复权 OHLC、原始股数及人民币成交额、VWAP null；回测使用原价。训练缓存与 manifest 冻结口径、来源和证据哈希，特征顺序及公式版本保持。
+
+接口、凭据、覆盖范围与复现命令见[采集组件](../collectors/README.md)。当前成分不能回填历史，下载成功不代表研究或账户资料完整。
+
 # Storage 源码：文件、下载与证据
 
 [上级：analytics-storage](../README.md) · [公司行动内部模块](corporate_actions/README.md) · [数据版本登记](../../workflow/src/README.md)
@@ -12,7 +20,7 @@
 | [acquisition.rs](acquisition.rs) | `ReleaseManifest`、固定release下载、验证大小/哈希、安全解包、恢复与原子发布 |
 | [qlib.rs](qlib.rs) | `QlibDataset/DailyField`、真实交易日历、历史membership、nullable float32偏移读取、原价恢复 |
 | [transport.rs](transport.rs) | 受`TaskContext`管理的curl、并发读取stdout/stderr、超时与取消回收；JSON请求错误 |
-| [corporate_actions.rs](corporate_actions.rs) | `ActionBundle`、公开历史/详情解析、来源对账、日期补充、失败项重试与证据repair |
+| [corporate_actions.rs](corporate_actions.rs) | `ActionBundle`、来源身份与证据校验、固定对账和巨潮实施证据修订 |
 | [collector.rs](collector.rs) | 包内采集监督、协议7、限速/取消、分片证据与检查点校验 |
 | [adjustment.rs](adjustment.rs) | 显式日期系数、证券来源映射、首个原价收盘锚点和转换版本 |
 | [daily.rs](daily.rs) | Qlib/规范行情5共用读取、研究价量、原价及真实成交股数 |
@@ -57,38 +65,20 @@ jfquant jobs wait TASK_UUID
 ```bash
 cargo nextest run -p analytics-storage
 cargo clippy -p analytics-storage --all-targets -- -D warnings
-cargo nextest run -p analytics-cli -E 'test(standard_download) | test(standard_action_repair)'
+cargo nextest run -p analytics-cli -E 'test(standard_download) | test(retired_action_commands)'
 ```
 
 前两项核对schema、归档、二进制读取、解析器、本地HTTP故障和子进程取消；最后一项还需[原生环境](../../README.md#开发与验收)，验证任务记录、busy及原子版本发布。真实公网下载只作单独验收，不进入网络依赖单元测试。数据、证据和检查点不提交Git。
 
 ## 双源采集与统一日行情
 
-`collector::CollectionRequest / Provider / collect / collect_quotes / collect_coefficients / collect_actions` 使用包内 CPython 3.12，AKShare 1.19.1、yfinance 1.7.0，依赖和发行包 SHA256 在组件旁锁定。Rust 服务监督单任务子进程，JSON Lines 协议7承载进度、证券分片、完成或稳定错误；取消、超时和异常均回收进程。owner、证券文件及证据哈希匹配后才恢复，成功证券不重复下载。详见 [采集包](../collectors/README.md)。
-
 `daily::DailyDataset` 同时读取 Qlib 和规范 Parquet，提供交易日历、历史成员、归一化因子字段及独立 `raw_field`。规范格式5含 `daily_manifest.json` 和 `bars/SHxxxxxx.parquet`；实际价格、后复权价格、股数及人民币成交额分别保存，缺失值保留 null。`field` 采用固定价量重基准规则，`raw_field` 只接收已经验证的原价。Yahoo 标为 `split_adjusted_candidate`，不能用于严格撮合。
 
-```mermaid
-flowchart TD
-  REQUEST["公共采集请求：来源、证券、日期"] --> CHILD["内置Python：白名单AKShare / yfinance"]
-  CHILD --> EVIDENCE["HTTP响应体与结构化表格分开留证"]
-  CHILD --> SHARD["逐证券数据分片"]
-  EVIDENCE --> CHECK["Rust来源映射、单位、日期与哈希校验"]
-  SHARD --> CHECK
-  CHECK --> STAGING["已验证检查点 / 未完成内容不发布"]
-  STAGING --> SNAPSHOT["原子发布不可变Parquet版本"]
-  QLIB["现有Qlib二进制"] --> DAILY["DailyDataset"]
-  SNAPSHOT --> DAILY
-  DAILY --> RESEARCH["因子、原价撮合与严格公司行动检查"]
-```
 
-开发期先运行 `crates/app/packaging/build-collector.sh`，随后执行 nextest。开发构建可用 `JFQUANT_COLLECTOR_RUNTIME` 指定已经构建的解释器；发布构建只定位包内环境，不搜索系统 Python。公司行动采集成功不代表数据就绪：缺支付/上市日期、无法解释配股、未知历史覆盖均阻止训练。日线采集限定已结束的交易日，日历来自显式记录的 AKShare/新浪接口，不由存活股票的报价推断。
 
 检查点 owner 同时冻结采集代码、依赖锁与解释器锁签名；更新这些内容后应启动新采集，不能混用旧分片。恢复前逐份重验 HTTP 收据，行情和公司行动均适用。公司行动完成消息、依赖锁哈希和解释器来源也进入 ActionBundle 的证据哈希。JSON Lines 在读取时限制单行32 MiB，stderr单行64 KiB；缺换行、无效UTF-8、完成后追加协议事件或日志无法持久化均失败。规范行情校验 OHLC 范围、有限数值、证券身份和 Date32 边界，null保留。
 
-`DailyDataset::validate_factor_basis(id)` 验证独立系数的来源映射、日期覆盖及首个实际原价收盘锚点，不从供应商后复权报价推断系数。研究字段从原价与显式系数生成，原价字段和真实成交股数独立读取；历史跳变由公司行动证据核验。
-
-采集协议8要求先发送 `ready`，包含代码签名及AKShare/yfinance/CPython准确版本，之后才能写入行情/公司行动分片或完成消息。完成消息再次核对身份；错误/缺失握手不会生成证券检查点。
+`DailyDataset::validate_factor_basis(id)` 验证独立系数的来源映射、日期覆盖及首个实际原价收盘锚点，不从供应商后复权报价推断系数。独立系数口径从原价与显式系数生成研究字段；HiThink供应商口径直接读取前复权OHLC、原始股数与金额，VWAP为null。原价回测字段独立读取，历史事件由公司行动证据核验。
 
 ## 独立系数接口
 
@@ -132,7 +122,7 @@ DailyDataset的restrict_reads用于工作线程的日期需求；三个research�
 
 为什么调整：普通市场代码无需先登记身份；独立目录、审核和权威名录下载增加了研究前置负担。特殊历史代码仍需在快照内明确区间，不能将旧证券行情或权益接到另一证券。训练使用价量和标签，到账／交付资料只在实际账户执行时检查。
 
-当前格式：模板10、需求3、准入5、股票池3、公司行动5、规范行情5、系数3、采集7、服务14、研究结果14；快照内来源映射1、训练产物3。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
+当前格式：模板10、需求3、准入5、股票池3、公司行动5、规范行情5/HiThink6、系数3、采集7、服务14、研究结果14；快照内来源映射1、训练产物3。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
 
 来源映射位于快照source_map.json，普通证券可用空exceptions。每个例外含市场代码、资产类别、适用区间及provider/symbol/coverage定位。冲突拒绝；SHT00018只能读取自身旧文件，不自动绑定SH600018。原Qlib文件不改写；显式重新登记冻结文件内容和映射。worker内缓存字段，取消检查以证券和固定批次执行。
 

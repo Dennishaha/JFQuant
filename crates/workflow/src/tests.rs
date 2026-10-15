@@ -555,9 +555,8 @@ fn missing_reverse_special_and_unpriced_distribution_terms_block_every_entry_bef
                 "reverse" => points[1].factor = "0.09".into(),
                 "special" => points[1].factor = "0.2".into(),
                 "mixed_origin" => {
-                    *source = analytics_storage::adjustment::FactorSource::SinaHfq;
-                    *source_url =
-                        "https://finance.sina.com.cn/realstock/company/sh600000/hfq.js".into();
+                    *source = analytics_storage::adjustment::FactorSource::TdxForward;
+                    *source_url = "tdxaidata:get_market_data:none:ForwardFactor".into();
                 }
                 _ => {}
             }
@@ -913,7 +912,7 @@ fn unknown_special_coverage_is_explicit_warning_in_upstream_event_mode() {
                     start: "2007-01-02".parse().unwrap(),
                     end: "2010-01-12".parse().unwrap(),
                 },
-                source: "akshare.cninfo/implemented/per-ten-shares-v1".into(),
+                source: "hithink.events/per-share-v1".into(),
                 evidence: vec!["fixture".into()],
             },
         );
@@ -946,10 +945,7 @@ fn unknown_special_coverage_is_explicit_warning_in_upstream_event_mode() {
 
 #[test]
 fn supplier_account_policy_can_trade_without_manual_categories_and_audited_stays_blocked() {
-    for source in [
-        "tushare.dividend/implemented/per-share-v1",
-        "akshare.cninfo/implemented/per-ten-shares-v1",
-    ] {
+    for source in ["hithink.events/per-share-v1"] {
         let tmp = tempfile::tempdir().unwrap();
         let w = Workspace::open(tmp.path()).unwrap();
         let (m, a, mut t) = demo::create(&w).unwrap();
@@ -1322,32 +1318,4 @@ fn legacy_action_version_hashes_original_numeric_format_without_mutating_files()
     )
     .unwrap();
     assert_eq!(fs::read(&path).unwrap(), bytes);
-}
-
-#[test]
-fn format_six_cannot_bypass_reconciliation_through_legacy_repair() {
-    let dir = tempfile::tempdir().unwrap();
-    let w = Workspace::open(dir.path()).unwrap();
-    let (_, a, _) = demo::create(&w).unwrap();
-    let path = w.resolve(a.path);
-    let mut book = ActionBundle::read(&path).unwrap();
-    book.schema_version = 6;
-    atomic_json(&path, &book).unwrap();
-    let a = w.register(&path).unwrap();
-    let (_, result) = execute_stage(
-        &w,
-        WorkflowRequest::SupplementActions {
-            actions: a.id,
-            method: "repair".into(),
-            start: "2009-01-02".parse().unwrap(),
-            end: "2010-01-12".parse().unwrap(),
-            resume: None,
-        },
-    );
-    assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains("format_6_requires_reconciliation")
-    );
 }

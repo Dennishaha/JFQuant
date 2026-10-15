@@ -706,39 +706,6 @@ fn current_research_cli_and_api_share_results_and_reject_old_imports_without_mod
 }
 
 #[test]
-fn standard_action_repair_preserves_new_coverage_with_deduplicated_version() {
-    let s = Sandbox::new();
-    let w = Workspace::open(&s.client.root).unwrap();
-    let (_, a, _) = analytics_workflow::testing::synthetic(&w);
-    let path = w.resolve(&a.path);
-    let mut book = analytics_storage::corporate_actions::ActionBundle::read(&path).unwrap();
-    book.downloader = "JFQuant analytics-storage corporate-actions".into();
-    book.coverage.clear();
-    std::fs::write(&path, serde_json::to_vec(&book).unwrap()).unwrap();
-    let a = w.register(&path).unwrap();
-    let submission = s.json(&[
-        "data",
-        "supplement",
-        "--actions",
-        &a.id,
-        "--method",
-        "repair",
-        "--start",
-        "2009-01-01",
-        "--end",
-        "2010-12-31",
-    ]);
-    let id = submission["task_id"].as_str().unwrap().parse().unwrap();
-    let result = s.client.wait(id, Some(15)).unwrap();
-    assert_eq!(result["results"]["data"]["id"], a.id);
-    assert!(
-        w.resolve(format!("data/actions-{id}/repair_coverage.json"))
-            .is_file()
-    );
-    assert!(result["record"]["request"].get("resume_request").is_none());
-}
-
-#[test]
 fn standard_download_resumes_verified_checkpoint_and_rejects_busy_or_wrong_owner_offline() {
     let s = Sandbox::new();
     let w = Workspace::open(&s.client.root).unwrap();
@@ -1192,10 +1159,12 @@ fn source_priorities_and_refresh_preview_share_the_public_backend_without_creden
     let s = Sandbox::new();
     let sources = s.json(&["data", "sources", "list"]);
     for role in ["quotes", "actions", "execution", "members", "calendar"] {
-        assert_eq!(
-            sources["result"]["results"]["details"]["policy"]["priorities"][role][0],
-            "tdxaidata"
-        );
+        let routes = &sources["result"]["results"]["details"]["policy"]["priorities"][role];
+        if role == "execution" {
+            assert!(routes.as_array().unwrap().is_empty());
+        } else {
+            assert_eq!(routes[0], "hithink");
+        }
     }
     let w = Workspace::open(&s.client.root).unwrap();
     let (market, actions, recipe) = analytics_workflow::demo::create_canonical(&w).unwrap();
@@ -1287,4 +1256,12 @@ fn local_credentials_are_private_and_survive_separate_cli_processes_without_os_p
         .output()
         .unwrap();
     assert_eq!(removed.status.code(), Some(2));
+}
+
+#[test]
+fn retired_action_commands_are_not_public_cli_interfaces() {
+    use clap::Parser;
+    for command in ["supplement", "retry"] {
+        assert!(analytics_cli::Cli::try_parse_from(["jfquant", "data", command]).is_err());
+    }
 }

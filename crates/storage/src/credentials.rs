@@ -16,7 +16,7 @@ struct Credential {
 }
 fn provider_name(provider: &str) -> io::Result<&str> {
     match provider {
-        "tushare" | "tdxaidata" => Ok(provider),
+        "hithink" | "tdxaidata" => Ok(provider),
         _ => Err(io::Error::other("credential_provider_unsupported")),
     }
 }
@@ -155,15 +155,15 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("credentials");
         save_at(&root, "tdxaidata", "fixture-private-tdx-key").unwrap();
-        save_at(&root, "tushare", "fixture-private-tushare-key").unwrap();
+        save_at(&root, "hithink", "fixture-private-hithink-key").unwrap();
         assert_eq!(
             read_at(&root, "tdxaidata").unwrap(),
             "fixture-private-tdx-key"
         );
         save_at(&root, "tdxaidata", "fixture-replacement-key").unwrap();
         assert_eq!(
-            read_at(&root, "tushare").unwrap(),
-            "fixture-private-tushare-key"
+            read_at(&root, "hithink").unwrap(),
+            "fixture-private-hithink-key"
         );
         assert_eq!(
             fs::metadata(&root).unwrap().permissions().mode() & 0o777,
@@ -198,7 +198,7 @@ mod tests {
                 .contains("fixture-private")
         );
         fs::remove_file(&file).unwrap();
-        std::os::unix::fs::symlink(root.join("tushare.json"), &file).unwrap();
+        std::os::unix::fs::symlink(root.join("hithink.json"), &file).unwrap();
         assert!(save_at(root, "tdxaidata", "fixture-private-tdx-key").is_err());
         assert!(read_at(root, "tdxaidata").is_err());
     }

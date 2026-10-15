@@ -90,10 +90,13 @@ class AnnouncementTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 security_identity("SZ600025")
         for org in ["gssz0600025", "unreviewed-id"]:
-            with patch(
-                "jfquant_collectors.announcements.security_directory",
-                return_value=[{**table[0], "orgId": org}],
-            ), self.assertRaises(ValueError):
+            with (
+                patch(
+                    "jfquant_collectors.announcements.security_directory",
+                    return_value=[{**table[0], "orgId": org}],
+                ),
+                self.assertRaises(ValueError),
+            ):
                 security_identity("SH600025")
 
     def test_identity_and_truncated_pagination_fail_without_completing(self):

@@ -36,7 +36,7 @@ pub struct PlatformState {
     pub coefficients: String,
     pub release_tag: String,
     pub register_path: String,
-    pub tushare_token: String,
+    pub hithink_key: String,
     pub tdx_key: String,
     pub source_policy_editor: String,
     pub credential_save: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
@@ -48,7 +48,6 @@ pub struct PlatformState {
     pub collection_csi500: bool,
     pub pool_editor: String,
     pub pool_preview_date: String,
-    pub method: String,
     pub start: String,
     pub end: String,
     pub details: Value,
@@ -61,7 +60,7 @@ impl std::fmt::Debug for PlatformState {
             .field("workspace", &self.workspace)
             .field("template", &self.template)
             .field("error", &self.error)
-            .field("tushare_token", &"[redacted]")
+            .field("hithink_key", &"[redacted]")
             .field("tdx_key", &"[redacted]")
             .finish_non_exhaustive()
     }
@@ -97,22 +96,21 @@ impl Default for PlatformState {
             coefficients: String::new(),
             release_tag: String::new(),
             register_path: String::new(),
-            tushare_token: String::new(),
+            hithink_key: String::new(),
             tdx_key: String::new(),
             source_policy_editor: serde_json::to_string_pretty(
                 &analytics_workflow::refresh::SourcePolicy::default(),
             )
             .expect("serializable policy"),
             credential_save: None,
-            collection_provider: analytics_storage::collector::Provider::Tdxaidata,
-            adjustment_source: analytics_storage::adjustment::AdjustmentSource::TdxForward,
+            collection_provider: analytics_storage::collector::Provider::Hithink,
+            adjustment_source: analytics_storage::adjustment::AdjustmentSource::HithinkForward,
             collection_symbols: "SH600000,SZ000001,SH000300".into(),
             collection_benchmarks: "SH000300".into(),
             collection_csi300: false,
             collection_csi500: false,
             pool_editor: String::new(),
             pool_preview_date: "2026-10-12".into(),
-            method: "enrich".into(),
             start: "2013-01-01".into(),
             end: chrono::Local::now().date_naive().to_string(),
             details: Value::Null,
@@ -375,7 +373,7 @@ pub fn data_panel(
             });
         }
     });
-    ui.collapsing("AKShare / yfinance 日线采集", |ui| {
+    ui.collapsing("HiThink / 通达信采集", |ui| {
         ui.horizontal(|ui| {
             ui.label("独立系数版本");
             select_data(
@@ -432,28 +430,17 @@ pub fn data_panel(
                 }
             });
             ui.horizontal(|ui| {
-                if ui.selectable_value(&mut state.platform.collection_provider,Provider::Tdxaidata,"通达信（首选）").clicked() {state.platform.adjustment_source=analytics_storage::adjustment::AdjustmentSource::TdxForward;}
+                if ui.selectable_value(&mut state.platform.collection_provider,Provider::Tdxaidata,"通达信（备用）").clicked() {state.platform.adjustment_source=analytics_storage::adjustment::AdjustmentSource::TdxForward;}
                 if ui
                     .selectable_value(
                         &mut state.platform.collection_provider,
-                        Provider::Akshare,
-                        "AKShare（备用）",
+                        Provider::Hithink,
+                        "HiThink（主源）",
                     )
                     .clicked()
                 {
                     state.platform.adjustment_source =
-                        analytics_storage::adjustment::AdjustmentSource::SinaHfq;
-                }
-                if ui
-                    .selectable_value(
-                        &mut state.platform.collection_provider,
-                        Provider::Yfinance,
-                        "yfinance（候选与核验）",
-                    )
-                    .clicked()
-                {
-                    state.platform.adjustment_source =
-                        analytics_storage::adjustment::AdjustmentSource::None;
+                        analytics_storage::adjustment::AdjustmentSource::HithinkForward;
                 }
             });
             ui.horizontal(|ui| {
@@ -466,21 +453,10 @@ pub fn data_panel(
                 if ui.button("通达信小样本验证（三轮）").clicked(){request=Some(WorkflowRequest::CheckSource {provider:Provider::Tdxaidata});}
             });
             ui.horizontal(|ui| {
-                if ui
-                    .selectable_value(
-                        &mut state.platform.collection_provider,
-                        Provider::Tushare,
-                        "Tushare（执行资料）",
-                    )
-                    .clicked()
-                {
-                    state.platform.adjustment_source =
-                        analytics_storage::adjustment::AdjustmentSource::None;
-                }
                 ui.add(
-                    egui::TextEdit::singleline(&mut state.platform.tushare_token)
+                    egui::TextEdit::singleline(&mut state.platform.hithink_key)
                         .password(true)
-                        .hint_text("Tushare Token，仅保存本机私有文件"),
+                        .hint_text("HiThink API Key，仅保存本机私有文件"),
                 );
                 if ui
                     .add_enabled(
@@ -489,24 +465,24 @@ pub fn data_panel(
                     )
                     .clicked()
                 {
-                    let token = std::mem::take(&mut state.platform.tushare_token);
+                    let token = std::mem::take(&mut state.platform.hithink_key);
                     let (tx, rx) = std::sync::mpsc::channel();
                     state.platform.credential_save = Some(rx);
                     std::thread::spawn(move || {
                         let _ = tx.send(
-                            analytics_workflow::service::configure_source("tushare",token.trim())
+                            analytics_workflow::service::configure_source("hithink",token.trim())
                                 .map_err(|e| e.to_string()),
                         );
                     });
                 }
                 if ui.button("检测接口权限").clicked() {
-                    request = Some(WorkflowRequest::TusharePermissions {});
+                    request = Some(WorkflowRequest::CheckSource { provider: Provider::Hithink });
                 }
             });
             ui.label(match state.platform.adjustment_source {
                 analytics_storage::adjustment::AdjustmentSource::TdxForward => "复权系数：通达信 ForwardFactor（方向与窗口一致性独立校验）",
-                analytics_storage::adjustment::AdjustmentSource::SinaHfq => {
-                    "复权系数：新浪独立 hfq-factor；原价行情仍来自 AKShare，历史事件须对账"
+                analytics_storage::adjustment::AdjustmentSource::HithinkForward => {
+                    "HiThink 前复权 OHLC；原始量额；研究 VWAP 为 null"
                 }
                 analytics_storage::adjustment::AdjustmentSource::None => {
                     "复权系数：无（候选数据，不能用于严格研究）"
@@ -527,7 +503,7 @@ pub fn data_panel(
                 ui.label("结束");
                 ui.text_edit_singleline(&mut state.platform.end);
             });
-            let quote_source = state.platform.collection_provider != Provider::Tushare;
+            let quote_source = true;
             let collect_quotes = ui
                 .add_enabled(quote_source, egui::Button::new("仅采集行情（系数另采）"))
                 .clicked();
@@ -604,8 +580,8 @@ pub fn data_panel(
                         .collect();
                     let r = CollectionRequest {
                         source_bindings: Default::default(),
-                        provider: if announcements { Provider::Akshare } else { state.platform.collection_provider },
-                        adjustment_source: if announcements { analytics_storage::adjustment::AdjustmentSource::SinaHfq } else { state.platform.adjustment_source },
+                        provider: if announcements { Provider::Cninfo } else { state.platform.collection_provider },
+                        adjustment_source: if announcements { analytics_storage::adjustment::AdjustmentSource::None } else { state.platform.adjustment_source },
                         start: state.platform.start.parse().map_err(|_| "开始日期无效")?,
                         end: state.platform.end.parse().map_err(|_| "结束日期无效")?,
                         instruments,
@@ -687,63 +663,6 @@ pub fn data_panel(
             });
         }
     });
-    ui.horizontal(|ui| {
-        ui.label("公司行动版本");
-        select_data(
-            ui,
-            "补充动作选择",
-            "actions",
-            &mut state.platform.actions,
-            &state.platform.datasets,
-        );
-        egui::ComboBox::from_id_salt("supplement_method")
-            .selected_text(method_label(&state.platform.method))
-            .show_ui(ui, |ui| {
-                for m in [
-                    "enrich",
-                    "details",
-                    "payments",
-                    "retry",
-                    "repair",
-                    "repair-payments",
-                ] {
-                    ui.selectable_value(&mut state.platform.method, m.into(), method_label(m));
-                }
-            });
-    });
-    ui.horizontal(|ui| {
-        ui.label("补充区间");
-        ui.add(egui::TextEdit::singleline(&mut state.platform.start).desired_width(120.0));
-        ui.label("至");
-        ui.add(egui::TextEdit::singleline(&mut state.platform.end).desired_width(120.0));
-        if ui
-            .add_enabled(
-                enabled && !state.platform.actions.is_empty(),
-                egui::Button::new("执行公司行动补充"),
-            )
-            .clicked()
-        {
-            match state
-                .platform
-                .start
-                .parse()
-                .and_then(|start| state.platform.end.parse().map(|end| (start, end)))
-            {
-                Ok((start, end)) if start <= end => {
-                    request = Some(WorkflowRequest::SupplementActions {
-                        actions: state.platform.actions.clone(),
-                        method: state.platform.method.clone(),
-                        start,
-                        end,
-                        resume: state.platform.details["resume_supplement"]
-                            .as_str()
-                            .and_then(|s| s.parse().ok()),
-                    })
-                }
-                _ => state.platform.error = Some("请填写有效的起止日期 YYYY-MM-DD".into()),
-            }
-        }
-    });
     if let Some(r) = request {
         submit(state, worker, cancel_slot, r);
     }
@@ -765,17 +684,6 @@ pub fn data_panel(
                 });
         });
     ui.separator();
-}
-fn method_label(method: &str) -> &str {
-    match method {
-        "enrich" => "新浪历史与上市日",
-        "details" => "实施详情补充",
-        "payments" => "现金派送日补充",
-        "retry" => "重试失败证券",
-        "repair" => "重解析本项目历史证据",
-        "repair-payments" => "重解析本项目现金证据",
-        _ => method,
-    }
 }
 pub fn research_panel(
     ui: &mut egui::Ui,
@@ -1304,7 +1212,7 @@ pub fn runs_panel(
                     }
                 }
                 Ok(WorkflowRequest::CollectMarket { request, resume }) => {
-                    if ui.button("恢复Python行情采集").clicked() {
+                    if ui.button("恢复行情采集").clicked() {
                         submit(
                             state,
                             worker,
@@ -1330,7 +1238,7 @@ pub fn runs_panel(
                     }
                 }
                 Ok(WorkflowRequest::CollectActions { request, resume }) => {
-                    if ui.button("恢复Python公司行动采集").clicked() {
+                    if ui.button("恢复公司行动采集").clicked() {
                         submit(
                             state,
                             worker,
@@ -1342,25 +1250,8 @@ pub fn runs_panel(
                         );
                     }
                 }
-                Ok(WorkflowRequest::SupplementActions {
-                    actions,
-                    method,
-                    start,
-                    end,
-                    resume,
-                }) if method != "retry" => {
-                    if ui.button("准备恢复日期补充").clicked() {
-                        state.platform.actions = actions;
-                        state.platform.method = method;
-                        state.platform.start = start.to_string();
-                        state.platform.end = end.to_string();
-                        state.platform.details =
-                            serde_json::json!({"resume_supplement":resume.unwrap_or(r.id)});
-                        state.panel = crate::state::Panel::Dataset;
-                    }
-                }
                 _ => {
-                    ui.label("研究需重新执行，首版不恢复训练中途状态。");
+                    ui.label("该任务不支持恢复；旧来源任务请重新采集，研究任务请重新执行。");
                 }
             }
         }

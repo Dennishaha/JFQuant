@@ -16,3 +16,5 @@ Manifests retain feature order, hashes, formula and runtime versions.
 ```bash
 DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow research::backtest
 ```
+
+HiThink真实账户验收：年度因子分片按逐证券供应商口径读取已前复权OHLC、原始股数与CNY金额，指数同样不要求独立系数；中性缩放不写成研究系数，VWAP继续为null。通达信/Qlib的既有单位恢复保留。fixture覆盖股票、指数、null VWAP及两种量额转换路径。

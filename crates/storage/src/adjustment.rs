@@ -3,7 +3,11 @@ use analytics_core::{Date, pool::validate_instrument};
 use serde::{Deserialize, Serialize};
 use std::{fs, io, path::Path};
 
-/// Current canonical price/volume transformation; included in source and research signatures.
+/// Versioned supplier OHLC/raw shares/raw CNY/null VWAP contract.
+pub const HITHINK_NORMALIZATION: &str = "hithink-forward-ohlc-v1;shares;cny;vwap-null";
+/// Mixed snapshots declare each security's research transformation in price_inputs.
+pub const MIXED_NORMALIZATION: &str = "per-security-price-volume-v1";
+/// Explicit independent coefficient research transformation.
 pub const NORMALIZATION: &str = "explicit-hfq-first-raw-close-v1;shares;cny;nulls";
 /// Public acquisition selection. None leaves a candidate unsuitable for strict research.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -11,9 +15,9 @@ pub const NORMALIZATION: &str = "explicit-hfq-first-raw-close-v1;shares;cny;null
 pub enum AdjustmentSource {
     /// Declared TdxAiData coefficients rebased across windows and checked against its own events.
     TdxForward,
-    /// Independent dated factors from the fixed Sina endpoint documented by AKShare.
-    SinaHfq,
-    /// No verified adjustment factors (including Yahoo candidate prices).
+    /// HiThink supplier forward OHLC and unadjusted share/CNY volume and amount.
+    HithinkForward,
+    /// No independent adjustment factors; used for announcement-only requests.
     None,
 }
 /// Dated explicit coefficient; any source-anchor normalization is frozen in evidence.
@@ -22,7 +26,7 @@ pub enum AdjustmentSource {
 pub struct AdjustmentPoint {
     /// First effective calendar date.
     pub effective_date: Date,
-    /// Positive, finite decimal coefficient: original Sina value or rebased TDX value.
+    /// Positive, finite decimal coefficient: explicit TDX or synthetic fixture value.
     pub factor: String,
 }
 /// Supported independent coefficient identities.
@@ -31,8 +35,6 @@ pub struct AdjustmentPoint {
 pub enum FactorSource {
     /// TdxAiData's explicit ForwardFactor series, normalized to a fixed first-day anchor.
     TdxForward,
-    /// Documented, fixed Sina endpoint.
-    SinaHfq,
     /// Explicit coefficients belonging only to a marked synthetic fixture.
     SyntheticFixture,
 }
@@ -40,6 +42,11 @@ pub enum FactorSource {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AdjustmentBasis {
+    /// Supplier prices are not independent multiplicative coefficients.
+    SupplierForward {
+        /// Completed observation date frozen with the supplier price snapshot.
+        verified_through: Date,
+    },
     /// Full independent coefficient history, never inferred from adjusted/raw prices.
     Explicit {
         /// Source identity.
@@ -109,6 +116,7 @@ impl AdjustmentRecord {
             return Err(invalid("unsupported_data_format: adjustment record"));
         }
         match &self.basis {
+            AdjustmentBasis::SupplierForward { .. } => {}
             AdjustmentBasis::Explicit {
                 source,
                 source_url,
@@ -118,14 +126,10 @@ impl AdjustmentRecord {
                 if matches!(self.source_symbol.as_str(), "SH000300" | "SH000905") {
                     return Err(invalid("verified price index requires identity basis"));
                 }
-                let expected = match source {
+                let expected: String = match source {
                     FactorSource::TdxForward => {
                         "tdxaidata:get_market_data:none:ForwardFactor".into()
                     }
-                    FactorSource::SinaHfq => format!(
-                        "https://finance.sina.com.cn/realstock/company/{}/hfq.js",
-                        self.source_symbol.to_ascii_lowercase()
-                    ),
                     FactorSource::SyntheticFixture => {
                         "JFQuant analytics-workflow synthetic-demo-v1".into()
                     }
@@ -147,7 +151,7 @@ impl AdjustmentRecord {
                 if !matches!(self.source_symbol.as_str(), "SH000300" | "SH000905")
                     || !matches!(
                         source.as_str(),
-                        "akshare.index_zh_a_hist"
+                        "hithink.a-share-index.prices.historical"
                             | "tdxaidata.get_market_data"
                             | "JFQuant Qlib price-index recovery-v1"
                             | "JFQuant analytics-workflow synthetic-demo-v1"
@@ -195,6 +199,7 @@ impl AdjustmentRecord {
                     .transpose()
             }
             AdjustmentBasis::PriceIndex { .. } => Ok(Some(1.0)),
+            AdjustmentBasis::SupplierForward { .. } => Ok(None),
             AdjustmentBasis::Unavailable { reason } => Err(invalid(reason)),
         }
     }
@@ -208,7 +213,9 @@ impl AdjustmentRecord {
                     .factor
                     .clone()
             }
-            AdjustmentBasis::PriceIndex { .. } => "1".into(),
+            AdjustmentBasis::PriceIndex { .. } | AdjustmentBasis::SupplierForward { .. } => {
+                "1".into()
+            }
             AdjustmentBasis::Unavailable { reason } => return Err(invalid(reason)),
         };
         Ok(AdjustmentAnchor {
@@ -227,8 +234,8 @@ mod tests {
             instrument_id: "SH600000".into(),
             source_symbol: "SH600000".into(),
             basis: AdjustmentBasis::Explicit {
-                source: FactorSource::SinaHfq,
-                source_url: "https://finance.sina.com.cn/realstock/company/sh600000/hfq.js".into(),
+                source: FactorSource::TdxForward,
+                source_url: "tdxaidata:get_market_data:none:ForwardFactor".into(),
                 verified_through: "2020-01-10".parse().unwrap(),
                 points: vec![
                     AdjustmentPoint {
@@ -268,7 +275,7 @@ mod tests {
         }
         assert!(r.validate().is_err());
         r.basis = AdjustmentBasis::PriceIndex {
-            source: "akshare.index_zh_a_hist".into(),
+            source: "hithink.a-share-index.prices.historical".into(),
         };
         assert!(r.validate().is_err());
     }

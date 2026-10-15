@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SourceLocator {
-    /// qlib, exchange, akshare, yfinance or cninfo.
+    /// qlib, exchange, hithink, tdxaidata or cninfo.
     pub provider: String,
     /// Exact upstream code; never substituted with a different historical issue.
     pub symbol: String,
@@ -74,6 +74,9 @@ impl SourceMap {
                 return Err("invalid source-map asset kind".into());
             }
             for (i, l) in e.locators.iter().enumerate() {
+                if removed_source(&l.provider) {
+                    return Err("removed_provider: reconfigure source map".into());
+                }
                 validate_key(&l.symbol)?;
                 l.coverage.validate().map_err(|e| e.to_string())?;
                 if l.coverage.start < e.coverage.start || l.coverage.end > e.coverage.end {
@@ -187,5 +190,108 @@ mod tests {
             )]),
         };
         assert!(m.validate().is_err());
+    }
+}
+
+/// Whether provenance identifies a source removed from the supported acquisition system.
+pub fn removed_source(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    [
+        "akshare",
+        "yfinance",
+        "tushare",
+        "eastmoney",
+        "sina",
+        "aastocks",
+        "新浪",
+        "东方财富",
+        "东财",
+    ]
+    .iter()
+    .any(|source| value.contains(source))
+}
+/// Reject removed providers anywhere in structured provenance, including mixed evidence.
+pub fn reject_removed_sources(value: &serde_json::Value) -> Result<(), String> {
+    fn retired(value: &serde_json::Value, provenance: bool) -> bool {
+        match value {
+            serde_json::Value::String(s) => {
+                (provenance || s.starts_with("https://") || s.starts_with("http://"))
+                    && removed_source(s)
+            }
+            serde_json::Value::Array(v) => v.iter().any(|v| retired(v, provenance)),
+            serde_json::Value::Object(v) => v.iter().any(|(k, v)| {
+                removed_source(k)
+                    || retired(
+                        v,
+                        matches!(
+                            k.as_str(),
+                            "provider"
+                                | "providers"
+                                | "source"
+                                | "sources"
+                                | "source_url"
+                                | "source_rule"
+                                | "url"
+                                | "urls"
+                                | "sdk"
+                                | "downloader"
+                                | "normalization"
+                                | "filename"
+                                | "function"
+                                | "quotes"
+                                | "actions"
+                                | "execution"
+                                | "members"
+                                | "calendar"
+                        ),
+                    )
+            }),
+            _ => false,
+        }
+    }
+    if retired(value, false) {
+        Err("removed_provider: reacquire data or reconfigure sources; legacy evidence and checkpoints cannot be restored".into())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod removed_sources_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn issuer_names_and_document_quotes_are_business_data_not_provider_identities() {
+        assert!(reject_removed_sources(&json!({"provider":"cninfo","stockList":[{"code":"300059","zwjc":"东方财富"}],"quote":"东方财富股份有限公司"})).is_ok());
+        assert!(
+            reject_removed_sources(
+                &json!({"provider":"hithink","priorities":{"quotes":["eastmoney"]}})
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn nested_mixed_provenance_rejects_every_retired_source() {
+        for source in [
+            "akshare",
+            "yfinance",
+            "tushare",
+            "eastmoney",
+            "sina",
+            "aastocks",
+        ] {
+            let value = json!({"provider":"hithink","evidence":[{"provider":"tdxaidata"},{"url":format!("https://{source}.example/history")}]});
+            assert!(
+                reject_removed_sources(&value)
+                    .unwrap_err()
+                    .contains("removed_provider")
+            );
+        }
+        assert!(
+            reject_removed_sources(
+                &json!({"providers":["hithink","tdxaidata","cninfo"],"null":null})
+            )
+            .is_ok()
+        );
     }
 }

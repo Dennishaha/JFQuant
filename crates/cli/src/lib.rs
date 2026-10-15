@@ -74,7 +74,6 @@ pub enum DataCommand {
     #[command(subcommand)]
     Sources(SourceCommand),
     Refresh(RefreshArgs),
-    TusharePermissions {},
     Compose {
         #[arg(long)]
         market: String,
@@ -87,7 +86,7 @@ pub enum DataCommand {
     Collect {
         #[arg(long, value_enum, default_value = "market")]
         kind: CollectionKind,
-        #[arg(long, value_enum, default_value = "tdxaidata")]
+        #[arg(long, value_enum, default_value = "hithink")]
         provider: CollectionProvider,
         #[arg(long, value_enum)]
         adjustment_source: Option<CollectionAdjustment>,
@@ -145,26 +144,6 @@ pub enum DataCommand {
         #[arg(long)]
         resume: Option<Uuid>,
     },
-    Supplement {
-        #[arg(long)]
-        actions: String,
-        #[arg(long, value_enum)]
-        method: ActionMethod,
-        #[arg(long)]
-        start: String,
-        #[arg(long)]
-        end: String,
-        #[arg(long)]
-        resume: Option<Uuid>,
-    },
-    Retry {
-        #[arg(long)]
-        actions: String,
-        #[arg(long)]
-        start: String,
-        #[arg(long)]
-        end: String,
-    },
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum CollectionKind {
@@ -184,14 +163,13 @@ pub enum CollectionKind {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum CollectionProvider {
     Tdxaidata,
-    Akshare,
-    Yfinance,
-    Tushare,
+    Hithink,
+    Cninfo,
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum CollectionAdjustment {
     TdxForward,
-    SinaHfq,
+    HithinkForward,
     None,
 }
 #[derive(Debug, Subcommand)]
@@ -204,7 +182,7 @@ pub enum SourceCommand {
         key_stdin: bool,
     },
     Check {
-        #[arg(long, value_enum, default_value = "tdxaidata")]
+        #[arg(long, value_enum, default_value = "hithink")]
         provider: CollectionProvider,
     },
     /// Save validated source priorities, separate from factor and universe profiles.
@@ -217,9 +195,8 @@ impl From<CollectionProvider> for analytics_storage::collector::Provider {
     fn from(value: CollectionProvider) -> Self {
         match value {
             CollectionProvider::Tdxaidata => Self::Tdxaidata,
-            CollectionProvider::Akshare => Self::Akshare,
-            CollectionProvider::Yfinance => Self::Yfinance,
-            CollectionProvider::Tushare => Self::Tushare,
+            CollectionProvider::Hithink => Self::Hithink,
+            CollectionProvider::Cninfo => Self::Cninfo,
         }
     }
 }
@@ -276,27 +253,6 @@ pub enum PoolCommand {
         #[arg(long)]
         date: String,
     },
-}
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum ActionMethod {
-    Enrich,
-    Details,
-    Payments,
-    Repair,
-    RepairPayments,
-    Retry,
-}
-impl ActionMethod {
-    fn name(self) -> &'static str {
-        match self {
-            Self::Enrich => "enrich",
-            Self::Details => "details",
-            Self::Payments => "payments",
-            Self::Repair => "repair",
-            Self::RepairPayments => "repair-payments",
-            Self::Retry => "retry",
-        }
-    }
 }
 #[derive(Debug, Args)]
 #[group(required = true, multiple = false)]
@@ -733,7 +689,7 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
         use std::io::Read;
         let name = match provider {
             CollectionProvider::Tdxaidata => "tdxaidata",
-            CollectionProvider::Tushare => "tushare",
+            CollectionProvider::Hithink => "hithink",
             _ => return Err(invalid("credential_provider_unsupported")),
         };
         let mut token = String::new();
@@ -803,7 +759,6 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
                     }),
                 })
             }
-            DataCommand::TusharePermissions {} => workflow(WorkflowRequest::TusharePermissions {}),
             DataCommand::Compose {
                 market,
                 coefficients,
@@ -847,23 +802,14 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
                 resume,
             } => {
                 use analytics_storage::adjustment::AdjustmentSource;
-                if matches!(provider, CollectionProvider::Tushare)
-                    && !matches!(kind, CollectionKind::Actions)
-                {
-                    return Err(invalid(
-                        "Tushare only supports --kind actions execution data",
-                    ));
-                }
                 let adjustment_source = match adjustment_source {
                     Some(CollectionAdjustment::TdxForward) => AdjustmentSource::TdxForward,
-                    Some(CollectionAdjustment::SinaHfq) => AdjustmentSource::SinaHfq,
+                    Some(CollectionAdjustment::HithinkForward) => AdjustmentSource::HithinkForward,
                     Some(CollectionAdjustment::None) => AdjustmentSource::None,
                     None => match provider {
                         CollectionProvider::Tdxaidata => AdjustmentSource::TdxForward,
-                        CollectionProvider::Akshare => AdjustmentSource::SinaHfq,
-                        CollectionProvider::Yfinance | CollectionProvider::Tushare => {
-                            AdjustmentSource::None
-                        }
+                        CollectionProvider::Hithink => AdjustmentSource::HithinkForward,
+                        CollectionProvider::Cninfo => AdjustmentSource::None,
                     },
                 };
                 let mut request = analytics_storage::collector::CollectionRequest {
@@ -873,14 +819,11 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
                         CollectionProvider::Tdxaidata => {
                             analytics_storage::collector::Provider::Tdxaidata
                         }
-                        CollectionProvider::Akshare => {
-                            analytics_storage::collector::Provider::Akshare
+                        CollectionProvider::Hithink => {
+                            analytics_storage::collector::Provider::Hithink
                         }
-                        CollectionProvider::Yfinance => {
-                            analytics_storage::collector::Provider::Yfinance
-                        }
-                        CollectionProvider::Tushare => {
-                            analytics_storage::collector::Provider::Tushare
+                        CollectionProvider::Cninfo => {
+                            analytics_storage::collector::Provider::Cninfo
                         }
                     },
                     start: start.parse().map_err(invalid)?,
@@ -945,30 +888,6 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
                 market,
                 resume,
                 pool_version: pool,
-            }),
-            DataCommand::Supplement {
-                actions,
-                method,
-                start,
-                end,
-                resume,
-            } => workflow(WorkflowRequest::SupplementActions {
-                actions,
-                method: method.name().into(),
-                start: start.parse().map_err(invalid)?,
-                end: end.parse().map_err(invalid)?,
-                resume,
-            }),
-            DataCommand::Retry {
-                actions,
-                start,
-                end,
-            } => workflow(WorkflowRequest::SupplementActions {
-                actions,
-                method: "retry".into(),
-                start: start.parse().map_err(invalid)?,
-                end: end.parse().map_err(invalid)?,
-                resume: None,
             }),
         },
         Command::Pools(command) => {

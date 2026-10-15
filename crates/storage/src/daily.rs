@@ -1,6 +1,7 @@
 //! Common worker-local daily reader for Qlib and versioned canonical Parquet snapshots.
 use crate::adjustment::{
-    AdjustmentAnchor, AdjustmentBasis, AdjustmentRecord, NORMALIZATION, coefficient,
+    AdjustmentAnchor, AdjustmentBasis, AdjustmentRecord, HITHINK_NORMALIZATION,
+    MIXED_NORMALIZATION, NORMALIZATION, coefficient,
 };
 use crate::qlib::{DailyField, Membership, QlibDataset, raw_price};
 use analytics_core::{
@@ -28,7 +29,7 @@ pub struct DailyBar {
     pub instrument_id: String,
     /// Exchange-local trading date.
     pub trade_date: Date,
-    /// Verified unadjusted OHLC, absent for split-adjusted Yahoo observations.
+    /// Verified unadjusted OHLC for execution.
     pub open: Option<f64>,
     /// High.
     pub high: Option<f64>,
@@ -36,7 +37,7 @@ pub struct DailyBar {
     pub low: Option<f64>,
     /// Close.
     pub close: Option<f64>,
-    /// Provider-adjusted OHLC retained only as source evidence, never as research input.
+    /// Provider-adjusted OHLC; used only by the explicit supplier-forward research contract.
     pub adj_open: Option<f64>,
     /// Adj high.
     pub adj_high: Option<f64>,
@@ -61,7 +62,7 @@ pub struct DailyManifest {
     pub universes: BTreeMap<String, PoolMembership>,
     /// Downloaded securities, including explicitly selected benchmarks.
     pub instruments: BTreeSet<String>,
-    /// unadjusted or split_adjusted_candidate.
+    /// Unadjusted execution price basis; research normalization is declared separately.
     pub price_basis: String,
     /// Fixed, auditable unit/price transformation description.
     pub normalization: String,
@@ -264,6 +265,26 @@ impl DailyDataset {
     /// Open the current canonical format or the supported Qlib binary format.
     pub fn open(root: impl AsRef<Path>) -> io::Result<Self> {
         let root = root.as_ref().canonicalize()?;
+        if let Some(parent) = root.parent() {
+            let metadata = parent.join("jfquant_source.json");
+            if metadata.is_file() {
+                let source: serde_json::Value =
+                    serde_json::from_slice(&fs::read(metadata)?).map_err(invalid)?;
+                analytics_core::source_map::reject_removed_sources(&source).map_err(invalid)?;
+                if let Some(receipts) = source["evidence_sha256"].as_object() {
+                    for name in receipts.keys() {
+                        if Path::new(name).file_name().and_then(|n| n.to_str()) != Some(name) {
+                            return Err(invalid("unsafe market evidence path"));
+                        }
+                        let bytes = fs::read(parent.join("raw").join(name))?;
+                        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                            analytics_core::source_map::reject_removed_sources(&value)
+                                .map_err(invalid)?;
+                        }
+                    }
+                }
+            }
+        }
         if root.join("market_view.json").is_file() {
             let (view, base) = crate::market_view::MarketView::read(&root)?;
             let mut dataset = Self::open(&base)?;
@@ -282,20 +303,22 @@ impl DailyDataset {
             let value: serde_json::Value =
                 serde_json::from_slice(&fs::read(root.join("daily_manifest.json"))?)
                     .map_err(invalid)?;
-            if value["schema_version"] != 5 {
+            if value["schema_version"] != 5 && value["schema_version"] != 6 {
                 return Err(invalid(
                     "unsupported_data_format: canonical daily schema 5 required; reacquire data without migration",
                 ));
             }
             let m: DailyManifest = serde_json::from_value(value).map_err(invalid)?;
-            if m.schema_version != 5
+            if !matches!(m.schema_version, 5 | 6)
                 || m.calendar.is_empty()
                 || m.calendar.windows(2).any(|w| w[0] >= w[1])
-                || !matches!(
-                    m.price_basis.as_str(),
-                    "unadjusted" | "split_adjusted_candidate"
-                )
-                || m.normalization != NORMALIZATION
+                || !matches!(m.price_basis.as_str(), "unadjusted")
+                || (m.normalization != NORMALIZATION
+                    && !(m.schema_version == 6
+                        && matches!(
+                            m.normalization.as_str(),
+                            HITHINK_NORMALIZATION | MIXED_NORMALIZATION
+                        )))
             {
                 return Err(invalid("unsupported canonical daily format"));
             }
@@ -307,6 +330,18 @@ impl DailyDataset {
                 AdjustmentRecord::read(&root, id)?;
                 if !root.join("bars").join(format!("{id}.parquet")).is_file() {
                     return Err(invalid(format!("missing instrument file {id}")));
+                }
+            }
+            for id in &m.instruments {
+                let record = AdjustmentRecord::read(&root, id)?;
+                if matches!(record.basis, AdjustmentBasis::SupplierForward { .. })
+                    && (m.schema_version != 6
+                        || !matches!(
+                            m.normalization.as_str(),
+                            HITHINK_NORMALIZATION | MIXED_NORMALIZATION
+                        ))
+                {
+                    return Err(invalid("supplier_basis_manifest_mismatch"));
                 }
             }
             Ok(Self {
@@ -340,7 +375,7 @@ impl DailyDataset {
         }
     }
     /// Unmodified Qlib or frozen TDX raw/ForwardFactor inputs support explicit provider trust.
-    /// AKShare HFQ quotes never acquire this capability merely by selecting an option.
+    /// Supplier OHLC has its own explicit, versioned price/volume contract.
     pub fn supports_provider_training(&self) -> bool {
         if self.view.is_some() {
             return false;
@@ -355,10 +390,12 @@ impl DailyDataset {
             .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
         let trusted = source.is_some_and(|s| {
             s["snapshot_verified"] == true
-                && (s["provider"] == "tdxaidata"
+                && (matches!(s["provider"].as_str(), Some("tdxaidata" | "hithink"))
                     || s["security_sources"].as_object().is_some_and(|sources| {
                         !sources.is_empty()
-                            && sources.values().all(|s| s["provider"] == "tdxaidata")
+                            && sources.values().all(|s| {
+                                matches!(s["provider"].as_str(), Some("tdxaidata" | "hithink"))
+                            })
                     }))
         });
         if !trusted {
@@ -376,9 +413,65 @@ impl DailyDataset {
                             source: crate::adjustment::FactorSource::TdxForward,
                             ..
                         } | crate::adjustment::AdjustmentBasis::PriceIndex { .. }
+                            | crate::adjustment::AdjustmentBasis::SupplierForward { .. }
                     )
                 })
             })
+    }
+    /// Whether any canonical security requires the explicit supplier research policy.
+    pub fn requires_supplier_training(&self) -> bool {
+        match &self.kind {
+            DailyKind::Parquet(m) => m.instruments.iter().any(|id| {
+                self.adjustment_record(id)
+                    .is_ok_and(|r| matches!(r.basis, AdjustmentBasis::SupplierForward { .. }))
+            }),
+            _ => false,
+        }
+    }
+    /// True only for snapshots whose per-security basis explicitly stores supplier OHLC.
+    pub fn uses_supplier_prices(&self, id: &str) -> bool {
+        self.adjustment_record(id)
+            .is_ok_and(|r| matches!(r.basis, AdjustmentBasis::SupplierForward { .. }) || matches!(r.basis,AdjustmentBasis::PriceIndex { ref source } if source == "hithink.a-share-index.prices.historical"))
+    }
+    fn supplier_bars(&self, id: &str) -> io::Result<Arc<Vec<DailyBar>>> {
+        let record = self.adjustment_record(id)?;
+        let verified_through = match record.basis {
+            AdjustmentBasis::SupplierForward { verified_through } => verified_through,
+            AdjustmentBasis::PriceIndex { source }
+                if source == "hithink.a-share-index.prices.historical" =>
+            {
+                *self
+                    .calendar
+                    .last()
+                    .ok_or_else(|| invalid("empty_calendar"))?
+            }
+            _ => return Err(invalid("expected_supplier_basis")),
+        };
+        let bars = self.bars(id)?;
+        if bars.is_empty()
+            || bars.iter().any(|b| {
+                b.instrument_id != id
+                    || b.trade_date > verified_through
+                    || self.calendar.binary_search(&b.trade_date).is_err()
+            })
+        {
+            return Err(invalid("supplier_identity_or_coverage_mismatch"));
+        }
+        for b in bars.iter() {
+            for (raw, adjusted) in [
+                (b.open, b.adj_open),
+                (b.high, b.adj_high),
+                (b.low, b.adj_low),
+                (b.close, b.adj_close),
+            ] {
+                if raw.is_some() != adjusted.is_some()
+                    || adjusted.is_some_and(|v| !v.is_finite() || v <= 0.)
+                {
+                    return Err(invalid("supplier_price_missing_or_invalid"));
+                }
+            }
+        }
+        Ok(bars)
     }
     /// Composition can recover raw values only from the original Qlib contract.
     pub fn is_original_qlib(&self) -> bool {
@@ -543,6 +636,9 @@ impl DailyDataset {
             }
             return Ok(());
         }
+        if self.uses_supplier_prices(id) {
+            return self.supplier_bars(id).map(|_| ());
+        }
         self.canonical_inputs(id).map(|_| ())
     }
     /// True when coefficients come from a separate dated record rather than float32 Qlib fields.
@@ -571,6 +667,7 @@ impl DailyDataset {
             AdjustmentBasis::PriceIndex { source } => {
                 source == "JFQuant analytics-workflow synthetic-demo-v1"
             }
+            AdjustmentBasis::SupplierForward { .. } => false,
             AdjustmentBasis::Unavailable { reason } => return Err(invalid(reason)),
         };
         if is_synthetic != synthetic {
@@ -770,13 +867,13 @@ impl DailyDataset {
                             serde_json::json!(points.as_array().map_or(0, Vec::len));
                         basis["history_start"] = points[0]["effective_date"].clone();
                     }
-                    serde_json::json!({"basis":basis,"source_symbol":record.source_symbol,"anchor":m.adjustment_anchors.get(id),"sha256":format!("sha256:{:x}",Sha256::digest(fs::read(self.root.join("adjustments").join(format!("{id}.json")))?))})
+                    serde_json::json!({"normalization":if self.uses_supplier_prices(id){HITHINK_NORMALIZATION}else{NORMALIZATION},"basis":basis,"source_symbol":record.source_symbol,"anchor":m.adjustment_anchors.get(id),"sha256":format!("sha256:{:x}",Sha256::digest(fs::read(self.root.join("adjustments").join(format!("{id}.json")))?))})
                 }
             };
             securities.insert(id, value);
         }
         Ok(
-            serde_json::json!({"normalization":match self.kind {DailyKind::Qlib(_)=>"qlib-first-stored-factor-v2",DailyKind::Parquet(_)=>NORMALIZATION},"securities":securities}),
+            serde_json::json!({"normalization":match self.kind {DailyKind::Qlib(_)=>"qlib-first-stored-factor-v2",DailyKind::Parquet(ref m)=>m.normalization.as_str()},"securities":securities}),
         )
     }
     /// Immutable historical membership and explicit coverage.
@@ -968,6 +1065,24 @@ impl DailyDataset {
         }
         if let DailyKind::Qlib(q) = &self.kind {
             return self.qlib_field(q, id, name);
+        }
+        if self.uses_supplier_prices(id) {
+            let bars = self.supplier_bars(id)?;
+            let mut values = vec![None; self.calendar.len()];
+            for b in bars.iter() {
+                let value = match name {
+                    "open" => b.adj_open,
+                    "high" => b.adj_high,
+                    "low" => b.adj_low,
+                    "close" => b.adj_close,
+                    "volume" => b.volume,
+                    "amount" => b.amount,
+                    "vwap" | "factor" => None,
+                    _ => return Err(invalid("unknown daily field")),
+                };
+                values[self.calendar.binary_search(&b.trade_date).unwrap()] = value;
+            }
+            return Ok(DailyField { start: 0, values });
         }
         let inputs = self.canonical_inputs(id)?;
         let base = coefficient(&inputs.anchor.factor)?;

@@ -105,6 +105,7 @@ pub(super) fn verified_document_records(
     base: &Path,
     value: &Value,
 ) -> io::Result<BTreeMap<String, (Value, String)>> {
+    analytics_core::source_map::reject_removed_sources(value).map_err(invalid)?;
     if value["schema_version"] != 2 {
         return Err(invalid("unsupported announcement evidence format"));
     }
@@ -120,6 +121,7 @@ pub(super) fn verified_document_records(
             return Err(invalid("announcement metadata receipt mismatch"));
         }
         let shard: Value = serde_json::from_slice(&bytes).map_err(invalid)?;
+        analytics_core::source_map::reject_removed_sources(&shard).map_err(invalid)?;
         crate::collector::verify_http_receipts(base, &shard["evidence"])?;
         let documents = shard["evidence"]["documents"]
             .as_array()
@@ -185,6 +187,10 @@ pub fn apply(
     output: &Path,
 ) -> io::Result<ActionBundle> {
     source.validate_identity()?;
+    analytics_core::source_map::reject_removed_sources(
+        &serde_json::to_value(request).map_err(invalid)?,
+    )
+    .map_err(invalid)?;
     if request.schema_version != 1
         || (request.events.is_empty() && request.coverage_reviews.is_empty())
     {
@@ -564,7 +570,7 @@ mod tests {
         )
         .unwrap();
         // A failed batch can still contain a complete, immutable security receipt.
-        let owner = serde_json::json!({"operation":"announcements","collector_protocol":9,"collector_signature":crate::collector::REVIEWED_COLLECTOR_V9,"normalization":crate::adjustment::NORMALIZATION,"dependencies_sha256":format!("sha256:{:x}",Sha256::digest(include_bytes!("../../collectors/requirements.lock"))),"python_runtime_sha256":format!("sha256:{:x}",Sha256::digest(include_bytes!("../../collectors/python-runtime.lock.json"))),"request":{"provider":"akshare","adjustment_source":"sina_hfq","start":"2024-06-01","end":"2024-06-30","instruments":["SH600000"],"source_bindings":{},"benchmarks":[],"universes":[]}});
+        let owner = serde_json::json!({"operation":"announcements","collector_protocol":12,"collector_signature":crate::collector::collector_signature(),"normalization":crate::adjustment::NORMALIZATION,"dependencies_sha256":format!("sha256:{:x}",Sha256::digest(include_bytes!("../../collectors/requirements.lock"))),"python_runtime_sha256":format!("sha256:{:x}",Sha256::digest(include_bytes!("../../collectors/python-runtime.lock.json"))),"request":{"provider":"cninfo","adjustment_source":"none","start":"2024-06-01","end":"2024-06-30","instruments":["SH600000"],"source_bindings":{},"benchmarks":[],"universes":[]}});
         fs::write(root.join("owner.json"), serde_json::to_vec(&owner).unwrap()).unwrap();
         fs::write(
             root.join("receipts.json"),

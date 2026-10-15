@@ -1,3 +1,5 @@
+当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议18、采集协议12、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
+
 # analytics-desktop
 
 macOS优先的egui桌面客户端，提供数据、查询、因子、建模、研究和运行记录界面。

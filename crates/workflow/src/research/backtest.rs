@@ -65,6 +65,7 @@ fn validate_price_source(
         AdjustmentAnchor, AdjustmentBasis, AdjustmentPoint, AdjustmentRecord, FactorSource,
         coefficient,
     };
+    let normalization = input["normalization"].as_str().unwrap_or(normalization);
     let anchor: AdjustmentAnchor = serde_json::from_value(input["anchor"].clone())?;
     coefficient(&anchor.factor)?;
     if normalization == "qlib-first-stored-factor-v2" {
@@ -103,6 +104,21 @@ fn validate_price_source(
                     effective_date: start,
                     factor: anchor.factor,
                 }],
+            }
+        }
+        Some("supplier_forward") => {
+            if synthetic
+                || normalization != analytics_storage::adjustment::HITHINK_NORMALIZATION
+                || anchor.factor != "1"
+            {
+                return Err("supplier price provenance mismatch".into());
+            }
+            let through: Date = serde_json::from_value(basis["verified_through"].clone())?;
+            if through < anchor.trade_date {
+                return Err("supplier coverage does not include anchor".into());
+            }
+            AdjustmentBasis::SupplierForward {
+                verified_through: through,
             }
         }
         Some("price_index") => {
@@ -294,6 +310,8 @@ pub fn validate_result(
                 Some(
                     "qlib-first-stored-factor-v2"
                         | "explicit-hfq-first-raw-close-v1;shares;cny;nulls"
+                        | "hithink-forward-ohlc-v1;shares;cny;vwap-null"
+                        | "per-security-price-volume-v1"
                 )
             )
             || execution["price_inputs"]["securities"]
@@ -939,7 +957,15 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         && !dataset.supports_provider_training()
     {
         return Err(
-            "unsupported_provider_price_basis: registered Qlib or verified TDX ForwardFactor quotations required".into(),
+            "unsupported_provider_price_basis: registered Qlib, verified TDX or HiThink supplier quotations required".into(),
+        );
+    }
+    if request.price_basis == analytics_core::research_quality::PriceBasis::Verified
+        && dataset.requires_supplier_training()
+    {
+        return Err(
+            "supplier_price_basis_requires_provider: select provider price basis for HiThink"
+                .into(),
         );
     }
     let mut pool = match &request.pool {

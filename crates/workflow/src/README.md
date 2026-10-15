@@ -1,3 +1,11 @@
+## 当前采集契约（2026-10-15）
+
+HiThink 为默认主源，由 Rust 直接调用 REST；通达信备用，维持内置 Python `tdxaidata==1.2.2`；巨潮公告使用独立 `cninfo` 来源。旧来源依赖、配置、权限检查及历史兼容入口已移除；旧数据不迁移、不删除，重新配置来源并采集。
+
+公共来源为 `hithink|tdxaidata|cninfo`，复权选项为 `hithink-forward|tdx-forward|none`。服务协议18、采集协议12、来源策略2；HiThink 行情格式6，通达信格式5与 Qlib 读取保留。HiThink 训练选择供应商口径（`price_basis=provider`），前复权 OHLC、原始股数及人民币成交额、VWAP null；回测使用原价。训练缓存与 manifest 冻结口径、来源和证据哈希，特征顺序及公式版本保持。
+
+接口、凭据、覆盖范围与复现命令见[采集组件](../../storage/collectors/README.md)。当前成分不能回填历史，下载成功不代表研究或账户资料完整。
+
 # Workflow 源码：工作区服务与持久化执行
 
 [上级：analytics-workflow](../README.md) · [内置模板](../templates/README.md) · [CLI客户端](../../cli/src/README.md) · [App适配](../../app/src/README.md)
@@ -82,7 +90,7 @@ cargo clippy -p analytics-workflow --all-targets -- -D warnings
 flowchart LR
   CLIENT["App / jfquant"] --> SERVICE["协议14公共服务"]
   SERVICE --> POOL["保存/预览不可变股票池"]
-  SERVICE --> COLLECT["Rust监督内置Python双源采集"]
+  SERVICE --> COLLECT["Rust HiThink REST / 监督内置Python备用采集"]
   COLLECT --> SNAPSHOT["验证后的Parquet版本与公司行动候选"]
   POOL --> FREEZE["模板10：池、基准、退出策略、签名"]
   SNAPSHOT --> READY["原价、历史覆盖、公司行动准入"]
@@ -92,17 +100,7 @@ flowchart LR
   RESEARCH --> RESULT["结果14：成员变化、退出/阻碍、账户快照、上游总费用"]
 ```
 
-`pools create/validate/import/export/list/versions/preview` 使用公共定义及解析器；`data collect --provider akshare|yfinance --kind market|actions` 提交后台任务，使用 jobs wait 显式等待。`run --request` 可提交完整公共请求。App提供来源、采集日期/证券、股票池JSON编辑、日期预览、退出策略及失败采集恢复按钮。包内Python和依赖只用于采集，不需要外部Python；日常操作不调用Cargo。
 
-```bash
-jfquant templates default --universe csi300 --output csi300-template.json
-jfquant pools validate --definition pool.json
-jfquant pools create --definition pool.json
-jfquant pools preview pool-0123456789abcdef --market market-0123456789abcdef --date 2026-10-12
-jfquant data collect --provider akshare --start 2004-01-01 --end 2026-10-13 --instruments SH600000,SZ000001,SH000300 --benchmarks SH000300
-jfquant data collect --kind actions --provider akshare --start 2004-01-01 --end 2026-10-13 --instruments SH600000,SZ000001
-jfquant research demo-parquet
-```
 
 示例ID须换为实际版本。下载可恢复验证过的证券；重新提交时参数必须与owner一致。临时/缺失输入不会自动换源、补字段或启动训练。原价撮合不使用Yahoo拆股调整价；指数历史成员缺失停止训练，回测按上游除权除息日处理分红与拆股，已知不支持事件阻断。2010样本外的5+1窗口需要2004—2009完整历史池及行情，不能以当前成分回填。
 
@@ -148,7 +146,7 @@ flowchart LR
 
 为什么调整：普通市场代码无需先登记身份；独立目录、审核和权威名录下载增加了研究前置负担。特殊历史代码仍需在快照内明确区间，不能将旧证券行情或权益接到另一证券。训练使用价量和标签，到账／交付资料只在实际账户执行时检查。
 
-当前格式：模板10、需求3、准入5、股票池3、公司行动5、规范行情5、系数3、采集7、服务14、研究结果14；快照内来源映射1、训练产物3。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
+当前格式：模板10、需求3、准入5、股票池3、公司行动5、规范行情5/HiThink6、系数3、采集7、服务14、研究结果14；快照内来源映射1、训练产物3。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
 
 App与jfquant共用后台。research train产出training.json及逐折model.txt/manifest.json；research backtest引用训练任务，不重新训练；research run先训练再回测。补齐支付日不改变训练价量依据，系数或除权参考改变须重训。check只证明训练就绪，账户提示保持not_run；回测失败仍可读取模型及部分账户记录。
 
@@ -179,7 +177,7 @@ profiles.rs分离工作流10、因子1和标的1；lib.rs执行CollectQuotes/Col
 
 ## `refresh.rs`为何单独存在
 
-数据获取策略与研究参数生命周期不同：换源不能悄悄改因子、标的或旧模型。该模块保存独立SourcePolicy，构建逐证券RefreshPlan，按优先级处理完整行情单元、日历、当前成员及账户资料，保存失败和差异后才发布新版本。默认每个用途均先通达信。
+数据获取策略与研究参数生命周期不同：换源不能悄悄改因子、标的或旧模型。该模块保存独立SourcePolicy，构建逐证券RefreshPlan，按优先级处理完整行情单元、日历、当前成员及账户资料，保存失败和差异后才发布新版本。默认行情、日历、当前成员和公司行动先HiThink、再通达信；执行资料来源为空，缺口明确报告。
 
 ```mermaid
 flowchart LR
@@ -193,8 +191,6 @@ flowchart LR
 
 ## 按缺口补采实施证据
 
-为什么独立任务：补齐一只股票的支付/上市日不应重取全池或重训模型。`CollectAnnouncements`接收固定AKShare/巨潮来源、证券、日期和可选resume，App和CLI提交同一请求。先验证再接受，失败不登记事件版本；成功返回公告manifest及`candidate_only=true`，必须经`InspectActions/ReviseActions`核对原值哈希、实施字段引用后生成不可变修订。App历史可恢复公告采集。新增请求采用服务协议14。
-
 ```mermaid
 flowchart LR
  U[App / jfquant collect announcements] --> W[公共请求与任务记录]
@@ -203,5 +199,3 @@ flowchart LR
  M --> R[原值及实施证据审阅]
  R --> V[新公司行动版本 / 旧值保留]
 ```
-
-复现：`jfquant data collect --kind announcements --provider akshare --start 2016-05-01 --end 2017-07-01 --instruments SH600000,SZ000001`，然后`jfquant jobs wait TASK_ID`。候选解析v3支持空格日期、沪市六列换行表和深市起始交易日，矛盾不自动裁决。真实研究本轮不使用Qlib快照；通达信行情完整时不要求其他来源背书，备用来源仅补用途缺口。详见[设计决定](../DECISIONS.md)。

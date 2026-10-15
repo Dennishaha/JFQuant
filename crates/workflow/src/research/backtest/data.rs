@@ -310,6 +310,21 @@ pub(super) struct YearInputs<'a> {
     pub allow_missing: bool,
     pub price_basis: analytics_core::research_quality::PriceBasis,
 }
+// Supplier fields already carry the requested price/share/CNY units. Neutral
+// scaling here is not a synthetic adjustment coefficient exposed to research.
+fn input_scales(supplier: bool, factor: &DailyField) -> Result<(f64, f64, f64)> {
+    if supplier {
+        return Ok((1.0, 1.0, 1.0));
+    }
+    let anchor = factor
+        .values
+        .iter()
+        .flatten()
+        .copied()
+        .find(|v| *v > 0.0)
+        .ok_or("research adjustment anchor missing")?;
+    Ok((anchor, anchor * 100.0, 1000.0))
+}
 pub(super) fn prepare_year(
     inputs: YearInputs<'_>,
     registry: &FactorRegistry,
@@ -337,13 +352,8 @@ pub(super) fn prepare_year(
     let benchmark_open = dataset.field(benchmark, "open")?;
     let benchmark_close = dataset.field(benchmark, "close")?;
     let benchmark_factor = dataset.field(benchmark, "factor")?;
-    let b_anchor = benchmark_factor
-        .values
-        .iter()
-        .flatten()
-        .copied()
-        .find(|v| *v > 0.0)
-        .ok_or("benchmark adjustment factor missing")?;
+    let (b_anchor, _, _) =
+        input_scales(dataset.uses_supplier_prices(benchmark), &benchmark_factor)?;
     let mut panel = Panel {
         instrument_id: Vec::new(),
         trade_date: Vec::new(),
@@ -387,13 +397,8 @@ pub(super) fn prepare_year(
                 dataset.research_field(instrument, name, allow_missing && name != "factor")?,
             );
         }
-        let anchor = raw["factor"]
-            .values
-            .iter()
-            .flatten()
-            .copied()
-            .find(|v| *v > 0.0)
-            .ok_or("stock adjustment anchor missing")?;
+        let (anchor, volume_scale, amount_scale) =
+            input_scales(dataset.uses_supplier_prices(instrument), &raw["factor"])?;
         anchors.insert(instrument.clone(), anchor);
         let p = |name: &str, day: usize| field(&raw, name, day).map(|v| v / anchor);
         for day in warmup..end {
@@ -406,7 +411,7 @@ pub(super) fn prepare_year(
             let low = p("low", day);
             let previous = day.checked_sub(1).and_then(|d| p("close", d));
             let previous_open = day.checked_sub(1).and_then(|d| p("open", d));
-            let volume = field(&raw, "volume", day).map(|v| v * anchor * 100.0);
+            let volume = field(&raw, "volume", day).map(|v| v * volume_scale);
             let member = windows.iter().any(|w| w.start <= day && day <= w.end);
             let index = panel.instrument_id.len();
             panel.instrument_id.push(instrument.clone());
@@ -422,7 +427,7 @@ pub(super) fn prepare_year(
                 low,
                 close,
                 volume,
-                field(&raw, "amount", day).map(|v| v * 1000.0),
+                field(&raw, "amount", day).map(|v| v * amount_scale),
                 p("vwap", day),
                 ratio(close, previous).map(|v| v - 1.0),
                 high.zip(day.checked_sub(1).and_then(|d| p("high", d)))
@@ -836,6 +841,90 @@ mod directional_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn supplier_fields_keep_shares_cny_and_do_not_require_independent_coefficients() {
+        let absent = DailyField {
+            start: 0,
+            values: vec![None, None],
+        };
+        assert_eq!(input_scales(true, &absent).unwrap(), (1., 1., 1.));
+        assert!(input_scales(false, &absent).is_err());
+        let explicit = DailyField {
+            start: 0,
+            values: vec![Some(0.1)],
+        };
+        assert_eq!(input_scales(false, &explicit).unwrap(), (0.1, 10., 1000.));
+    }
+    #[test]
+    fn supplier_stock_and_index_fixture_prepare_features_with_null_vwap() {
+        use analytics_storage::{
+            adjustment::{AdjustmentBasis, AdjustmentRecord, HITHINK_NORMALIZATION},
+            daily::DailyManifest,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let w = crate::Workspace::open(temp.path()).unwrap();
+        let (market, _, _) = crate::demo::create_canonical(&w).unwrap();
+        let root = w.resolve(market.path);
+        let path = root.join("daily_manifest.json");
+        let mut manifest: DailyManifest =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        manifest.schema_version = 6;
+        manifest.normalization = HITHINK_NORMALIZATION.into();
+        for id in &manifest.instruments {
+            let mut record = AdjustmentRecord::read(&root, id).unwrap();
+            record.basis = if id == "SH000905" {
+                AdjustmentBasis::PriceIndex {
+                    source: "hithink.a-share-index.prices.historical".into(),
+                }
+            } else {
+                AdjustmentBasis::SupplierForward {
+                    verified_through: *manifest.calendar.last().unwrap(),
+                }
+            };
+            save(root.join("adjustments").join(format!("{id}.json")), &record).unwrap();
+            manifest.adjustment_anchors.get_mut(id).unwrap().factor = "1".into();
+        }
+        save(&path, &manifest).unwrap();
+        let dataset = DailyDataset::open(&root).unwrap();
+        let pool = dataset.pool("csi500").unwrap();
+        let members = dataset.align_membership(&pool);
+        let ids = vec!["alpha_002".into(), "alpha_013".into()];
+        let cache = temp.path().join("cache");
+        fs::create_dir(&cache).unwrap();
+        prepare_year(
+            YearInputs {
+                dataset: &dataset,
+                members: &members,
+                benchmark: "SH000905",
+                universe_id: "csi500",
+                pool_start: pool.coverage.start,
+                allow_missing: false,
+                price_basis: analytics_core::research_quality::PriceBasis::Provider,
+            },
+            &FactorRegistry::default(),
+            &ids,
+            2008,
+            &cache,
+            "supplier-fixture",
+        )
+        .unwrap();
+        let data = load_year(&cache, 2008, &ids).unwrap();
+        assert!(!data.meta.rows.is_empty());
+        assert!(
+            data.features
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .any(|v| v[0].is_finite())
+        );
+        assert!(
+            data.features
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .all(|v| v[1].is_nan())
+        );
+    }
     #[test]
     fn directional_inputs_follow_original_dbm_sign_and_preserve_missing_history() {
         assert_eq!(

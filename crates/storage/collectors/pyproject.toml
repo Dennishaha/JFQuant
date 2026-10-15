@@ -2,7 +2,7 @@
 name = "jfquant-collectors"
 version = "0.1.0"
 requires-python = ">=3.12,<3.13"
-dependencies = ["akshare==1.19.1", "yfinance==1.7.0", "tdxaidata==1.2.2"]
+dependencies = ["requests==2.32.5", "pandas==2.3.3", "pypdf==5.9.0", "tdxaidata==1.2.2"]
 
 [build-system]
 requires = ["setuptools>=75"]

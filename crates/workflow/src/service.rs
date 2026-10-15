@@ -26,7 +26,7 @@ use std::{
 };
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 16;
+pub const PROTOCOL_VERSION: u32 = 18;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TaskRequest {
@@ -215,6 +215,24 @@ pub enum Rpc {
     },
     Stop,
     Restart,
+}
+fn validate_submission(raw: &Value) -> Result<()> {
+    if raw["request"]["method"] != "submit" {
+        return Ok(());
+    }
+    let task = &raw["request"]["params"]["request"];
+    if task["operation"] != "workflow" {
+        return Ok(());
+    }
+    analytics_core::source_map::reject_removed_sources(&task["request"])
+        .map_err(|e| ServiceError::new("removed_provider", e))?;
+    if task["request"]["operation"] == "supplement_actions" {
+        return Err(ServiceError::new(
+            "removed_operation",
+            "旧补采任务不能恢复；请重新采集公司行动或使用巨潮证据修订",
+        ));
+    }
+    Ok(())
 }
 #[derive(Serialize, Deserialize)]
 struct Message {
@@ -575,6 +593,9 @@ pub fn serve(root: &Path) -> Result<()> {
                             .take(16 * 1024 * 1024)
                             .read_line(&mut line)
                             .map_err(failure)?;
+                        let raw: Value = serde_json::from_str(&line)
+                            .map_err(|e| ServiceError::new("invalid_request", e))?;
+                        validate_submission(&raw)?;
                         let message: Message = serde_json::from_str(&line)
                             .map_err(|e| ServiceError::new("invalid_request", e))?;
                         if message.version != PROTOCOL_VERSION {
@@ -750,7 +771,7 @@ pub fn find_binary() -> Result<PathBuf> {
 /// The credential travels over a private stdin pipe; no task, argv or log contains it.
 /// Save a known provider key through the same private file store as the service.
 pub fn configure_source(provider: &str, token: &str) -> Result<()> {
-    if !matches!(provider, "tdxaidata" | "tushare") {
+    if !matches!(provider, "tdxaidata" | "hithink") {
         return Err(failure("credential_provider_unsupported"));
     }
     use std::process::Stdio;
@@ -1175,5 +1196,26 @@ mod protocol_tests {
         );
         server.join().unwrap();
         fs::remove_file(socket).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod retired_submission_tests {
+    use super::*;
+    #[test]
+    fn old_workflow_is_rejected_before_deserialization_but_history_is_readable() {
+        let mut raw = json!({"version":18,"request":{"method":"submit","params":{"id":Uuid::new_v4(),"request":{"operation":"workflow","request":{"operation":"supplement_actions","actions":"old-version"}}}}});
+        assert_eq!(
+            validate_submission(&raw).unwrap_err().code,
+            "removed_operation"
+        );
+        raw["request"]["params"]["request"]["request"] =
+            json!({"operation":"collect_quotes","request":{"provider":"akshare"}});
+        assert_eq!(
+            validate_submission(&raw).unwrap_err().code,
+            "removed_provider"
+        );
+        raw["request"]["method"] = json!("jobs");
+        assert!(validate_submission(&raw).is_ok());
     }
 }

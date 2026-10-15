@@ -485,7 +485,6 @@ def constituents(values, observed):
 
 def reference(request, report):
     """Small fixed reference endpoints, independent of quote/factor acquisition."""
-    from .providers import date, request_call
 
     operation = request["operation"]
     provider = request["provider"]
@@ -509,33 +508,6 @@ def reference(request, report):
                     )
                     universes[name] = constituents(values, observed)
             receipts = native_receipts[:]
-    elif provider == "akshare":
-        import akshare as ak
-
-        if operation == "calendar":
-            calendar = [date(v) for v in request_call(ak.tool_trade_date_hist_sina)["trade_date"]]
-            calendar = [d for d in calendar if d and request["start"] <= d <= request["end"]]
-        else:
-            for name in request["universes"]:
-                if name not in ("csi300", "csi500"):
-                    raise ValueError("unsupported_universe")
-                frame = request_call(
-                    ak.index_stock_cons_csindex, symbol="000300" if name == "csi300" else "000905"
-                )
-                days = {date(d) for d in frame["日期"]}
-                if len(days) != 1 or None in days:
-                    raise ValueError("ambiguous_member_date")
-                values = []
-                for row in frame.to_dict("records"):
-                    market = {
-                        "上海证券交易所": "SH",
-                        "深圳证券交易所": "SZ",
-                        "北京证券交易所": "BJ",
-                    }.get(row["交易所"])
-                    if market is None:
-                        raise ValueError("unknown_member_exchange")
-                    values.append(str(row["成分券代码"]).zfill(6) + "." + market)
-                universes[name] = constituents(values, days.pop())
     else:
         raise ValueError("reference_provider_unsupported")
     if operation == "calendar" and (

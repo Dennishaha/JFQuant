@@ -20,15 +20,23 @@ use std::{
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Provider {
-    /// A-share supplementary public source.
-    Akshare,
-    /// Yahoo candidate/verification source.
-    Yfinance,
-    /// Explicit structured account-data source; quotation collection is not enabled.
-    Tushare,
-    /// Official native-backed first-choice source.
+    /// HiThink REST source, using supplier forward-adjusted prices for research.
     #[default]
+    Hithink,
+    /// Independent CNINFO implementation announcement candidates.
+    Cninfo,
+    /// Official native-backed alternative source.
     Tdxaidata,
+}
+impl Provider {
+    /// Stable provider name in manifests and credentials.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Hithink => "hithink",
+            Self::Cninfo => "cninfo",
+            Self::Tdxaidata => "tdxaidata",
+        }
+    }
 }
 /// Public collection request; no executable paths or arbitrary functions are accepted.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -64,9 +72,8 @@ impl CollectionRequest {
         if !matches!(
             (self.provider, self.adjustment_source),
             (Provider::Tdxaidata, AdjustmentSource::TdxForward)
-                | (Provider::Akshare, AdjustmentSource::SinaHfq)
-                | (Provider::Yfinance, AdjustmentSource::None)
-                | (Provider::Tushare, AdjustmentSource::None)
+                | (Provider::Hithink, AdjustmentSource::HithinkForward)
+                | (Provider::Cninfo, AdjustmentSource::None)
         ) || self.benchmarks.iter().any(|id| {
             !matches!(
                 self.source_bindings.get(id).unwrap_or(id).as_str(),
@@ -129,20 +136,8 @@ pub fn collector_signature() -> String {
             include_bytes!("../collectors/jfquant_collectors/evidence.py").as_slice(),
         ),
         (
-            "adjustment.py",
-            include_bytes!("../collectors/jfquant_collectors/adjustment.py").as_slice(),
-        ),
-        (
             "announcements.py",
             include_bytes!("../collectors/jfquant_collectors/announcements.py").as_slice(),
-        ),
-        (
-            "tushare.py",
-            include_bytes!("../collectors/jfquant_collectors/tushare.py").as_slice(),
-        ),
-        (
-            "cninfo.py",
-            include_bytes!("../collectors/jfquant_collectors/cninfo.py").as_slice(),
         ),
         (
             "tdx.py",
@@ -278,30 +273,18 @@ fn verify_collector_identity(message: &Value) -> io::Result<()> {
             "collector code signature mismatch; rebuild the bundled runtime",
         ));
     }
-    if message["versions"]["akshare"] != "1.19.1"
-        || message["versions"]["yfinance"] != "1.7.0"
-        || message["versions"]["python"] != "3.12.15"
-    {
+    if message["versions"]["python"] != "3.12.15" {
         return Err(invalid("collector dependency version mismatch"));
     }
-    if message["versions"]
-        .get("tdxaidata")
-        .is_some_and(|v| v != "1.2.2")
-    {
+    if message["versions"]["tdxaidata"] != "1.2.2" {
         return Err(invalid("tdx_sdk_version_mismatch"));
     }
     Ok(())
 }
-pub(crate) const REVIEWED_COLLECTOR_V9: &str =
-    "sha256:6ef9998660108cb5f7f7b7a01ef7a31fefcd59487481d5a7d614184ee52e88fe";
-pub(crate) const REVIEWED_COLLECTOR_V10: &str =
-    "sha256:a95fa5b539764ff37e902baec307eb0609d255894218f8b6a2ed17aec63447c1";
-/// Historical evidence eligibility, independent from the strict live handshake.
+/// Current evidence owner only; obsolete provider checkpoints must be reacquired.
 pub(crate) fn reviewed_collection_owner(owner: &Value) -> bool {
-    let signature = owner["collector_signature"].as_str().unwrap_or("");
-    ((owner["collector_protocol"] == 9 && signature == REVIEWED_COLLECTOR_V9)
-        || (owner["collector_protocol"] == 10
-            && (signature == collector_signature() || signature == REVIEWED_COLLECTOR_V10)))
+    owner["collector_protocol"] == 12
+        && owner["collector_signature"] == collector_signature()
         && owner["dependencies_sha256"] == dependencies_signature()
         && owner["python_runtime_sha256"]
             == format!(
@@ -310,41 +293,10 @@ pub(crate) fn reviewed_collection_owner(owner: &Value) -> bool {
             )
         && owner["normalization"] == NORMALIZATION
 }
-/// Historical format-1 AKShare/Sina coefficient producer reviewed against cf35c3193de4.
-/// Its adjustment parser and raw/parsed receipt binding are compatible; later additions
-/// affect other providers. This does not authorize running an old collector.
-pub(crate) fn verify_coefficient_producer(message: &Value, provider: Provider) -> io::Result<u32> {
-    let current = message["collector_signature"] == collector_signature();
-    let historical = provider == Provider::Akshare
-        && message["collector_signature"]
-            == "sha256:4311df0d8844c6cbfc9a9318e970ad806af634ec2cba47a4d8a0db9788c503ba"
-        && message["versions"]["akshare"] == "1.19.1"
-        && message["versions"]["yfinance"] == "1.7.0"
-        && message["versions"]["python"] == "3.12.15";
-    if current {
-        verify_collector_identity(message)?;
-        Ok(10)
-    } else if provider == Provider::Akshare
-        && message["collector_signature"] == REVIEWED_COLLECTOR_V9
-        && message["versions"]["python"] == "3.12.15"
-        && message["versions"]["akshare"] == "1.19.1"
-        && message["versions"]["yfinance"] == "1.7.0"
-    {
-        Ok(9)
-    } else if provider == Provider::Akshare
-        && message["collector_signature"] == REVIEWED_COLLECTOR_V10
-        && message["versions"]["python"] == "3.12.15"
-        && message["versions"]["akshare"] == "1.19.1"
-        && message["versions"]["yfinance"] == "1.7.0"
-    {
-        Ok(10)
-    } else if historical {
-        Ok(7)
-    } else {
-        Err(invalid(
-            "unsupported_historical_collector: revalidate producer or reacquire coefficients",
-        ))
-    }
+/// Verify an immutable current producer receipt without authorizing old implementations.
+pub(crate) fn verify_coefficient_producer(message: &Value, _provider: Provider) -> io::Result<u32> {
+    verify_collector_identity(message)?;
+    Ok(12)
 }
 /// Resolve the package runtime first; development builds may use the documented local build.
 pub fn runtime() -> io::Result<PathBuf> {
@@ -398,17 +350,6 @@ pub fn collect_actions(
 ) -> io::Result<PathBuf> {
     collect_operation(request, staging, context, "actions")
 }
-/// Inspect fixed Tushare API permissions with the same cancellable worker supervisor.
-pub fn check_tushare_permissions(
-    request: &CollectionRequest,
-    staging: &Path,
-    context: &TaskContext,
-) -> io::Result<PathBuf> {
-    if request.provider != Provider::Tushare || request.instruments.len() != 1 {
-        return Err(invalid("invalid_permission_request"));
-    }
-    collect_operation(request, staging, context, "permissions")
-}
 /// Independently collect quotations without depending on a coefficient HTTP endpoint.
 /// Raw candidate snapshots are not automatically eligible for research.
 pub fn collect_quotes(
@@ -426,8 +367,7 @@ pub fn collect_coefficients(
 ) -> io::Result<PathBuf> {
     if !matches!(
         (request.provider, request.adjustment_source),
-        (Provider::Akshare, AdjustmentSource::SinaHfq)
-            | (Provider::Tdxaidata, AdjustmentSource::TdxForward)
+        (Provider::Tdxaidata, AdjustmentSource::TdxForward)
     ) {
         return Err(invalid("unsupported independent coefficient source"));
     }
@@ -460,16 +400,13 @@ fn collect_operation(
 ) -> io::Result<PathBuf> {
     request.validate()?;
     context.check()?;
-    if request.provider == Provider::Tushare && !matches!(operation, "actions" | "permissions") {
-        return Err(invalid("unsupported_tushare_operation"));
+    if request.provider == Provider::Hithink && operation != "reconcile_actions" {
+        return crate::hithink::collect(request, staging, context, operation);
+    }
+    if request.provider == Provider::Cninfo && operation != "announcements" {
+        return Err(invalid("unsupported_cninfo_operation"));
     }
     let mut command = Command::new(runtime()?);
-    if request.provider == Provider::Tushare {
-        command.env(
-            "JFQUANT_TUSHARE_TOKEN",
-            crate::credentials::load_source("tushare")?,
-        );
-    }
     let _private = if request.provider == Provider::Tdxaidata {
         if !matches!(
             operation,
@@ -549,6 +486,9 @@ pub fn collect_announcements(
     staging: &Path,
     context: &TaskContext,
 ) -> io::Result<PathBuf> {
+    if request.provider != Provider::Cninfo || request.adjustment_source != AdjustmentSource::None {
+        return Err(invalid("announcement_source_unsupported: select cninfo"));
+    }
     let mut command = Command::new(runtime()?);
     command.args(["-I", "-B", "-u", "-m", "jfquant_collectors"]);
     collect_with_command(
@@ -574,7 +514,7 @@ fn collect_with_command(
     fs::create_dir_all(staging.join("market/adjustments"))?;
     fs::create_dir_all(staging.join("raw"))?;
     let owner = staging.join("owner.json");
-    let mut owner_value = json!({"operation":operation,"request":request,"collector_protocol":10,"normalization":NORMALIZATION,
+    let mut owner_value = json!({"operation":operation,"request":request,"collector_protocol":12,"normalization":NORMALIZATION,
         "collector_signature":collector_signature(),"dependencies_sha256":dependencies_signature(),
         "python_runtime_sha256":format!("sha256:{:x}",Sha256::digest(include_bytes!("../collectors/python-runtime.lock.json")))});
     if operation == "reconcile_actions" {
@@ -655,12 +595,7 @@ fn collect_with_command(
         .open(staging.join("collector.stderr.log"))?;
     let secrets: Vec<String> = command
         .get_envs()
-        .filter(|(k, _)| {
-            matches!(
-                k.to_str(),
-                Some("JFQUANT_TDX_KEY" | "JFQUANT_TUSHARE_TOKEN")
-            )
-        })
+        .filter(|(k, _)| matches!(k.to_str(), Some("JFQUANT_TDX_KEY")))
         .filter_map(|(_, v)| v.and_then(|v| v.to_str()).map(str::to_owned))
         .filter(|s| !s.is_empty())
         .collect();
@@ -727,7 +662,7 @@ fn collect_with_command(
         log.sync_all()
     });
     let mut payload = serde_json::to_value(request).map_err(invalid)?;
-    payload["version"] = json!(10);
+    payload["version"] = json!(12);
     payload["expected_collector_signature"] = json!(collector_signature());
     payload["operation"] = json!(operation);
     if operation == "reconcile_actions" {
@@ -840,7 +775,7 @@ fn collect_with_command(
                             }
                         }
                     }
-                    if msg["version"] != 10 {
+                    if msg["version"] != 12 {
                         return Err(invalid("collector_protocol_mismatch"));
                     }
                     if completed.is_some() {
@@ -887,7 +822,7 @@ fn collect_with_command(
                                 (&record.basis, request.benchmarks.contains(id)),
                                 (
                                     AdjustmentBasis::Explicit {
-                                        source: FactorSource::SinaHfq | FactorSource::TdxForward,
+                                        source: FactorSource::TdxForward,
                                         ..
                                     },
                                     false
@@ -920,7 +855,6 @@ fn collect_with_command(
                                 "actions"
                                     | "reconcile_actions"
                                     | "announcements"
-                                    | "permissions"
                                     | "calendar"
                                     | "members"
                             ) =>
@@ -979,19 +913,6 @@ fn collect_with_command(
                             ) {
                                 (
                                     AdjustmentBasis::Explicit {
-                                        source: FactorSource::SinaHfq,
-                                        ..
-                                    },
-                                    Provider::Akshare,
-                                    false,
-                                ) => true,
-                                (
-                                    AdjustmentBasis::PriceIndex { source },
-                                    Provider::Akshare,
-                                    true,
-                                ) => source == "akshare.index_zh_a_hist",
-                                (
-                                    AdjustmentBasis::Explicit {
                                         source: FactorSource::TdxForward,
                                         ..
                                     },
@@ -1006,9 +927,6 @@ fn collect_with_command(
                                 (AdjustmentBasis::Unavailable { .. }, _, _)
                                     if operation == "quotes" =>
                                 {
-                                    true
-                                }
-                                (AdjustmentBasis::Unavailable { .. }, Provider::Yfinance, _) => {
                                     true
                                 }
                                 _ => false,
@@ -1256,21 +1174,6 @@ fn collect_with_command(
         )?;
         return Ok(path);
     }
-    if operation == "permissions" {
-        let id = receipts
-            .keys()
-            .next()
-            .ok_or_else(|| invalid("missing permission receipt"))?;
-        let shard: Value = serde_json::from_slice(&fs::read(
-            staging
-                .join("raw")
-                .join(format!("{id}-actions-structured.json")),
-        )?)
-        .map_err(invalid)?;
-        let path = staging.join("permissions.json");
-        save(&path, &shard["evidence"]["capabilities"])?;
-        return Ok(path);
-    }
     if operation == "announcements" {
         let mut documents = Vec::new();
         for id in receipts.keys() {
@@ -1322,9 +1225,8 @@ fn collect_with_command(
                         id.clone(),
                         analytics_core::source_map::SourceLocator {
                             provider: match request.provider {
-                                Provider::Akshare => "akshare",
-                                Provider::Yfinance => "yfinance",
-                                Provider::Tushare => "tushare",
+                                Provider::Hithink => "hithink",
+                                Provider::Cninfo => "cninfo",
                                 Provider::Tdxaidata => "tdxaidata",
                             }
                             .into(),
@@ -1361,23 +1263,6 @@ fn collect_with_command(
                 staging,
                 &msg["evidence"],
             )?);
-            if let Some(receipts) = msg["evidence"]["http_receipts"].as_array() {
-                let source = request.source_bindings.get(id).unwrap_or(id);
-                let ending = format!("stockid/{}.phtml", &source[2..]);
-                if let Some(r) = receipts.iter().find(|r| {
-                    r["url"]
-                        .as_str()
-                        .is_some_and(|u| u.contains("vISSUE_ShareBonus") && u.contains(&ending))
-                }) {
-                    let name = format!("{id}-sina.html");
-                    fs::copy(
-                        staging.join("raw").join(r["filename"].as_str().unwrap()),
-                        staging.join("raw").join(&name),
-                    )?;
-                    book.raw_sha256
-                        .insert(name, r["sha256"].as_str().unwrap().into());
-                }
-            }
             if msg["history_verified"] != true {
                 book.failures.insert(
                     id.clone(),
@@ -1389,50 +1274,6 @@ fn collect_with_command(
                 continue;
             }
             book.queried_symbols.insert(id.clone());
-            if msg["evidence"]["history_complete"] == true
-                && (msg["evidence"]["provider"] == "tushare"
-                    || (msg["evidence"]["provider"] == "akshare"
-                        && msg["evidence"]["source_rule"]
-                            == "akshare.cninfo/implemented/per-ten-shares-v1"))
-            {
-                book.structured_coverage.insert(
-                    id.clone(),
-                    crate::execution_data::StructuredCoverage {
-                        dates: analytics_core::DateRange {
-                            start: request.start,
-                            end: request.end,
-                        },
-                        source: if msg["evidence"]["provider"] == "tushare" {
-                            "tushare.dividend/implemented/per-share-v1"
-                        } else {
-                            "akshare.cninfo/implemented/per-ten-shares-v1"
-                        }
-                        .into(),
-                        evidence: vec![format!("{id}-actions-structured.json")],
-                    },
-                );
-                let mut issues: Vec<crate::execution_data::ExecutionIssue> =
-                    serde_json::from_value(msg["execution_issues"].clone()).map_err(invalid)?;
-                for i in &mut issues {
-                    i.instrument = id.clone();
-                }
-                book.execution_issues.extend(issues);
-                let aux: crate::execution_data::ExecutionData =
-                    serde_json::from_value(msg["execution_data"].clone()).map_err(invalid)?;
-                aux.validate()?;
-                let all = book.execution_data.get_or_insert_with(|| {
-                    crate::execution_data::ExecutionData {
-                        schema_version: 1,
-                        ..Default::default()
-                    }
-                });
-                all.suspensions.extend(aux.suspensions);
-                all.limits.extend(aux.limits);
-                all.coefficients.extend(aux.coefficients);
-                for (key, value) in aux.capabilities {
-                    all.capabilities.insert(format!("{id}:{key}"), value);
-                }
-            }
             for row in msg["records"]
                 .as_array()
                 .ok_or_else(|| invalid("missing company-action records"))?
@@ -1481,10 +1322,10 @@ fn collect_with_command(
         calendar: serde_json::from_value(complete["calendar"].clone()).map_err(invalid)?,
         universes: serde_json::from_value(complete["universes"].clone()).map_err(invalid)?,
         instruments: request.instruments.clone(),
-        price_basis: if matches!(request.provider, Provider::Akshare | Provider::Tdxaidata) {
+        price_basis: if request.provider == Provider::Tdxaidata {
             "unadjusted"
         } else {
-            "split_adjusted_candidate"
+            "unavailable"
         }
         .into(),
         normalization: NORMALIZATION.into(),
@@ -1515,9 +1356,8 @@ fn collect_with_command(
                         coverage: coverage.clone(),
                         locators: vec![analytics_core::source_map::SourceLocator {
                             provider: match request.provider {
-                                Provider::Akshare => "akshare",
-                                Provider::Yfinance => "yfinance",
-                                Provider::Tushare => "tushare",
+                                Provider::Hithink => "hithink",
+                                Provider::Cninfo => "cninfo",
                                 Provider::Tdxaidata => "tdxaidata",
                             }
                             .into(),
@@ -1545,7 +1385,7 @@ fn collect_with_command(
     }
     save(
         &staging.join("jfquant_source.json"),
-        &json!({"downloader":"JFQuant analytics-storage","independent_download":true,"snapshot_verified":true,"exception_bindings":!request.source_bindings.is_empty(),"provider":request.provider,"request":request,"evidence_sha256":evidence_hashes,"collector_protocol":10,"versions":complete["versions"],"collector_signature":complete["collector_signature"],"python_runtime":serde_json::from_slice::<Value>(include_bytes!("../collectors/python-runtime.lock.json")).map_err(invalid)?,"calendar_source":if request.provider==Provider::Tdxaidata {"tdxaidata.get_trading_dates"} else {"akshare.tool_trade_date_hist_sina"},"dependencies_sha256":format!("sha256:{:x}",Sha256::digest(include_bytes!("../collectors/requirements.lock"))),"price_basis":manifest.price_basis,"normalization":manifest.normalization,"adjustment_source":request.adjustment_source,"adjustment_anchors":manifest.adjustment_anchors}),
+        &json!({"downloader":"JFQuant analytics-storage","independent_download":true,"snapshot_verified":true,"exception_bindings":!request.source_bindings.is_empty(),"provider":request.provider,"request":request,"evidence_sha256":evidence_hashes,"collector_protocol":12,"versions":complete["versions"],"collector_signature":complete["collector_signature"],"python_runtime":serde_json::from_slice::<Value>(include_bytes!("../collectors/python-runtime.lock.json")).map_err(invalid)?,"calendar_source":if request.provider==Provider::Tdxaidata {"tdxaidata.get_trading_dates"} else {"unsupported"},"dependencies_sha256":format!("sha256:{:x}",Sha256::digest(include_bytes!("../collectors/requirements.lock"))),"price_basis":manifest.price_basis,"normalization":manifest.normalization,"adjustment_source":request.adjustment_source,"adjustment_anchors":manifest.adjustment_anchors}),
     )?;
     Ok(staging.join("market"))
 }
@@ -1572,8 +1412,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let request = CollectionRequest {
             source_bindings: Default::default(),
-            provider: Provider::Akshare,
-            adjustment_source: AdjustmentSource::SinaHfq,
+            provider: Provider::Hithink,
+            adjustment_source: AdjustmentSource::HithinkForward,
             start: "2020-01-03".parse().unwrap(),
             end: "2020-01-02".parse().unwrap(),
             instruments: BTreeSet::from(["SH600000".into()]),
@@ -1598,8 +1438,8 @@ mod supervisor_tests {
     fn request() -> CollectionRequest {
         CollectionRequest {
             source_bindings: Default::default(),
-            provider: Provider::Akshare,
-            adjustment_source: AdjustmentSource::SinaHfq,
+            provider: Provider::Tdxaidata,
+            adjustment_source: AdjustmentSource::TdxForward,
             start: "2020-01-02".parse().unwrap(),
             end: "2020-01-03".parse().unwrap(),
             instruments: BTreeSet::from(["SH600000".into()]),
@@ -1613,27 +1453,28 @@ mod supervisor_tests {
 import sys,json,time,os,hashlib
 r=json.loads(sys.stdin.readline());mode=sys.argv[1]
 open('collector.pid','w').write(str(os.getpid()))
-versions={'akshare':'1.19.1','yfinance':'1.7.0','python':'3.12.15'}
+versions={'tdxaidata':'1.2.2','python':'3.12.15'}
 identity=r['expected_collector_signature'] if mode!='bad_identity' else 'wrong code'
-if mode!='missing_identity': print(json.dumps({'version':10,'event':'ready','collector_signature':identity,'versions':versions}),flush=True)
-print(json.dumps({'version':10,'event':'progress','message':'ready'}),flush=True)
+if mode!='missing_identity': print(json.dumps({'version':12,'event':'ready','collector_signature':identity,'versions':versions}),flush=True)
+print(json.dumps({'version':12,'event':'progress','message':'ready'}),flush=True)
 if mode=='timeout': time.sleep(30)
 if mode=='crash': sys.exit(1)
 if mode=='bad_protocol': print(json.dumps({'version':0,'event':'complete'}),flush=True);sys.exit(0)
 if 'SH600000' in r['instruments']:
  body=b'original HTTP body'
  open('raw/http-fixture.body','wb').write(body)
- evidence={'kind':'structured_library_response','http_receipts':[{'filename':'http-fixture.body','sha256':'sha256:'+hashlib.sha256(body).hexdigest(),'url':'https://example.test/history'}]}
+ open('raw/sdk-fixture.body','wb').write(body)
+ evidence={'provider':'tdxaidata','sdk_version':'1.2.2','sdk_receipts':[{'kind':'sdk_native_response','sdk':'tdxaidata','version':'1.2.2','function':'GetHISDATsInStr','filename':'sdk-fixture.body','sha256':'sha256:'+hashlib.sha256(body).hexdigest()}],'kind':'structured_library_response','http_receipts':[{'filename':'http-fixture.body','sha256':'sha256:'+hashlib.sha256(body).hexdigest(),'url':'https://example.test/history'}]}
  if r['operation']=='actions':
-  print(json.dumps({'version':10,'event':'action_shard','instrument':'SH600000','history_verified':True,'records':[],'evidence':evidence}),flush=True)
+  print(json.dumps({'version':12,'event':'action_shard','instrument':'SH600000','history_verified':True,'records':[],'evidence':evidence}),flush=True)
  b={'instrument_id':'SH600000','trade_date':'2020-01-02','open':10.,'high':11.,'low':9.,'close':10.,'adj_open':10.,'adj_high':11.,'adj_low':9.,'adj_close':10.,'volume':1000.,'amount':10000.}
- adjustment={'schema_version':3,'instrument_id':'SH600000','source_symbol':'SH600000','basis':{'kind':'explicit','source':'sina_hfq','source_url':'https://finance.sina.com.cn/realstock/company/sh600000/hfq.js','verified_through':r['end'],'points':[{'effective_date':'1900-01-01','factor':'2'}]}}
+ adjustment={'schema_version':3,'instrument_id':'SH600000','source_symbol':'SH600000','basis':{'kind':'explicit','source':'tdx_forward','source_url':'tdxaidata:get_market_data:none:ForwardFactor','verified_through':r['end'],'points':[{'effective_date':'1900-01-01','factor':'2'}]}}
  if r['operation']=='coefficients': adjustment['basis']['points'].append({'effective_date':'2020-01-03','factor':'4'})
- if r['operation']=='coefficients': print(json.dumps({'version':10,'event':'adjustment_shard','instrument':'SH600000','adjustment':adjustment,'evidence':evidence}),flush=True)
- if r['operation']=='market': print(json.dumps({'version':10,'event':'shard','instrument':'SH600000','bars':[b],'adjustment':adjustment,'evidence':evidence}),flush=True)
+ if r['operation']=='coefficients': print(json.dumps({'version':12,'event':'adjustment_shard','instrument':'SH600000','adjustment':adjustment,'evidence':evidence}),flush=True)
+ if r['operation']=='market': print(json.dumps({'version':12,'event':'shard','instrument':'SH600000','bars':[b],'adjustment':adjustment,'evidence':evidence}),flush=True)
 if mode=='partial': sys.exit(1)
-print(json.dumps({'version':10,'event':'complete','collector_signature':r['expected_collector_signature'],'calendar':['2020-01-02','2020-01-03'],'universes':{},'versions':versions}),flush=True)
-if mode=='after_complete': print(json.dumps({'version':10,'event':'progress','message':'late'}),flush=True)
+print(json.dumps({'version':12,'event':'complete','collector_signature':r['expected_collector_signature'],'calendar':['2020-01-02','2020-01-03'],'universes':{},'versions':versions}),flush=True)
+if mode=='after_complete': print(json.dumps({'version':12,'event':'progress','message':'late'}),flush=True)
 "#).unwrap();
         let mut c = Command::new(runtime().unwrap());
         c.args(["-I", "-B", "-u"]).arg(script).arg(mode);
@@ -1885,7 +1726,7 @@ if mode=='after_complete': print(json.dumps({'version':10,'event':'progress','me
         r.benchmarks.clear();
         r.adjustment_source = AdjustmentSource::None;
         assert!(r.validate().is_err());
-        r.provider = Provider::Yfinance;
+        r.provider = Provider::Cninfo;
         assert!(r.validate().is_ok());
     }
     #[test]
@@ -2090,8 +1931,7 @@ impl CoefficientBundle {
         if b.schema_version != 1
             || !matches!(
                 (b.request.provider, b.request.adjustment_source),
-                (Provider::Akshare, AdjustmentSource::SinaHfq)
-                    | (Provider::Tdxaidata, AdjustmentSource::TdxForward)
+                (Provider::Tdxaidata, AdjustmentSource::TdxForward)
             )
             || b.records.keys().cloned().collect::<BTreeSet<_>>() != b.request.instruments
             || b.evidence.is_empty()
@@ -2139,7 +1979,7 @@ impl CoefficientBundle {
                     (&r.basis, b.request.benchmarks.contains(id)),
                     (
                         AdjustmentBasis::Explicit {
-                            source: FactorSource::SinaHfq | FactorSource::TdxForward,
+                            source: FactorSource::TdxForward,
                             ..
                         },
                         false
@@ -2197,11 +2037,11 @@ mod historical_producer_tests {
     #[test]
     fn historical_reader_does_not_relax_live_handshake_or_unknown_producers() {
         let mut receipt = json!({"collector_signature":"sha256:4311df0d8844c6cbfc9a9318e970ad806af634ec2cba47a4d8a0db9788c503ba","versions":{"python":"3.12.15","akshare":"1.19.1","yfinance":"1.7.0"}});
-        assert!(verify_coefficient_producer(&receipt, Provider::Akshare).is_ok());
+        assert!(verify_coefficient_producer(&receipt, Provider::Hithink).is_err());
         assert!(verify_collector_identity(&receipt).is_err());
         assert!(verify_coefficient_producer(&receipt, Provider::Tdxaidata).is_err());
         receipt["collector_signature"] = json!("unknown");
-        assert!(verify_coefficient_producer(&receipt, Provider::Akshare).is_err());
+        assert!(verify_coefficient_producer(&receipt, Provider::Hithink).is_err());
     }
 }
 

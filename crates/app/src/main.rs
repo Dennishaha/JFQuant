@@ -25,11 +25,11 @@ mod build_tests;
 mod interaction_tests;
 #[cfg(test)]
 #[allow(dead_code)]
-#[path = "../../ml/native_paths.rs"]
+#[path = "../native_paths.rs"]
 mod native_paths;
 
 use analytics_factor::FactorRegistry;
-use analytics_ml::pipeline::Cancellation;
+use analytics_workflow::research::pipeline::Cancellation;
 use eframe::egui;
 use state::{AppState, Panel, apply_event};
 use std::sync::mpsc::Receiver;

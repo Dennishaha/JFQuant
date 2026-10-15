@@ -55,7 +55,7 @@ fn native_build_script_uses_out_dir_and_rejects_bad_overrides() {
         );
         assert!(!text.contains("duckdb-download"), "{text}");
         assert!(text.contains("@executable_path/deps"));
-        assert!(text.contains(&lightgbm.canonicalize().unwrap().display().to_string()));
+        assert!(!text.contains(&lightgbm.display().to_string()));
     }
     let output = run("target/debug", dir.path().to_str().unwrap());
     assert!(!output.status.success());

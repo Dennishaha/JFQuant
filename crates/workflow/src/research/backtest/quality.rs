@@ -284,28 +284,3 @@ pub(super) fn qualify_with_registry(
         daily_counts,
     })
 }
-
-/// A disappeared quote is valid only for an evidenced transfer or dated non-trading claim.
-pub(super) fn evidenced_nonquote(
-    book: Option<&analytics_storage::corporate_actions::ActionBundle>,
-    id: &str,
-    date: Date,
-) -> bool {
-    book.is_some_and(|b| {
-        b.actions.iter().any(|a| {
-            a.instrument == id
-                && a.ex_date <= date
-                && match &a.terms {
-                    analytics_core::actions::EventTerms::Conversion {
-                        successor: Some(next),
-                        ordinary_holder: true,
-                        ..
-                    } => next != id,
-                    analytics_core::actions::EventTerms::Delisting { valuations, .. } => valuations
-                        .iter()
-                        .any(|v| v.date <= date && date <= v.valid_until),
-                    _ => false,
-                }
-        })
-    })
-}

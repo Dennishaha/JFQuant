@@ -13,7 +13,6 @@ path = "src/main.rs"
 analytics-storage = { path = "../storage" }
 analytics-core = { path = "../core" }
 analytics-workflow = { path = "../workflow" }
-analytics-ml = { path = "../ml", features = ["lightgbm-native", "duckdb-native"] }
 analytics-factor = { path = "../factor" }
 clap = { version = "4", features = ["derive", "env"] }
 serde.workspace = true

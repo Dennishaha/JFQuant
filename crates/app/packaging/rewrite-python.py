@@ -1,6 +1,7 @@
 """Relocate installed wheel library identities/references before auditing and signing."""
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -61,3 +62,17 @@ for path, dependencies in objects:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
             )
+
+# Wheels can carry build-machine search paths. Remove paths outside the package;
+# referenced libraries must still resolve after relocation and pass verify-python.
+for path, _ in objects:
+    load = subprocess.check_output(["/usr/bin/otool", "-arch", "arm64", "-l", str(path)], text=True)
+    for rpath in set(re.findall(r"cmd LC_RPATH\s+cmdsize \d+\s+path (.*?) \(offset", load)):
+        candidate = None
+        if rpath.startswith("@loader_path/"):
+            candidate = (path.parent / rpath.removeprefix("@loader_path/")).resolve()
+        elif rpath.startswith("@executable_path/"):
+            candidate = (root / "bin" / rpath.removeprefix("@executable_path/")).resolve()
+        if candidate is None or not candidate.is_relative_to(root):
+            subprocess.run(["/usr/bin/install_name_tool", "-delete_rpath", rpath, str(path)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    subprocess.run(["/usr/bin/codesign", "--force", "--sign", "-", str(path)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)

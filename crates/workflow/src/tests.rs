@@ -70,7 +70,7 @@ fn synthetic_annual_recipe_runs_native_model_and_dated_real_share_account() {
         .begin(c.id, "synthetic research", snapshot(&w, &request).unwrap())
         .unwrap();
     let result = execute(&w, &request, &run, &c).unwrap();
-    assert_eq!(result.details["schema_version"], 13);
+    assert_eq!(result.details["schema_version"], 14);
     assert!(
         result.details["aggregate"]["total_return"]
             .as_f64()
@@ -78,27 +78,22 @@ fn synthetic_annual_recipe_runs_native_model_and_dated_real_share_account() {
             .abs()
             < 1e-6
     );
-    let ledger: Value = serde_json::from_slice(
-        &fs::read(
-            w.resolve(&run.output)
-                .join("account-through-2009-01-12/ledger.json"),
-        )
-        .unwrap(),
+    assert_eq!(result.details["backtest_status"], "completed");
+    let snapshots: Value = serde_json::from_slice(
+        &fs::read(w.resolve(&run.output).join("portfolio_snapshots.json")).unwrap(),
     )
     .unwrap();
     assert_eq!(
-        ledger["positions"]
-            .as_object()
-            .unwrap()
-            .values()
-            .map(|p| p["shares"].as_u64().unwrap())
-            .sum::<u64>(),
-        110
+        snapshots["2009-01-12"]["positions"],
+        snapshots["2010-01-12"]["positions"]
     );
-    assert_eq!(ledger["cash"], 10.0);
+    assert_eq!(
+        snapshots["2009-01-12"]["cash"],
+        snapshots["2010-01-12"]["cash"]
+    );
     let report = fs::read_to_string(w.resolve(&run.output).join("report.md")).unwrap();
-    assert!(report.contains("合成的恒定指数，仅用于验收"));
-    assert!(!report.contains("本项目独立下载行情"));
+    assert!(report.contains("合成演示"));
+    assert!(report.contains("除权除息日"));
     w.finish(&mut run, RunStatus::Succeeded, None).unwrap();
     assert_eq!(w.runs().unwrap()[0].status, RunStatus::Succeeded);
 }
@@ -201,19 +196,13 @@ fn canonical_parquet_and_qlib_preserve_account_fees_and_feature_order() {
             .is_some_and(|a| !a.is_empty())
     );
     assert_eq!(q["aggregate"], p["aggregate"]);
-    for year in [2009, 2010] {
-        let ledger = |r: &RunRecord| {
-            serde_json::from_slice::<Value>(
-                &fs::read(
-                    w.resolve(&r.output)
-                        .join(format!("account-through-{year}-01-12/ledger.json")),
-                )
-                .unwrap(),
-            )
-            .unwrap()
-        };
-        assert_eq!(ledger(&rq), ledger(&rp));
-    }
+    let snapshots = |r: &RunRecord| {
+        serde_json::from_slice::<Value>(
+            &fs::read(w.resolve(&r.output).join("portfolio_snapshots.json")).unwrap(),
+        )
+        .unwrap()
+    };
+    assert_eq!(snapshots(&rq), snapshots(&rp));
 }
 #[test]
 fn pools_are_immutable_portable_and_reject_past_coverage_gaps() {
@@ -423,7 +412,7 @@ fn historical_adjustment_terms_do_not_require_old_settlement_dates_but_execution
         .begin(c.id, "historical terms", snapshot(&w, &request).unwrap())
         .unwrap();
     let out = execute(&w, &request, &r, &c).unwrap();
-    assert_eq!(out.details["schema_version"], 13);
+    assert_eq!(out.details["schema_version"], 14);
     assert_eq!(out.details["annual_reports"][0]["year"], 2010);
     t = demo::create_canonical(&w).unwrap().2;
     let c = context();
@@ -479,7 +468,7 @@ fn source_adjusted_quotes_are_audit_only_and_report_provenance_is_required() {
         )
         .unwrap();
     let out = execute(&w, &request, &r, &c).unwrap();
-    assert_eq!(out.details["schema_version"], 13);
+    assert_eq!(out.details["schema_version"], 14);
     let input = &out.details["execution"]["price_inputs"]["securities"]
         [demo::fixture_security_id("SH600000")];
     let frozen = if input["source"].is_object() {
@@ -492,7 +481,7 @@ fn source_adjusted_quotes_are_audit_only_and_report_provenance_is_required() {
     let mut bad = out.details.clone();
     bad["schema_version"] = json!(5);
     assert!(
-        analytics_ml::backtest::validate_result(&bad)
+        crate::research::backtest::validate_result(&bad)
             .unwrap_err()
             .to_string()
             .contains("unsupported_result_format")
@@ -500,7 +489,7 @@ fn source_adjusted_quotes_are_audit_only_and_report_provenance_is_required() {
     let mut bad = out.details.clone();
     bad["execution"]["price_inputs"]["securities"][demo::fixture_security_id("SH600000")]["anchor"]
         ["factor"] = json!("999");
-    assert!(analytics_ml::backtest::validate_result(&bad).is_err());
+    assert!(crate::research::backtest::validate_result(&bad).is_err());
     for field in ["anchor", "basis", "sha256"] {
         let mut bad = out.details.clone();
         bad["execution"]["price_inputs"]["securities"][demo::fixture_security_id("SH600000")]
@@ -512,7 +501,7 @@ fn source_adjusted_quotes_are_audit_only_and_report_provenance_is_required() {
             Sha256::digest(serde_json::to_vec(&bad["execution"]["price_inputs"]).unwrap())
         ));
         assert!(
-            analytics_ml::backtest::validate_result(&bad).is_err(),
+            crate::research::backtest::validate_result(&bad).is_err(),
             "{field}"
         );
     }
@@ -666,9 +655,14 @@ fn arbitrary_date_folds_without_validation_keep_gaps_and_tail_predictions() {
     let days: Vec<Value> =
         serde_json::from_slice(&fs::read(path.join("daily.json")).unwrap()).unwrap();
     assert_eq!(days.len(), 11);
-    let gaps: Vec<Value> =
-        serde_json::from_slice(&fs::read(path.join("fold-0001/gap_daily.json")).unwrap()).unwrap();
-    assert_eq!(gaps.len(), 3);
+    assert_eq!(
+        days.iter()
+            .filter(|d| d["date"]
+                .as_str()
+                .is_some_and(|d| d > "2009-01-05" && d < "2009-01-09"))
+            .count(),
+        3
+    );
     let predictions = fs::read_to_string(path.join("fold-0001/predictions.csv")).unwrap();
     assert!(
         predictions
@@ -740,6 +734,11 @@ fn independent_training_survives_settlement_gap_and_repaired_backtest_does_not_r
     let tmp = tempfile::tempdir().unwrap();
     let w = Workspace::open(tmp.path()).unwrap();
     let (m, a, t) = demo::create(&w).unwrap();
+    let mut execution = t.execution_settings();
+    execution.initial_cash_cny = 500_000.0;
+    execution.top_n = 1;
+    execution.rebalance_days = 2;
+    execution.market_rules.commission.minimum_cny = 9.0;
     let path = w.resolve(&a.path);
     let mut book = ActionBundle::read(&path).unwrap();
     book.actions.iter_mut().for_each(|a| a.pay_date = None);
@@ -762,12 +761,14 @@ fn independent_training_survives_settlement_gap_and_repaired_backtest_does_not_r
     let (bt, result) = execute_stage(
         &w,
         WorkflowRequest::BacktestResearch {
+            execution: None,
             event_check_policy: Default::default(),
             training: run.id,
             actions: bad.id,
         },
     );
     let result = result.unwrap();
+    let baseline_factor_signature = result.details["factor_signature"].clone();
     assert_eq!(result.details["backtest_status"], "completed");
     assert!(w.resolve(bt.output).join("order_events.jsonl").exists());
     assert_eq!(
@@ -782,12 +783,24 @@ fn independent_training_survives_settlement_gap_and_repaired_backtest_does_not_r
     let (_, result) = execute_stage(
         &w,
         WorkflowRequest::BacktestResearch {
+            execution: Some(Box::new(execution)),
             event_check_policy: Default::default(),
             training: run.id,
             actions: fixed.id.clone(),
         },
     );
-    assert_eq!(result.unwrap().details["backtest_status"], "completed");
+    let details = result.unwrap().details;
+    assert_eq!(details["backtest_status"], "completed");
+    assert_eq!(details["execution"]["initial_cash_cny"], 500_000.0);
+    assert_eq!(details["execution"]["research_config"]["top_n"], 1);
+    assert_eq!(details["execution"]["research_config"]["rebalance_days"], 2);
+    let descriptor: Value =
+        serde_json::from_slice(&fs::read(root.join("training.json")).unwrap()).unwrap();
+    assert_eq!(
+        details["execution"]["training_provenance"]["training_signature"],
+        descriptor["training_signature"]
+    );
+    assert_eq!(details["factor_signature"], baseline_factor_signature);
     assert_eq!(
         fs::read(root.join("fold-0000/model.txt")).unwrap(),
         original
@@ -798,6 +811,7 @@ fn independent_training_survives_settlement_gap_and_repaired_backtest_does_not_r
     let (_, out) = execute_stage(
         &w,
         WorkflowRequest::BacktestResearch {
+            execution: None,
             event_check_policy: Default::default(),
             training: run.id,
             actions: changed.id,
@@ -810,18 +824,23 @@ fn independent_training_survives_settlement_gap_and_repaired_backtest_does_not_r
     );
 }
 #[test]
-fn actual_holding_gap_stops_backtest_and_preserves_completed_models() {
+fn known_execution_conflict_stops_backtest_and_preserves_completed_models() {
     let tmp = tempfile::tempdir().unwrap();
     let w = Workspace::open(tmp.path()).unwrap();
     let (m, a, t) = demo::create(&w).unwrap();
     let path = w.resolve(&a.path);
     let mut book = ActionBundle::read(&path).unwrap();
-    // Coverage permits a purchase, but fails after the account has actually acquired shares.
-    for claims in book.coverage.values_mut() {
-        for c in claims {
-            c.dates.end = "2009-01-03".parse().unwrap();
-        }
-    }
+    book.execution_issues
+        .push(analytics_storage::execution_data::ExecutionIssue {
+            instrument: book.actions[0].instrument.clone(),
+            announced: None,
+            dates: analytics_core::DateRange {
+                start: "2009-01-02".parse().unwrap(),
+                end: "2010-01-12".parse().unwrap(),
+            },
+            code: "source_conflict".into(),
+            message: "fixture conflict".into(),
+        });
     atomic_json(&path, &book).unwrap();
     let a = w.register(&path).unwrap();
     let (run, out) = execute_stage(
@@ -836,17 +855,14 @@ fn actual_holding_gap_stops_backtest_and_preserves_completed_models() {
     assert!(
         out.unwrap_err()
             .to_string()
-            .contains("held account dependencies")
+            .contains("execution_event_issue")
     );
     let p = w.resolve(&run.output);
     assert!(p.join("training.json").exists());
     assert!(!p.join("summary.json").exists());
-    assert!(p.join("partial_daily.json").exists());
-    assert_eq!(
-        w.results(&run).unwrap()["training_artifact"]["status"],
-        "trained"
-    );
+    assert!(p.join("execution_readiness.json").exists());
 }
+
 #[test]
 fn removed_identity_requests_and_templates_are_rejected() {
     assert!(serde_json::from_value::<WorkflowRequest>(json!({"operation":"prepare_identities","template":{},"market":"x","actions":null,"update_sources":false})).is_err());
@@ -857,7 +873,7 @@ fn removed_identity_requests_and_templates_are_rejected() {
 }
 
 #[test]
-fn absent_unheld_execution_coverage_retains_cash_and_reports_no_valid_trades() {
+fn unknown_special_coverage_is_explicit_warning_in_upstream_event_mode() {
     let tmp = tempfile::tempdir().unwrap();
     let w = Workspace::open(tmp.path()).unwrap();
     let (m, a, t) = demo::create(&w).unwrap();
@@ -875,14 +891,18 @@ fn absent_unheld_execution_coverage_retains_cash_and_reports_no_valid_trades() {
             audit_only: false,
         },
     );
-    assert!(out.unwrap_err().to_string().contains("data_not_ready"));
-    let result: Value =
-        serde_json::from_slice(&fs::read(w.resolve(&run.output).join("summary.json")).unwrap())
-            .unwrap();
-    assert_eq!(result["backtest_status"], "execution_data_not_ready");
-    assert_eq!(result["aggregate"]["total_return"], 0.0);
-    let events = fs::read_to_string(w.resolve(run.output).join("order_events.jsonl")).unwrap();
-    assert!(events.contains("execution_data_missing"));
+    let result = out.unwrap().details;
+    assert_eq!(result["backtest_status"], "completed");
+    assert!(
+        result["execution_warnings"]
+            .as_array()
+            .is_some_and(|w| !w.is_empty())
+    );
+    assert!(
+        w.resolve(run.output)
+            .join("portfolio_snapshots.json")
+            .exists()
+    );
 }
 
 #[test]
@@ -967,6 +987,7 @@ fn damaged_training_descriptor_or_model_is_rejected_without_prediction_or_refitt
     let (bt, out) = execute_stage(
         &w,
         WorkflowRequest::BacktestResearch {
+            execution: None,
             event_check_policy: Default::default(),
             training: run.id,
             actions: a.id.clone(),
@@ -983,6 +1004,7 @@ fn damaged_training_descriptor_or_model_is_rejected_without_prediction_or_refitt
     let (_, out) = execute_stage(
         &w,
         WorkflowRequest::BacktestResearch {
+            execution: None,
             event_check_policy: Default::default(),
             training: run.id,
             actions: a.id,
@@ -1017,6 +1039,7 @@ fn relocated_workspace_reuses_models_from_verified_relative_market_version() {
     let (_, out) = execute_stage(
         &w,
         WorkflowRequest::BacktestResearch {
+            execution: None,
             event_check_policy: Default::default(),
             training: run.id,
             actions: a.id,

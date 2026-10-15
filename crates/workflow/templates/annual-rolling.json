@@ -111,7 +111,7 @@
   },
   "initial_cash_cny": 1000000.0,
   "dividend_withholding_rate": 0.0,
-  "schema_version": 9,
+  "schema_version": 10,
   "id": "annual-rolling",
   "name": "年度滚动研究流程",
   "factors": "factors/gtja191.json",

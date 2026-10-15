@@ -7,8 +7,8 @@
 
 use analytics_core::{ExportFormat, ExportRequest, QueryPage};
 use analytics_factor::FactorRegistry;
-use analytics_ml::pipeline::{Cancellation, cancellation};
 use analytics_storage::validate_required_market_columns;
+use analytics_workflow::research::pipeline::{Cancellation, cancellation};
 use egui::{Color32, RichText, ScrollArea};
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -592,7 +592,7 @@ fn factor_panel(
 
 fn run_pipeline_request(
     state: &AppState,
-) -> Result<analytics_ml::pipeline::PipelineRequest, String> {
+) -> Result<analytics_workflow::research::pipeline::PipelineRequest, String> {
     let factor = &state.factor;
     let date_range = factor.date_range()?;
     if factor.market_path.trim().is_empty() || factor.universe_path.trim().is_empty() {
@@ -605,7 +605,7 @@ fn run_pipeline_request(
     if factor_ids.is_empty() {
         return Err("请至少选择一个因子".into());
     }
-    Ok(analytics_ml::pipeline::PipelineRequest {
+    Ok(analytics_workflow::research::pipeline::PipelineRequest {
         factor_set: factor.factor_set,
         market_path: PathBuf::from(factor.market_path.trim()),
         universe_path: PathBuf::from(factor.universe_path.trim()),
@@ -613,7 +613,7 @@ fn run_pipeline_request(
         date_range,
         factor_ids,
         output_dir: PathBuf::from(factor.output_dir.trim()),
-        training: analytics_ml::TrainingConfig::default(),
+        training: analytics_workflow::research::TrainingConfig::default(),
     })
 }
 

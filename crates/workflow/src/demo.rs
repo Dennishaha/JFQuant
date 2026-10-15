@@ -146,7 +146,7 @@ pub fn create(w: &Workspace) -> Result<(DataVersion, DataVersion, ResearchTempla
         .parameters
         .insert("min_data_in_leaf".into(), "1".into());
     t.config.training.early_stopping_rounds = None;
-    t.initial_cash_cny = 1000.0;
+    t.initial_cash_cny = 1050.0;
     t.market_rules.commission.rate = 0.0;
     t.market_rules.commission.minimum_cny = 0.0;
     for f in &mut t.market_rules.exchanges {

@@ -20,3 +20,4 @@ done
 
 "$app/Contents/Resources/python/bin/python3" -I -B "$(dirname "$0")/verify-python.py" "$app/Contents/Resources/python"
 env -i HOME=/tmp PATH=/usr/bin:/bin "$app/Contents/Resources/python/bin/python3" -I -B -c 'import akshare,yfinance,jfquant_collectors; assert akshare.__version__=="1.19.1"; assert yfinance.__version__=="1.7.0"'
+env -i HOME=/tmp PATH=/usr/bin:/bin "$app/Contents/Resources/python/bin/python3" -I -B -c 'import akquant,lightgbm,jfquant_research; assert akquant.__version__=="0.3.66"; assert lightgbm.__version__=="4.7.0"'

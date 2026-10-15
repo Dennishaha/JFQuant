@@ -268,7 +268,7 @@ fn cli_native_research_templates_results_and_incomplete_actions_share_strict_che
     s.client.wait(id, Some(10)).unwrap();
     let demo = s.client.call(Rpc::Results { id }).unwrap();
     let mut t = demo["details"]["demo_template"].clone();
-    t["initial_cash_cny"] = json!(1005.0);
+    t["initial_cash_cny"] = json!(1050.0);
     t["market_rules"]["commission"]["minimum_cny"] = json!(5.0);
     serde_json::from_value::<analytics_workflow::ResearchTemplate>(t)
         .unwrap()
@@ -305,34 +305,26 @@ fn cli_native_research_templates_results_and_incomplete_actions_share_strict_che
         (result["results"]["aggregate"]["total_return"]
             .as_f64()
             .unwrap()
-            + 5.0 / 1005.0)
+            + 5.0 / 1050.0)
             .abs()
             < 1e-6
     );
     let run: analytics_workflow::RunRecord =
         serde_json::from_value(result["record"].clone()).unwrap();
-    for year in [2009, 2010] {
-        let ledger: Value = serde_json::from_slice(
-            &std::fs::read(
-                s.client
-                    .root
-                    .join(&run.output)
-                    .join(format!("account-through-{year}-01-12/ledger.json")),
-            )
-            .unwrap(),
+    let snapshots: Value = serde_json::from_slice(
+        &std::fs::read(
+            s.client
+                .root
+                .join(&run.output)
+                .join("portfolio_snapshots.json"),
         )
-        .unwrap();
-        assert_eq!(
-            ledger["positions"]
-                .as_object()
-                .unwrap()
-                .values()
-                .map(|p| p["shares"].as_u64().unwrap())
-                .sum::<u64>(),
-            110
-        );
-        assert_eq!(ledger["cash"], 10.0);
-    }
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        snapshots["2009-01-12"]["positions"],
+        snapshots["2010-01-12"]["positions"]
+    );
     let original = result["results"].clone();
     s.json(&["service", "stop"]);
     std::thread::sleep(Duration::from_millis(100));
@@ -365,11 +357,9 @@ fn cli_native_research_templates_results_and_incomplete_actions_share_strict_che
     ]);
     let id = run["task_id"].as_str().unwrap();
     assert_eq!(s.cli(&["jobs", "wait", id]).status.code(), Some(0));
-    assert!(
-        s.json(&["jobs", "results", id])["aggregate"]["blocked_orders"]
-            .as_u64()
-            .unwrap()
-            > 0
+    assert_eq!(
+        s.json(&["jobs", "results", id])["execution"]["corporate_action_policy"],
+        "ex_date"
     );
 }
 #[test]
@@ -600,7 +590,7 @@ fn current_research_cli_and_api_share_results_and_reject_old_imports_without_mod
     let s = Sandbox::new();
     let w = Workspace::open(&s.client.root).unwrap();
     let (m, a, mut template) = analytics_workflow::testing::synthetic(&w);
-    template.initial_cash_cny = 1005.0;
+    template.initial_cash_cny = 1050.0;
     template.market_rules.commission.minimum_cny = 5.0;
     template.write(&w.resolve("研究 recipe.json")).unwrap();
     let id = s.submit(TaskRequest::Workflow {
@@ -625,7 +615,7 @@ fn current_research_cli_and_api_share_results_and_reject_old_imports_without_mod
     let cli_id = value["task_id"].as_str().unwrap().parse().unwrap();
     let actual = s.client.wait(cli_id, Some(15)).unwrap();
     assert_eq!(actual["results"], expected);
-    assert_eq!(expected["schema_version"], 13);
+    assert_eq!(expected["schema_version"], 14);
     assert!(
         expected["aggregate"]
             .get("terminal_valuation_fees_cny")
@@ -635,18 +625,14 @@ fn current_research_cli_and_api_share_results_and_reject_old_imports_without_mod
         actual["record"]["request"]["request"]["template"]["config"]["factor_ids"],
         json!(["alpha_002"])
     );
-    for year in [2009, 2010] {
-        assert_eq!(
-            std::fs::read(w.resolve(format!(
-                ".jfquant/runs/{id}/account-through-{year}-01-12/ledger.json"
-            )))
-            .unwrap(),
-            std::fs::read(w.resolve(format!(
-                ".jfquant/runs/{cli_id}/account-through-{year}-01-12/ledger.json"
-            )))
-            .unwrap()
-        );
-    }
+    let snapshot = |id: &str| {
+        serde_json::from_slice::<Value>(
+            &std::fs::read(w.resolve(format!(".jfquant/runs/{id}/portfolio_snapshots.json")))
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    assert_eq!(snapshot(&id.to_string()), snapshot(&cli_id.to_string()));
     let imported = s.json(&["jobs", "import", &format!(".jfquant/runs/{id}")]);
     let import_id = imported["id"].as_str().unwrap();
     assert_eq!(s.json(&["jobs", "results", import_id]), expected);
@@ -692,7 +678,7 @@ fn current_research_cli_and_api_share_results_and_reject_old_imports_without_mod
     for field in ["action_policy", "schedule", "resolved_folds"] {
         let mut corrupt = expected.clone();
         corrupt["execution"].as_object_mut().unwrap().remove(field);
-        assert!(analytics_ml::backtest::validate_result(&corrupt).is_err());
+        assert!(analytics_workflow::research::backtest::validate_result(&corrupt).is_err());
     }
     for corrupt in [
         {
@@ -711,7 +697,7 @@ fn current_research_cli_and_api_share_results_and_reject_old_imports_without_mod
             v
         },
     ] {
-        assert!(analytics_ml::backtest::validate_result(&corrupt).is_err());
+        assert!(analytics_workflow::research::backtest::validate_result(&corrupt).is_err());
     }
     assert_eq!(s.json(&["jobs", "results", &id.to_string()]), expected);
 }
@@ -833,7 +819,7 @@ fn standard_pipeline_json_preserves_feature_order_and_persistent_artifacts() {
         "--output",
         "universe.parquet",
     ]);
-    let request = analytics_ml::pipeline::PipelineRequest {
+    let request = analytics_workflow::research::pipeline::PipelineRequest {
         factor_set: Default::default(),
         market_path: "market.parquet".into(),
         universe_path: "universe.parquet".into(),
@@ -919,7 +905,7 @@ fn cli_pools_and_canonical_research_share_public_backend_and_schema() {
     let id = run["task_id"].as_str().unwrap();
     s.json(&["jobs", "wait", id, "--timeout", "30"]);
     let result = s.json(&["jobs", "results", id]);
-    assert_eq!(result["schema_version"], 13);
+    assert_eq!(result["schema_version"], 14);
     assert_eq!(
         result["execution"]["benchmark"],
         analytics_workflow::demo::fixture_security_id("SH000905")
@@ -1001,7 +987,7 @@ fn date_overrides_preview_and_no_validation_run_share_the_public_schedule() {
         "--timeout",
         "30",
     ]);
-    assert_eq!(done["results"]["schema_version"], 13);
+    assert_eq!(done["results"]["schema_version"], 14);
     assert_eq!(done["results"]["fold_reports"][0]["validation_rows"], 0);
     let invalid = s.cli(&[
         "research",
@@ -1039,7 +1025,17 @@ fn execution_data_only_rejections_are_exit_three_with_models_and_diagnostics_ret
     let (m, a, t) = analytics_workflow::demo::create(&w).unwrap();
     let path = w.resolve(a.path);
     let mut book = analytics_storage::corporate_actions::ActionBundle::read(&path).unwrap();
-    book.coverage.clear();
+    book.execution_issues
+        .push(analytics_storage::execution_data::ExecutionIssue {
+            instrument: book.actions[0].instrument.clone(),
+            announced: None,
+            dates: analytics_core::DateRange {
+                start: "2009-01-02".parse().unwrap(),
+                end: "2010-01-12".parse().unwrap(),
+            },
+            code: "source_conflict".into(),
+            message: "fixture conflict".into(),
+        });
     std::fs::write(&path, serde_json::to_vec(&book).unwrap()).unwrap();
     let a = w.register(&path).unwrap();
     t.write(&w.resolve("execution-recipe.json")).unwrap();
@@ -1060,10 +1056,12 @@ fn execution_data_only_rejections_are_exit_three_with_models_and_diagnostics_ret
     let run = records.iter().find(|r| r.id.to_string() == id).unwrap();
     let root = w.resolve(&run.output);
     assert!(root.join("training.json").is_file());
-    let summary: Value =
-        serde_json::from_slice(&std::fs::read(root.join("summary.json")).unwrap()).unwrap();
-    assert_eq!(summary["backtest_status"], "execution_data_not_ready");
-    assert!(root.join("order_events.jsonl").is_file());
+    assert!(!root.join("summary.json").exists());
+    let readiness: Value =
+        serde_json::from_slice(&std::fs::read(root.join("execution_readiness.json")).unwrap())
+            .unwrap();
+    assert_eq!(readiness["training_complete"], true);
+    assert_eq!(readiness["backtest_complete"], false);
 }
 
 #[test]
@@ -1093,7 +1091,7 @@ fn removed_identity_cli_is_rejected_and_research_stages_are_explicit() {
     let accepted = s.json(&["research", "backtest", "--training", id, "--actions", &a.id]);
     let id = accepted["task_id"].as_str().unwrap();
     assert!(s.cli(&["jobs", "wait", id]).status.success());
-    assert_eq!(s.json(&["jobs", "results", id])["schema_version"], 13);
+    assert_eq!(s.json(&["jobs", "results", id])["schema_version"], 14);
 }
 
 #[test]

@@ -1,6 +1,5 @@
 use super::data::Sample;
 use super::*;
-use analytics_core::market_rules::FeeBreakdown;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -10,16 +9,14 @@ pub(super) struct DayResult {
     pub benchmark_return: f64,
     pub turnover: f64,
     pub cost: f64,
-    pub corporate_action_cost_cny: f64,
-    pub fee_breakdown_cny: FeeBreakdown,
+    pub execution_fee_cny: f64,
     pub holdings: usize,
     pub blocked_orders: usize,
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Performance {
-    pub fee_totals_cny: FeeBreakdown,
-    pub corporate_action_cost_cny: f64,
+    pub execution_fee_cny: f64,
     pub observations: usize,
     pub start: Option<String>,
     pub end: Option<String>,
@@ -125,13 +122,8 @@ pub(super) fn performance(days: &[DayResult]) -> Performance {
         .map(|d| (d.net_return - mean).powi(2))
         .sum::<f64>()
         / n.saturating_sub(1).max(1) as f64;
-    let mut fee_totals_cny = FeeBreakdown::default();
-    for day in days {
-        fee_totals_cny.add(day.fee_breakdown_cny);
-    }
     Performance {
-        fee_totals_cny,
-        corporate_action_cost_cny: days.iter().map(|d| d.corporate_action_cost_cny).sum(),
+        execution_fee_cny: days.iter().map(|d| d.execution_fee_cny).sum(),
         observations: n,
         start: days.first().map(|d| d.date.clone()),
         end: days.last().map(|d| d.date.clone()),
@@ -158,8 +150,7 @@ mod tests {
             benchmark_return: 0.0,
             turnover: 0.0,
             cost: 0.0,
-            corporate_action_cost_cny: 0.0,
-            fee_breakdown_cny: FeeBreakdown::default(),
+            execution_fee_cny: 0.0,
             holdings: 0,
             blocked_orders: 0,
         }];

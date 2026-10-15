@@ -6,7 +6,7 @@
 
 | 文件 | 保存什么 | 不保存什么 |
 |---|---|---|
-| annual-rolling.json / csi300-annual.json，工作流9 | 日期、模型参数、样本策略、资金费用、组合参数、相对profile引用 | 因子列表、成员历史 |
+| annual-rolling.json / csi300-annual.json，工作流10 | 日期、模型参数、样本策略、资金费用、组合参数、相对profile引用 | 因子列表、成员历史 |
 | factors/*.json，FactorProfile1 | 单一组合、固定公式版本、有序特征、训练价格口径 | 股票池、日期、费用 |
 | targets/*.json，TargetProfile1 | 股票池版本或builtin名、基准、移除持仓策略 | 因子列表、训练参数 |
 
@@ -14,7 +14,7 @@ csi300-annual默认2012年起测，5年训练+1年验证；annual-rolling保留�
 
 ```mermaid
 flowchart TD
-  W[工作流9：日程和模型/账户参数] --> RESOLVE[解析相对profile引用]
+  W[工作流10：日程和模型/账户参数] --> RESOLVE[解析相对profile引用]
   F[因子1：GTJA191或Alpha158] --> RESOLVE
   U[标的1：池和基准] --> RESOLVE
   RESOLVE --> VALIDATE[共用参数与因子顺序校验]

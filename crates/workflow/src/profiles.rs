@@ -40,7 +40,7 @@ pub struct WorkflowDocument {
     pub quality_policy: analytics_core::research_quality::ResearchQualityPolicy,
     pub top_n: usize,
     pub rebalance_days: usize,
-    pub training: analytics_ml::TrainingConfig,
+    pub training: crate::research::TrainingConfig,
     pub market_rules: MarketRulesPreset,
     pub initial_cash_cny: f64,
     pub dividend_withholding_rate: f64,
@@ -120,11 +120,11 @@ impl TargetProfile {
 impl WorkflowDocument {
     /// Resolve shared profiles into the single common request used by App and CLI.
     pub fn resolve(self, f: FactorProfile, u: TargetProfile) -> Result<ResearchTemplate> {
-        if self.schema_version != 9 {
+        if self.schema_version != 10 {
             return Err("unsupported_workflow_template_format".into());
         }
         let mut t = ResearchTemplate {
-            schema_version: 9,
+            schema_version: 10,
             id: self.id,
             name: self.name,
             schedule: self.schedule,
@@ -191,7 +191,7 @@ impl WorkflowDocument {
         persist(&parent.join(&fp), &f)?;
         persist(&parent.join(&up), &u)?;
         let d = Self {
-            schema_version: 9,
+            schema_version: 10,
             id: t.id.clone(),
             name: t.name.clone(),
             factors: fp,

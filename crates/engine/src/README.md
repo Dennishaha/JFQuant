@@ -1,6 +1,6 @@
 # Engine 源码：DuckDB 边界与查询快照
 
-[上级：analytics-engine](../README.md) · [会话拥有者](../../workflow/src/README.md) · [流水线调用方](../../ml/src/README.md)
+[上级：analytics-engine](../README.md) · [会话拥有者](../../workflow/src/README.md) · [流水线调用方](../../workflow/src/research/README.md)
 
 [lib.rs](lib.rs) 定义 `QueryEngine`、`EngineError` 和 feature 条件下的 `DuckDbEngine`。本目录提供描述、keyset 取页、COPY 导出和历史股票池 as-of join；工作区服务负责会话 ID、空闲过期、记录和并发策略。
 
@@ -49,7 +49,7 @@ cargo nextest run -p analytics-desktop -E 'test(worker::tests::desktop_pages) | 
 
 为什么调整：普通市场代码无需先登记身份；独立目录、审核和权威名录下载增加了研究前置负担。特殊历史代码仍需在快照内明确区间，不能将旧证券行情或权益接到另一证券。训练使用价量和标签，到账／交付资料只在实际账户执行时检查。
 
-当前格式：模板9、需求3、准入5、股票池3、公司行动5、规范行情5、系数3、采集7、服务11、研究结果13；快照内来源映射1、训练产物2。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
+当前格式：模板10、需求3、准入5、股票池3、公司行动5、规范行情5、系数3、采集7、服务14、研究结果14；快照内来源映射1、训练产物3。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
 
 ```mermaid
 flowchart LR

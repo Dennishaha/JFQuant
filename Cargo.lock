@@ -187,7 +187,6 @@ version = "0.1.0"
 dependencies = [
  "analytics-core",
  "analytics-factor",
- "analytics-ml",
  "analytics-storage",
  "analytics-workflow",
  "clap",
@@ -219,7 +218,6 @@ dependencies = [
  "analytics-core",
  "analytics-engine",
  "analytics-factor",
- "analytics-ml",
  "analytics-storage",
  "analytics-workflow",
  "chrono",
@@ -259,26 +257,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "analytics-ml"
-version = "0.1.0"
-dependencies = [
- "analytics-core",
- "analytics-engine",
- "analytics-factor",
- "analytics-storage",
- "arrow-array 60.0.0",
- "arrow-schema 60.0.0",
- "chrono",
- "parquet",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.21",
- "uuid",
-]
-
-[[package]]
 name = "analytics-storage"
 version = "0.1.0"
 dependencies = [
@@ -307,14 +285,17 @@ dependencies = [
  "analytics-core",
  "analytics-engine",
  "analytics-factor",
- "analytics-ml",
  "analytics-storage",
+ "arrow-array 60.0.0",
+ "arrow-schema 60.0.0",
  "chrono",
+ "parquet",
  "rustix 1.1.5",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
+ "thiserror 2.0.21",
  "uuid",
 ]
 

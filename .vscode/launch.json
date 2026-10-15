@@ -2,21 +2,6 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Rust: native smoke",
-      "type": "lldb",
-      "request": "launch",
-      "program": "${workspaceFolder}/target/debug/examples/native_smoke",
-      "args": [
-        "${workspaceFolder}/.jfquant/runs/native-smoke"
-      ],
-      "cwd": "${workspaceFolder}",
-      "preLaunchTask": "Rust: native smoke build",
-      "env": {
-        "LIGHTGBM_LIB_DIR": "${env:LIGHTGBM_LIB_DIR}",
-        "DYLD_LIBRARY_PATH": "${env:LIGHTGBM_LIB_DIR}:${env:DYLD_LIBRARY_PATH}"
-      }
-    },
-    {
       "name": "Rust: desktop app",
       "type": "lldb",
       "request": "launch",

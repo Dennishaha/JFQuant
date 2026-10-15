@@ -35,8 +35,8 @@ run_cli research run --template "$recipe" --market "$market" --actions "$actions
 research_id="$(plutil -extract task_id raw -o - "$check_root/research-submission.json")"
 run_cli jobs wait "$research_id" --timeout 60 > "$check_root/research.json"
 run_cli jobs results "$research_id" > "$check_root/online-results.json"
-[ "$(plutil -extract schema_version raw -o - "$check_root/online-results.json")" = 13 ]
-[ "$(plutil -extract execution.mode raw -o - "$check_root/online-results.json")" = raw_integer_shares ]
+[ "$(plutil -extract schema_version raw -o - "$check_root/online-results.json")" = 14 ]
+[ "$(plutil -extract execution.mode raw -o - "$check_root/online-results.json")" = akquant_ex_date ]
 "$app/Contents/Resources/python/bin/python3" -I -B - "$check_root/online-results.json" <<'PY'
 import hashlib
 import json
@@ -115,10 +115,10 @@ training_id="$(plutil -extract task_id raw -o - "$check_root/train-submit.json")
 run_cli jobs wait "$training_id" --timeout 60 > "$check_root/train-wait.json"
 run_cli jobs results "$training_id" > "$check_root/train-results.json"
 [ "$(plutil -extract status raw -o - "$check_root/train-results.json")" = trained ]
-run_cli research backtest --training "$training_id" --actions "$actions" > "$check_root/backtest-submit.json"
+run_cli research backtest --training "$training_id" --actions "$actions" --template "$recipe" > "$check_root/backtest-submit.json"
 backtest_id="$(plutil -extract task_id raw -o - "$check_root/backtest-submit.json")"
 run_cli jobs wait "$backtest_id" --timeout 60 > "$check_root/backtest-wait.json"
-[ "$(plutil -extract results.schema_version raw -o - "$check_root/backtest-wait.json")" = 13 ]
+[ "$(plutil -extract results.schema_version raw -o - "$check_root/backtest-wait.json")" = 14 ]
 
 # A provider profile is explicit and supported only by a frozen original Qlib source.
 run_cli research demo > "$check_root/qlib-demo-submit.json"
@@ -142,8 +142,38 @@ PYPROFILE
   run_cli jobs results "$provider_id" > "$check_root/$family-model.json"
   [ "$(plutil -extract price_basis raw -o - "$check_root/$family-model.json")" = provider ]
   [ "$(plutil -extract factor_set raw -o - "$check_root/$family-model.json")" = "$family" ]
-  [ "$(plutil -extract schema_version raw -o - "$check_root/$family-model.json")" = 2 ]
+  [ "$(plutil -extract schema_version raw -o - "$check_root/$family-model.json")" = 3 ]
 done
+
+# Cancel a running bundled research process, then verify partial work is not published.
+"$app/Contents/Resources/python/bin/python3" -I -B - "$check_root/workspace/$recipe" "$check_root/cancel-case" <<'PYCANCEL'
+import json, pathlib, shutil, sys
+source=pathlib.Path(sys.argv[1]); root=pathlib.Path(sys.argv[2]); root.mkdir(exist_ok=True)
+template=json.loads(source.read_text())
+for key in ("factors", "target"):
+    original=source.parent/template[key]
+    shutil.copyfile(original, root/original.name)
+    template[key]=original.name
+template["training"]["parameters"]["num_iterations"]="1000000"
+template["training"]["early_stopping_rounds"]=None
+(root/"workflow.json").write_text(json.dumps(template))
+PYCANCEL
+run_cli research train --template "$check_root/cancel-case/workflow.json" --market "$market" --actions "$actions" > "$check_root/cancel-submit.json"
+cancel_id="$(plutil -extract task_id raw -o - "$check_root/cancel-submit.json")"
+started=false
+for attempt in {1..150}; do
+  run_cli jobs logs "$cancel_id" > "$check_root/cancel-progress.json"
+  if /usr/bin/grep -q 'LightGBM iteration' "$check_root/cancel-progress.json"; then started=true; break; fi
+  sleep 0.1
+done
+[ "$started" = true ]
+run_cli jobs cancel "$cancel_id" > "$check_root/cancel.json"
+set +e
+run_cli jobs wait "$cancel_id" --timeout 10 > "$check_root/cancel-wait.json" 2> "$check_root/cancel-wait.stderr"
+cancel_status=$?
+set -e
+[ "$cancel_status" = 130 ]
+[ ! -f "$check_root/workspace/.jfquant/runs/$cancel_id/summary.json" ]
 
 # Deterministic HTTP/response fixtures execute against the installed Python modules, not repo imports.
 repo_root="$(cd "$(dirname "$0")/../../.." && pwd)"

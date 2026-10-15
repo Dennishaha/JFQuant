@@ -12,7 +12,6 @@ serde.workspace = true
 analytics-core = { path = "../core" }
 analytics-engine = { path = "../engine", features = ["duckdb-native"] }
 analytics-factor = { path = "../factor" }
-analytics-ml = { path = "../ml", features = ["lightgbm-native", "duckdb-native"] }
 analytics-storage = { path = "../storage" }
 chrono.workspace = true
 eframe.workspace = true

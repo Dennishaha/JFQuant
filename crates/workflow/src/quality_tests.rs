@@ -79,7 +79,7 @@ fn three_policies_distinguish_missing_input_null_propagation_and_security_exclus
     assert_eq!(selected["research_scope"], "经数据筛选的研究股票池");
     assert_ne!(selected["signature"], relaxed["signature"]);
     assert!(!absent.exists());
-    analytics_ml::backtest::validate_result(&selected).unwrap();
+    crate::research::backtest::validate_result(&selected).unwrap();
 }
 
 #[test]
@@ -194,7 +194,7 @@ fn minimum_samples_and_feature_thresholds_are_frozen_and_tampering_is_rejected()
     assert_ne!(low["factor_signature"], high["factor_signature"]);
     let mut tampered = high.clone();
     tampered["execution"]["quality_policy"]["strictness"] = json!("strict");
-    assert!(analytics_ml::backtest::validate_result(&tampered).is_err());
+    assert!(crate::research::backtest::validate_result(&tampered).is_err());
     let mut incomplete = high.clone();
     incomplete["sample_selection"]["selections"] = json!([]);
     incomplete["execution"]["sample_selection"] = incomplete["sample_selection"].clone();
@@ -202,10 +202,10 @@ fn minimum_samples_and_feature_thresholds_are_frozen_and_tampering_is_rejected()
         "sha256:{:x}",
         Sha256::digest(serde_json::to_vec(&incomplete["sample_selection"]).unwrap())
     ));
-    assert!(analytics_ml::backtest::validate_result(&incomplete).is_err());
+    assert!(crate::research::backtest::validate_result(&incomplete).is_err());
     let mut old = high;
     old["schema_version"] = json!(8);
-    assert!(analytics_ml::backtest::validate_result(&old).is_err());
+    assert!(crate::research::backtest::validate_result(&old).is_err());
     t.quality_policy.min_labeled_rows = 1000;
     let (run, result) = execute_quality(&w, &m, &a, &t, true);
     assert_eq!(result.unwrap().details["ready"], false);
@@ -337,7 +337,7 @@ fn missing_later_source_alias_does_not_erase_earlier_qualified_history() {
     assert_eq!(&before[..33], &after[..33]);
     assert_eq!(after[33]["retained"], 1);
     let (_, result) = execute_quality(&w, &m, &a, &t, false);
-    assert_eq!(result.unwrap().details["schema_version"], 13);
+    assert_eq!(result.unwrap().details["schema_version"], 14);
     let mut dataset = analytics_storage::daily::DailyDataset::open(&root).unwrap();
     dataset.bind_source_map(directory).unwrap();
     dataset
@@ -379,8 +379,8 @@ fn provider_training_without_events_keeps_warning_and_model_and_verified_input_s
     let artifact: Value =
         serde_json::from_slice(&fs::read(w.resolve(&run.output).join("training.json")).unwrap())
             .unwrap();
-    analytics_ml::backtest::validate_training_artifact(&artifact).unwrap();
-    assert_eq!(artifact["schema_version"], 2);
+    crate::research::backtest::validate_training_artifact(&artifact).unwrap();
+    assert_eq!(artifact["schema_version"], 3);
     assert_eq!(artifact["price_basis"], "provider");
     assert!(
         artifact["source_warnings"]
@@ -439,7 +439,7 @@ fn alpha158_template_family_order_and_native_training_are_independent_from_gtja(
     let artifact: Value =
         serde_json::from_slice(&fs::read(w.resolve(&run.output).join("training.json")).unwrap())
             .unwrap();
-    analytics_ml::backtest::validate_training_artifact(&artifact).unwrap();
+    crate::research::backtest::validate_training_artifact(&artifact).unwrap();
     assert_eq!(artifact["feature_order"], json!(t.config.factor_ids));
     assert_eq!(artifact["factor_set"], "alpha158");
     assert_eq!(
@@ -465,7 +465,7 @@ fn split_profiles_are_reusable_portable_and_reject_flat_or_conflicting_templates
     let mut t = ResearchTemplate::builtin_csi300().unwrap();
     t.write(&root.join("workflow.json")).unwrap();
     let d: Value = serde_json::from_slice(&fs::read(root.join("workflow.json")).unwrap()).unwrap();
-    assert_eq!(d["schema_version"], 9);
+    assert_eq!(d["schema_version"], 10);
     for k in [
         "config",
         "factor_ids",

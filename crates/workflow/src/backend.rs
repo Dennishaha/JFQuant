@@ -8,17 +8,17 @@
 // shared `Arc<AtomicBool>` flag for the active task and the pipeline checks
 // it between stages.
 
+use crate::research::TrainEvent;
+use crate::research::TrainingConfig;
+use crate::research::pipeline::{
+    Cancellation, PipelineArtifact, PipelineError, PipelineEvent, PipelineRequest,
+    run_factor_pipeline, train_from_factor_cache,
+};
 use analytics_core::{
     ColumnSchema, DatasetFile, ExportRequest, PageRequest, QueryPage, ScalarValue, SortKey,
 };
 use analytics_engine::{DuckDbEngine, QueryEngine};
 use analytics_factor::FactorEvent;
-use analytics_ml::TrainEvent;
-use analytics_ml::TrainingConfig;
-use analytics_ml::pipeline::{
-    Cancellation, PipelineArtifact, PipelineError, PipelineEvent, PipelineRequest,
-    run_factor_pipeline, train_from_factor_cache,
-};
 use analytics_storage::ParquetCatalog;
 use serde::{Deserialize, Serialize};
 /// UI-independent event notification.
@@ -592,6 +592,7 @@ impl Worker {
         })
     }
     fn dispatch(&mut self, command: WorkerCommand) {
+        let _research_session = crate::research::worker::TaskSession;
         match command {
             #[cfg(any(test, feature = "test-support"))]
             WorkerCommand::TestingPause { task, milliseconds } => {
@@ -1028,7 +1029,7 @@ impl Worker {
         if let Ok(bytes) = std::fs::read(&artifact.training.feature_importance_path)
             && let Ok(gains) = serde_json::from_slice::<Vec<f64>>(&bytes)
         {
-            let names = analytics_ml::load_manifest(&artifact.training.manifest_path)
+            let names = crate::research::load_manifest(&artifact.training.manifest_path)
                 .map(|manifest| {
                     manifest
                         .features
@@ -1099,7 +1100,7 @@ fn same_query(a: &PageRequest, b: &PageRequest) -> bool {
 
 pub fn pipeline_error_message(error: PipelineError) -> String {
     if matches!(&error, PipelineError::Cancelled)
-        || matches!(&error, PipelineError::Ml(analytics_ml::MlError::Native(message)) if message == "training cancelled")
+        || matches!(&error, PipelineError::Ml(crate::research::MlError::Native(message)) if message == "training cancelled")
     {
         "任务已取消".into()
     } else {

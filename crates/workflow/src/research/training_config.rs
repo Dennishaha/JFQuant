@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TrainingConfig {
-    /// Native LightGBM `key=value` parameters.
+    /// Official Python LightGBM parameters; no executable expressions.
     pub parameters: BTreeMap<String, String>,
     /// Early-stopping patience on the validation split; `None` disables it.
     pub early_stopping_rounds: Option<u32>,

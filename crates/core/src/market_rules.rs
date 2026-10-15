@@ -11,10 +11,6 @@ fn invalid(message: &str) -> CoreError {
 fn nonnegative(value: f64) -> bool {
     value.is_finite() && value >= 0.0
 }
-fn money(value: f64) -> f64 {
-    (value * 100.0 + 1e-9).round() / 100.0
-}
-
 /// Supported domestic A-share cash-equity venues, excluding Connect and funds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -62,16 +58,6 @@ pub fn classify(instrument: &str) -> Result<(Exchange, Board)> {
             "unsupported asset: preset only covers domestic A-share cash equities",
         )),
     }
-}
-
-/// Side of a filled order; stamp duty applies only to sells.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OrderSide {
-    /// Purchase.
-    Buy,
-    /// Sale.
-    Sell,
 }
 
 /// Explicit broker-contract inclusions prevent double charging statutory fees.
@@ -161,41 +147,6 @@ pub struct MarketRulesPreset {
     /// Customizable broker contract.
     #[serde(default)]
     pub commission: BrokerCommission,
-}
-
-/// Additive, non-overlapping cost components in CNY (rounded per order to fen).
-#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct FeeBreakdown {
-    /// Broker-retained commission, excluding embedded public fees.
-    pub broker_commission: f64,
-    /// Exchange fee, reported even when embedded in commission.
-    pub exchange_handling: f64,
-    /// Regulatory fee, reported even when embedded in commission.
-    pub regulatory: f64,
-    /// Transfer fee, reported even when embedded in commission.
-    pub transfer: f64,
-    /// Sell-only stamp duty.
-    pub stamp_duty: f64,
-}
-impl FeeBreakdown {
-    /// Total cash charge; embedded fees must not be added again.
-    pub fn total(&self) -> f64 {
-        money(
-            self.broker_commission
-                + self.exchange_handling
-                + self.regulatory
-                + self.transfer
-                + self.stamp_duty,
-        )
-    }
-    /// Accumulate order components, keeping currency precision.
-    pub fn add(&mut self, other: Self) {
-        self.broker_commission = money(self.broker_commission + other.broker_commission);
-        self.exchange_handling = money(self.exchange_handling + other.exchange_handling);
-        self.regulatory = money(self.regulatory + other.regulatory);
-        self.transfer = money(self.transfer + other.transfer);
-        self.stamp_duty = money(self.stamp_duty + other.stamp_duty);
-    }
 }
 
 impl Default for MarketRulesPreset {
@@ -326,178 +277,11 @@ impl MarketRulesPreset {
             .find(|r| r.board == board)
             .ok_or_else(|| invalid("board rule missing"))
     }
-    /// Quote an actually filled order, independently of the backtest date.
-    /// Zero turnover is a no-fill and incurs no minimum commission.
-    pub fn fees(
-        &self,
-        instrument: &str,
-        side: OrderSide,
-        turnover_cny: f64,
-    ) -> Result<FeeBreakdown> {
-        let (exchange, _) = classify(instrument)?;
-        let schedule = self
-            .exchanges
-            .iter()
-            .find(|f| f.exchange == exchange)
-            .ok_or_else(|| invalid("exchange fee schedule missing"))?;
-        if !nonnegative(self.commission.rate)
-            || self.commission.rate > 0.003
-            || !nonnegative(self.commission.minimum_cny)
-            || [
-                schedule.handling_rate,
-                schedule.regulatory_rate,
-                schedule.transfer_rate,
-                schedule.sell_stamp_rate,
-            ]
-            .iter()
-            .any(|r| !nonnegative(*r) || *r > 0.01)
-        {
-            return Err(invalid("invalid commission or public fee rate"));
-        }
-        if !nonnegative(turnover_cny) || turnover_cny > 1e13 {
-            return Err(invalid("invalid order turnover"));
-        }
-        if turnover_cny == 0.0 {
-            return Ok(FeeBreakdown::default());
-        }
-        let exchange_handling = money(turnover_cny * schedule.handling_rate);
-        let regulatory = money(turnover_cny * schedule.regulatory_rate);
-        let transfer = money(turnover_cny * schedule.transfer_rate);
-        let included_rate = match self.commission.mode {
-            CommissionMode::Net => 0.0,
-            CommissionMode::Gross => schedule.handling_rate + schedule.regulatory_rate,
-            CommissionMode::AllInclusive => {
-                schedule.handling_rate + schedule.regulatory_rate + schedule.transfer_rate
-            }
-        };
-        if self.commission.rate + 1e-15 < included_rate {
-            return Err(invalid(
-                "gross commission rate is below its included public fees",
-            ));
-        }
-        let commission =
-            money((turnover_cny * self.commission.rate).max(self.commission.minimum_cny));
-        let included = match self.commission.mode {
-            CommissionMode::Net => 0.0,
-            CommissionMode::Gross => exchange_handling + regulatory,
-            CommissionMode::AllInclusive => exchange_handling + regulatory + transfer,
-        };
-        Ok(FeeBreakdown {
-            broker_commission: money((commission - included).max(0.0)),
-            exchange_handling,
-            regulatory,
-            transfer,
-            stamp_duty: if side == OrderSide::Sell {
-                money(turnover_cny * schedule.sell_stamp_rate)
-            } else {
-                0.0
-            },
-        })
-    }
-    /// Largest fractional notional affordable including nonlinear minimum charges.
-    /// Quantity/lot rounding belongs to the execution adapter using raw shares.
-    pub fn affordable_buy_notional(&self, instrument: &str, cash_cny: f64) -> Result<f64> {
-        if !nonnegative(cash_cny) || cash_cny > 1e13 {
-            return Err(invalid("invalid available cash"));
-        }
-        self.fees(instrument, OrderSide::Buy, cash_cny)?;
-        let (mut low, mut high) = (0.0, cash_cny);
-        for _ in 0..64 {
-            let middle = low + (high - low) / 2.0;
-            if middle + self.fees(instrument, OrderSide::Buy, middle)?.total() <= cash_cny {
-                low = middle;
-            } else {
-                high = middle;
-            }
-        }
-        Ok(low)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn default_fees_are_asymmetric_and_do_not_double_charge_embedded_fees() {
-        let rules = MarketRulesPreset::a_share_latest();
-        rules.validate().unwrap();
-        for symbol in [
-            "SH600000", "SZ000001", "SH688001", "SZ301001", "SZ302132", "BJ920001",
-        ] {
-            let buy = rules.fees(symbol, OrderSide::Buy, 100_000.0).unwrap();
-            let sell = rules.fees(symbol, OrderSide::Sell, 100_000.0).unwrap();
-            assert_eq!(buy.total(), 26.0);
-            assert_eq!(sell.total(), 76.0);
-            assert_eq!(buy.stamp_duty, 0.0);
-            assert_eq!(sell.stamp_duty, 50.0);
-        }
-        let sh = rules.fees("SH600000", OrderSide::Buy, 100_000.0).unwrap();
-        assert_eq!(sh.exchange_handling, 3.41);
-        assert_eq!(sh.regulatory, 2.0);
-        assert_eq!(sh.broker_commission, 19.59);
-        let bj = rules.fees("BJ920001", OrderSide::Buy, 100_000.0).unwrap();
-        assert_eq!(bj.exchange_handling, 12.5);
-        assert_eq!(bj.broker_commission, 10.5);
-    }
-    #[test]
-    fn net_and_all_inclusive_contracts_have_distinct_totals() {
-        let mut rules = MarketRulesPreset::a_share_latest();
-        rules.commission.mode = CommissionMode::Net;
-        assert_eq!(
-            rules
-                .fees("SH600000", OrderSide::Buy, 100_000.0)
-                .unwrap()
-                .total(),
-            31.41
-        );
-        rules.commission.mode = CommissionMode::AllInclusive;
-        assert_eq!(
-            rules
-                .fees("SH600000", OrderSide::Buy, 100_000.0)
-                .unwrap()
-                .total(),
-            25.0
-        );
-        rules.commission.rate = 0.00001;
-        assert!(rules.fees("SH600000", OrderSide::Buy, 100_000.0).is_err());
-    }
-    #[test]
-    fn minimum_commission_rounding_zero_fill_and_cash_budget_are_per_order() {
-        let rules = MarketRulesPreset::a_share_latest();
-        assert_eq!(
-            rules
-                .fees("SH600000", OrderSide::Buy, 1000.0)
-                .unwrap()
-                .total(),
-            5.01
-        );
-        assert_eq!(
-            rules
-                .fees("SH600000", OrderSide::Sell, 1000.0)
-                .unwrap()
-                .total(),
-            5.51
-        );
-        assert_eq!(
-            rules.fees("SH600000", OrderSide::Buy, 0.0).unwrap().total(),
-            0.0
-        );
-        let value = rules.affordable_buy_notional("SH600000", 100026.0).unwrap();
-        assert!((value - 100000.0).abs() < 1e-7);
-        assert!(
-            value
-                + rules
-                    .fees("SH600000", OrderSide::Buy, value)
-                    .unwrap()
-                    .total()
-                <= 100026.0
-        );
-        assert_eq!(
-            rules.affordable_buy_notional("SH600000", 4.99).unwrap(),
-            0.0
-        );
-        assert!(rules.fees("SH600000", OrderSide::Buy, f64::NAN).is_err());
-    }
     #[test]
     fn malformed_custom_settings_never_fall_back_to_defaults() {
         for json in [

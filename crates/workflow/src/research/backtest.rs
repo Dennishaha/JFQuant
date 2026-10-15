@@ -1,13 +1,16 @@
 //! Native annual rolling research using independently acquired daily data.
 //! All factor, LightGBM and portfolio work stays on the calling worker thread.
+mod adjustment;
+mod akquant;
 mod data;
 mod portfolio;
 /// Shared dated input qualification and audit artifacts.
 pub mod quality;
-mod raw_portfolio;
 mod report;
-use crate::{DenseMatrix, LightGbmPredictor, LightGbmTrainer, Predictor, Trainer, TrainingSplit};
-use analytics_core::market_rules::{MarketRulesPreset, OrderSide};
+use crate::research::{
+    DenseMatrix, LightGbmPredictor, LightGbmTrainer, Predictor, Trainer, TrainingSplit,
+};
+use analytics_core::market_rules::MarketRulesPreset;
 use analytics_core::research_quality::{ProblemDisposition, ProblemKind, ResearchQualityPolicy};
 use analytics_core::schedule::Schedule;
 use analytics_core::{Date, DateRange, Objective, TrainRequest};
@@ -43,7 +46,7 @@ const SUPPORTED_RESEARCH_INPUTS: [&str; 15] = [
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// Current strict integer-share research result format.
-pub const RESEARCH_SCHEMA_VERSION: u32 = 13;
+pub const RESEARCH_SCHEMA_VERSION: u32 = 14;
 
 /// A result cannot be interpreted using the current research contract.
 #[derive(Debug, thiserror::Error)]
@@ -132,13 +135,13 @@ pub fn validate_result(
 ) -> std::result::Result<(), UnsupportedResultFormat> {
     let validate = || -> Result<()> {
         if value["schema_version"] != RESEARCH_SCHEMA_VERSION
-            || value["execution"]["mode"] != "raw_integer_shares"
+            || value["execution"]["mode"] != "akquant_ex_date"
             || !matches!(
                 value["backtest_status"].as_str(),
                 Some("completed" | "no_valid_trades" | "execution_data_not_ready")
             )
         {
-            return Err("requires research schema 13 and raw_integer_shares execution".into());
+            return Err("requires research schema 14 and akquant_ex_date execution".into());
         }
         let hash = |value: &serde_json::Value| {
             value.as_str().is_some_and(|s| {
@@ -165,6 +168,15 @@ pub fn validate_result(
             return Err("missing or invalid research provenance".into());
         }
         let execution = &value["execution"];
+        if execution["engine"] != "akquant"
+            || execution["engine_version"] != "0.3.66"
+            || execution["corporate_action_policy"] != "ex_date"
+            || !hash(&execution["runtime_signature"])
+            || !hash(&execution["dependency_signature"])
+        {
+            return Err("missing AKQuant execution receipt".into());
+        }
+
         let _: analytics_core::execution::EventCheckPolicy =
             serde_json::from_value(execution["event_check_policy"].clone())?;
         let policy: ResearchQualityPolicy =
@@ -450,7 +462,7 @@ pub struct ResearchConfig {
     /// Ordered explicit factor IDs; empty selects available research factors.
     pub factor_ids: Vec<String>,
     /// Native training parameters and early stopping.
-    pub training: crate::TrainingConfig,
+    pub training: crate::research::TrainingConfig,
 }
 impl Default for ResearchConfig {
     fn default() -> Self {
@@ -458,7 +470,7 @@ impl Default for ResearchConfig {
             top_n: 50,
             rebalance_days: 5,
             factor_ids: Vec::new(),
-            training: crate::TrainingConfig {
+            training: crate::research::TrainingConfig {
                 parameters: BTreeMap::from([
                     ("num_iterations".into(), "200".into()),
                     ("learning_rate".into(), "0.05".into()),
@@ -544,7 +556,7 @@ pub struct ResearchRequest {
     pub schedule: Schedule,
     /// Explicit ordinary-holder corporate action policy.
     pub action_policy: analytics_core::actions::ActionPolicy,
-    /// Trust policy for actual account execution data. Training format 2 carries no required execution choice.
+    /// Trust policy for actual account execution data. Training format 3 carries no required execution choice.
     #[serde(default)]
     pub event_check_policy: analytics_core::execution::EventCheckPolicy,
     /// Inspect provenance and coverage without calculating factors.
@@ -566,6 +578,21 @@ pub struct ResearchRequest {
     /// Explicit benchmark security.
     pub benchmark: String,
     /// Removal behavior for existing positions.
+    pub pool_exit_policy: analytics_core::pool::PoolExitPolicy,
+}
+/// Account-only overrides for replaying immutable trained models.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResearchExecution {
+    /// Initial account cash in CNY.
+    pub initial_cash_cny: f64,
+    /// Supported broker and exchange fee settings.
+    pub market_rules: MarketRulesPreset,
+    /// Maximum selected securities.
+    pub top_n: usize,
+    /// Trading sessions between selection dates.
+    pub rebalance_days: usize,
+    /// Treatment of securities leaving the pool.
     pub pool_exit_policy: analytics_core::pool::PoolExitPolicy,
 }
 impl ResearchRequest {
@@ -617,7 +644,11 @@ struct FoldReport {
 }
 
 fn save(path: impl AsRef<Path>, value: &impl Serialize) -> Result<()> {
-    fs::write(path, serde_json::to_vec_pretty(value)?)?;
+    analytics_core::task::TaskContext::current().check()?;
+    let path = path.as_ref();
+    let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    fs::write(&temporary, serde_json::to_vec_pretty(value)?)?;
+    fs::rename(&temporary, path)?;
     Ok(())
 }
 
@@ -631,25 +662,9 @@ pub fn run_with_context(
     request: &ResearchRequest,
     context: &analytics_core::task::TaskContext,
 ) -> Result<()> {
-    context.execute(|| {
-        if !request.audit_only && !request.train_only && request.reuse_training.is_none() {
-            let mut training = request.clone();
-            training.train_only = true;
-            run_scoped(&training)?;
-            backtest_from_training(
-                &request.output,
-                &request.output,
-                request
-                    .corporate_actions
-                    .as_deref()
-                    .ok_or("execution event version missing")?,
-                context,
-            )
-        } else {
-            run_scoped(request)
-        }
-    })
+    context.execute(|| crate::research::worker::scoped(|| run_scoped(request)))
 }
+
 fn file_hash(path: &Path) -> Result<String> {
     Ok(format!("sha256:{:x}", Sha256::digest(fs::read(path)?)))
 }
@@ -666,7 +681,11 @@ fn adjustment_basis_signature(
 }
 /// Validate current training descriptor on every read; unsupported files are never converted.
 pub fn validate_training_artifact(artifact: &serde_json::Value) -> Result<()> {
-    if artifact["schema_version"] != 2 || artifact["status"] != "trained" {
+    if artifact["schema_version"] != 3
+        || artifact["runtime_signature"] != crate::research::worker::runtime_signature()
+        || artifact["dependency_signature"] != crate::research::worker::dependency_signature()
+        || artifact["status"] != "trained"
+    {
         return Err("unsupported_training_format".into());
     }
     let mut unsigned = artifact.clone();
@@ -732,7 +751,7 @@ pub fn backtest_from_training_with_data(
     data_root: Option<&Path>,
     context: &analytics_core::task::TaskContext,
 ) -> Result<()> {
-    backtest_from_training_with_policy(source, output, actions, data_root, None, context)
+    backtest_from_training_with_policy(source, output, actions, data_root, None, None, context)
 }
 /// Apply an execution-only policy without changing the frozen training manifest or model.
 pub fn backtest_from_training_with_policy(
@@ -741,6 +760,7 @@ pub fn backtest_from_training_with_policy(
     actions: &Path,
     data_root: Option<&Path>,
     policy: Option<analytics_core::execution::EventCheckPolicy>,
+    execution: Option<&ResearchExecution>,
     context: &analytics_core::task::TaskContext,
 ) -> Result<()> {
     let artifact: serde_json::Value =
@@ -787,6 +807,13 @@ pub fn backtest_from_training_with_policy(
     }
     if let Some(policy) = policy {
         request.event_check_policy = policy;
+    }
+    if let Some(execution) = execution {
+        request.initial_cash_cny = execution.initial_cash_cny;
+        request.market_rules = execution.market_rules.clone();
+        request.config.top_n = execution.top_n;
+        request.config.rebalance_days = execution.rebalance_days;
+        request.pool_exit_policy = execution.pool_exit_policy;
     }
     request.output = output.to_owned();
     request.reuse_training = Some(source.to_owned());
@@ -1019,7 +1046,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
                         .get(id)
                         .and_then(|rs| rs.iter().map(|r| r.end).max())
                         .map_or(needed_end, |d| d.min(needed_end));
-                    adjustment_issues.extend(raw_portfolio::adjustment_issues(
+                    adjustment_issues.extend(adjustment::adjustment_issues(
                         &dataset,
                         book,
                         &BTreeSet::from([id.clone()]),
@@ -1364,7 +1391,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         .ok_or("empty registry")?
         .version
         .clone();
-    let mut signature = format!(
+    let signature = format!(
         "sha256:{:x}",
         Sha256::digest(serde_json::to_vec(&(
             source.clone(),
@@ -1387,14 +1414,13 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         } else {
             "provider-quotations;events-not-training-input".into()
         };
-    let mut execution = serde_json::json!({"mode":"raw_integer_shares","factor_set":request.factor_set,"price_basis":request.price_basis,
+    let mut execution = serde_json::json!({"runtime_signature":crate::research::worker::runtime_signature(),"dependency_signature":crate::research::worker::dependency_signature(),"engine":"akquant","engine_version":"0.3.66","target_exposure":0.98,"volume_limit_pct":0.1,"trade_unit_policy":"AKQuant lot_size uses board increment; distinct minimum quantity and price-limit rules are not modeled","corporate_action_policy":"ex_date","mode":"akquant_ex_date","factor_set":request.factor_set,"price_basis":request.price_basis,
         "quality_policy":request.quality_policy,"quality":quality_snapshot,"quality_sha256":format!("sha256:{:x}",Sha256::digest(serde_json::to_vec(&quality_snapshot)?)),
         "fee_application":"latest_only_for_all_dates", "market_rules":request.market_rules, "initial_cash_cny":request.initial_cash_cny,
-        "price_limit_buffer":0.005,
 
         "source_map":dataset.source_map(),"source_map_signature":format!("sha256:{:x}",Sha256::digest(serde_json::to_vec(dataset.source_map())?)),"corporate_action_sha256":action_hash,"dividend_withholding_rate":request.dividend_withholding_rate,
         "price_inputs":price_inputs,"price_input_sha256":price_input_sha256,"pool":pool,"pool_signature":pool_signature,"benchmark":request.benchmark,"pool_exit_policy":request.pool_exit_policy,
-        "research_config":request.config,"schedule":request.schedule,"action_policy":request.action_policy,"event_check_policy":request.event_check_policy,"resolved_folds":folds,"dividend_tax_convention":"explicit fixed research rate; default gross; not personal FIFO holding-period tax"});
+        "research_config":request.config,"schedule":request.schedule,"action_policy":request.action_policy,"event_check_policy":request.event_check_policy,"resolved_folds":folds,"dividend_tax_convention":"gross dividend at ex-date; no withholding model"});
     if let Some(source) = &request.reuse_training {
         let artifact: serde_json::Value =
             serde_json::from_slice(&fs::read(source.join("training.json"))?)?;
@@ -1408,7 +1434,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
             &execution,
             &request.schedule,
             &folds,
-            "a-share-raw-execution-explicit-input-v1"
+            "akquant-ex-date-v1"
         ))?)
     );
     if request.output.join("summary.json").exists() {
@@ -1433,21 +1459,31 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
     let coverage:Vec<_>=folds.iter().map(|f|serde_json::json!({"requested":f.requested,"actual":f.actual,"warmup_start":f.warmup_start,"warmup_sessions":f.warmup_sessions,"pool_coverage_start":pool.coverage.start,"unknown_cross_section_before":pool.coverage.start})).collect();
     save(
         request.output.join("data_audit.json"),
-        &serde_json::json!({"source":source,"provider":dataset.root,"requested":request.schedule,"calendar_start":dataset.calendar[0],"calendar_end":last,"historical_pool_start":dataset.calendar[first_member],"unique_historical_members":members.len(),"registered_factors":registry.len(),"usable_factor_ids":ids,"excluded_factors_missing_inputs":excluded,"formula_version":formula_version,"factor_signature":signature,"research_signature":run_signature,"execution":execution,"coverage":coverage,"uses_jfqlib_code_or_cache":false,"label":"adjusted_open[t+2]/adjusted_open[t+1]-1","rolling_config":request.config,"split":"explicit requested and resolved date folds; purge labels ending beyond split cutoff","portfolio":"integer raw-price fills; T+1; persistent cash/share/receivable ledger; close NAV; no terminal fake fills"}),
+        &serde_json::json!({"source":source,"provider":dataset.root,"requested":request.schedule,"calendar_start":dataset.calendar[0],"calendar_end":last,"historical_pool_start":dataset.calendar[first_member],"unique_historical_members":members.len(),"registered_factors":registry.len(),"usable_factor_ids":ids,"excluded_factors_missing_inputs":excluded,"formula_version":formula_version,"factor_signature":signature,"research_signature":run_signature,"execution":execution,"coverage":coverage,"uses_jfqlib_code_or_cache":false,"label":"adjusted_open[t+2]/adjusted_open[t+1]-1","rolling_config":request.config,"split":"explicit requested and resolved date folds; purge labels ending beyond split cutoff","portfolio":"AKQuant raw-price fills; T+1; continuous portfolio; ex-date dividends/splits; no terminal fake fills"}),
     )?;
     eprintln!(
         "data_end={last} pool_start={} factor_count={} excluded={excluded:?}",
         dataset.calendar[first_member],
         ids.len()
     );
-    let cache = request.output.join(if request.reuse_training.is_some() {
-        ".prediction-factor-staging"
-    } else {
-        ".admission-factor-staging"
-    });
+    let shared = request
+        .output
+        .parent()
+        .unwrap_or(&request.output)
+        .join(".factor-cache")
+        .join(signature.trim_start_matches("sha256:"));
+    let cache = request.output.join(".factor-staging");
     fs::create_dir_all(&cache)?;
     for year in history_start.year()..=needed_end.year() {
         context.report(format!("因子年度 {year}"))?;
+        for ext in ["json", "bin"] {
+            let source = shared.join(format!("{year}.{ext}"));
+            let dest = cache.join(format!("{year}.{ext}"));
+            if source.is_file() && !dest.exists() {
+                fs::copy(source, dest)?;
+            }
+        }
+
         data::prepare_year(
             data::YearInputs {
                 dataset: &dataset,
@@ -1561,23 +1597,25 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
     )
     .into();
     execution["sample_selection"] = sample_selection;
-    signature = format!(
-        "sha256:{:x}",
-        Sha256::digest(serde_json::to_vec(&(
-            &signature,
-            &execution["sample_selection_sha256"]
-        ))?)
-    );
     let training_signature = format!(
         "sha256:{:x}",
         Sha256::digest(serde_json::to_vec(&(
             &signature,
             &request.config.training,
+            &request.quality_policy,
+            &execution["sample_selection"]["selections"]
+                .as_array()
+                .map(|m| m
+                    .iter()
+                    .filter(|r| r["split"] != "prediction")
+                    .collect::<Vec<_>>()),
             &request.schedule,
             &folds,
             &historical_basis_signature,
             dataset.source_map(),
-            &ids
+            &ids,
+            crate::research::worker::runtime_signature(),
+            crate::research::worker::dependency_signature()
         ))?)
     );
     run_signature = format!(
@@ -1591,12 +1629,6 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
     audit["factor_signature"] = signature.clone().into();
     audit["research_signature"] = run_signature.clone().into();
     save(request.output.join("data_audit.json"), &audit)?;
-    for year in history_start.year()..=needed_end.year() {
-        let path = cache.join(format!("{year}.json"));
-        let mut meta: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
-        meta["signature"] = signature.clone().into();
-        save(path, &meta)?;
-    }
     if let Some(check) = admission.checks.last_mut() {
         check.status = if feature_issues.is_empty() {
             CheckStatus::Passed
@@ -1644,9 +1676,21 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
     }
     fs::rename(&cache, &published)?;
     let cache = published;
-    let mut raw_state = raw_portfolio::RawPortfolio::new(request)?;
+    fs::create_dir_all(&shared)?;
+    for year in history_start.year()..=needed_end.year() {
+        for ext in ["json", "bin"] {
+            let dest = shared.join(format!("{year}.{ext}"));
+            if !dest.exists() {
+                let tmp = shared.join(format!("{year}.{ext}.{}", uuid::Uuid::new_v4()));
+                fs::copy(cache.join(format!("{year}.{ext}")), &tmp)?;
+                fs::rename(tmp, dest)?;
+            }
+        }
+    }
+
+    let mut signals = Vec::<(Date, String, f64)>::new();
     let mut reports = Vec::new();
-    let mut all_returns = Vec::new();
+
     for (fold_index, resolved) in folds.iter().enumerate() {
         context.check()?;
         let f = &resolved.actual;
@@ -1749,7 +1793,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
             manifest["formula_version"] = formula_version.clone().into();
             manifest["input_snapshot_hash"] = signature.clone().into();
             manifest["training_signature"] = training_signature.clone().into();
-            manifest["research_execution"] = execution.clone();
+            manifest["research_execution"] = serde_json::json!({"factor_set":request.factor_set,"price_basis":request.price_basis});
             manifest["rolling_fold"] = serde_json::json!({"fold_index":fold_index,"schedule":resolved,"purged_label_boundary":true});
             save(&artifact.manifest_path, &manifest)?;
             (artifact.model_path, artifact.manifest_path)
@@ -1787,40 +1831,14 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
             .map(|(row, score)| (row.clone(), *score))
             .unzip();
         let (ic, rank_ic) = portfolio::information_coefficients(&ic_rows, &ic_scores);
-        let days_result = raw_portfolio::simulate(
-            &mut raw_state,
-            &test.meta,
-            &scores,
-            &dataset,
-            action_book.as_ref().expect("validated action book"),
-            request,
-            &f.test,
-        );
-        let days = match days_result {
-            Ok(days) => days,
-            Err(e) => {
-                save(
-                    request.output.join("execution_readiness.json"),
-                    &serde_json::json!({"schema_version":5,"ready":false,"training_complete":true,"backtest_complete":false,"reason":e.to_string(),"completed_fold_reports":reports}),
-                )?;
-                return Err(e);
-            }
-        };
-        let test_days: Vec<_> = days
-            .iter()
-            .filter(|d| d.date >= f.test.start.to_string())
-            .cloned()
-            .collect();
-        let performance = portfolio::performance(&test_days);
-        save(output.join("daily.json"), &test_days)?;
-        save(
-            output.join("gap_daily.json"),
-            &days
+        signals.extend(
+            test.meta
+                .rows
                 .iter()
-                .filter(|d| d.date < f.test.start.to_string())
-                .collect::<Vec<_>>(),
-        )?;
-        all_returns.extend(days);
+                .zip(&scores)
+                .map(|(r, s)| (dataset.calendar[r.day], r.instrument.clone(), *s)),
+        );
+        let performance = portfolio::performance(&[]);
         let report = FoldReport {
             year,
             train_start: f.train.start.to_string(),
@@ -1864,12 +1882,13 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         reports.push(report);
         save(request.output.join("fold_reports.json"), &reports)?;
     }
-    if request.train_only {
-        let models:Vec<_>=(0..folds.len()).map(|i|{let folder=request.output.join(format!("fold-{i:04}"));Ok(serde_json::json!({"fold":i,"model_sha256":file_hash(&folder.join("model.txt"))?,"manifest_sha256":file_hash(&folder.join("manifest.json"))?}))}).collect::<Result<_>>()?;
+    if request.reuse_training.is_none() {
+        let models:Vec<_>=(0..folds.len()).map(|i|{let folder=request.reuse_training.as_ref().unwrap_or(&request.output).join(format!("fold-{i:04}"));Ok(serde_json::json!({"fold":i,"model_sha256":file_hash(&folder.join("model.txt"))?,"manifest_sha256":file_hash(&folder.join("manifest.json"))?}))}).collect::<Result<_>>()?;
         let mut original = training_source_request;
         original.train_only = false;
+        original.config.factor_ids = ids.clone();
         original.reuse_training = None;
-        let mut training = serde_json::json!({"schema_version":2,"factor_set":request.factor_set,"price_basis":request.price_basis,"status":"trained","request":original,"factor_signature":signature,"models":models,"adjustment_basis_signature":historical_basis_signature,"training_signature":training_signature,"source_map":dataset.source_map(),"resolved_folds":folds,"formula_version":formula_version,"feature_order":ids});
+        let mut training = serde_json::json!({"schema_version":3,"runtime_signature":crate::research::worker::runtime_signature(),"dependency_signature":crate::research::worker::dependency_signature(),"factor_set":request.factor_set,"price_basis":request.price_basis,"status":"trained","request":original,"factor_signature":signature,"models":models,"adjustment_basis_signature":historical_basis_signature,"training_signature":training_signature,"source_map":dataset.source_map(),"resolved_folds":folds,"formula_version":formula_version,"feature_order":ids});
         training["source_warnings"] = serde_json::to_value(
             admission
                 .checks
@@ -1884,8 +1903,59 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
             Sha256::digest(serde_json::to_vec(&training)?)
         ));
         save(request.output.join("training.json"), &training)?;
-        return Ok(());
+        if request.train_only {
+            return Ok(());
+        }
     }
+    context.report("AKQuant 连续账户回测")?;
+    let signal_dates = dataset
+        .calendar
+        .iter()
+        .filter(|d| {
+            folds
+                .iter()
+                .any(|f| **d >= f.actual.test.start && **d <= f.actual.test.end)
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    let all_returns = match akquant::simulate(
+        request,
+        &dataset,
+        action_book.as_ref(),
+        &signals,
+        &DateRange {
+            start: folds.first().unwrap().actual.test.start,
+            end: folds.last().unwrap().actual.test.end,
+        },
+        &pool,
+        &signal_dates,
+    ) {
+        Ok(days) => days,
+        Err(error) => {
+            save(
+                request.output.join("execution_readiness.json"),
+                &serde_json::json!({"schema_version":6,"ready":false,"training_complete":true,"backtest_complete":false,"reason":error.to_string()}),
+            )?;
+            return Err(error);
+        }
+    };
+    for (i, report) in reports.iter_mut().enumerate() {
+        let days = all_returns
+            .iter()
+            .filter(|d| d.date >= report.test_start && d.date <= report.test_end)
+            .cloned()
+            .collect::<Vec<_>>();
+        report.performance = portfolio::performance(&days);
+        save(
+            request.output.join(format!("fold-{i:04}/daily.json")),
+            &days,
+        )?;
+        save(
+            request.output.join(format!("fold-{i:04}/report.json")),
+            &report,
+        )?;
+    }
+    save(request.output.join("fold_reports.json"), &reports)?;
     finish(
         request,
         &reports,
@@ -1943,48 +2013,16 @@ fn finish(
     }).collect();
     save(request.output.join("annual_reports.json"), &annual)?;
     let has_trades = days.iter().any(|d| d.turnover > 0.);
-    let mut buy_orders = 0usize;
-    let mut data_rejections = 0usize;
-    if request.output.join("order_events.jsonl").exists() {
-        use std::io::BufRead;
-        for line in
-            std::io::BufReader::new(fs::File::open(request.output.join("order_events.jsonl"))?)
-                .lines()
-        {
-            let row: serde_json::Value = serde_json::from_str(&line?)?;
-            if row["side"] == "buy" {
-                buy_orders += 1;
-                if row["reason"].as_str().is_some_and(|r| {
-                    r.starts_with("execution_data_missing")
-                        || matches!(r, "source_missing" | "missing_deal_price")
-                }) {
-                    data_rejections += 1;
-                }
-            }
-        }
-    }
-    let data_blocked = !has_trades && buy_orders > 0 && buy_orders == data_rejections;
-    save(
-        request.output.join("summary.json"),
-        &serde_json::json!({
-            "schema_version":RESEARCH_SCHEMA_VERSION,"backtest_status":if has_trades{"completed"}else if data_blocked{"execution_data_not_ready"}else{"no_valid_trades"},"execution_warnings":if request.output.join("execution_warnings.json").exists(){serde_json::from_slice::<serde_json::Value>(&fs::read(request.output.join("execution_warnings.json"))?)?}else{serde_json::json!([])},"input_kind":if audit["source"]["synthetic_fixture"]==true{"synthetic_fixture"}else{"public_market"},"method":"JFQuant native GTJA date-scheduled research",
-            "fold_reports":reports,"annual_reports":annual,"aggregate":aggregate,"source":audit["source"],
-            "formula_version":audit["formula_version"],"signature":run_signature,"factor_signature":factor_signature,
-            "admission":serde_json::from_slice::<serde_json::Value>(&fs::read(request.output.join("admission.json"))?)?,"sample_selection":serde_json::from_slice::<serde_json::Value>(&fs::read(request.output.join("sample_selection.json"))?)?,"research_scope":if request.quality_policy.strictness==analytics_core::research_quality::ResearchStrictness::QualifiedOnly{"经数据筛选的研究股票池"}else{"原股票池"},
-            "execution":audit["execution"],"excluded_factors":audit["excluded_factors_missing_inputs"],"coverage":audit["coverage"],
-        }),
-    )?;
-    if data_blocked {
-        save(
-            request.output.join("execution_readiness.json"),
-            &serde_json::json!({
-                "schema_version":5,"ready":false,"training_complete":true,"backtest_complete":false,
-                "code":"execution_data_not_ready","reason":"全部买单因执行资料缺项被拒绝；本次不是策略收益",
-                "buy_orders":buy_orders,"data_rejections":data_rejections,"summary":"summary.json","orders":"order_events.jsonl"
-            }),
-        )?;
-        return Err("data_not_ready: all buy orders rejected by execution-data dependencies; see summary.json and order_events.jsonl".into());
-    }
+    let summary = serde_json::json!({
+        "schema_version":RESEARCH_SCHEMA_VERSION,"backtest_status":if has_trades{"completed"}else{"no_valid_trades"},"execution_warnings":if request.output.join("execution_warnings.json").exists(){serde_json::from_slice::<serde_json::Value>(&fs::read(request.output.join("execution_warnings.json"))?)?}else{serde_json::json!([])},"input_kind":if audit["source"]["synthetic_fixture"]==true{"synthetic_fixture"}else{"public_market"},"method":"JFQuant Rust factors + Python LightGBM + AKQuant",
+        "fold_reports":reports,"annual_reports":annual,"aggregate":aggregate,"source":audit["source"],
+        "formula_version":audit["formula_version"],"signature":run_signature,"factor_signature":factor_signature,
+        "admission":serde_json::from_slice::<serde_json::Value>(&fs::read(request.output.join("admission.json"))?)?,"sample_selection":serde_json::from_slice::<serde_json::Value>(&fs::read(request.output.join("sample_selection.json"))?)?,"research_scope":if request.quality_policy.strictness==analytics_core::research_quality::ResearchStrictness::QualifiedOnly{"经数据筛选的研究股票池"}else{"原股票池"},
+        "execution":audit["execution"],"excluded_factors":audit["excluded_factors_missing_inputs"],"coverage":audit["coverage"],
+    });
+    validate_result(&summary)?;
+    save(request.output.join("summary.json"), &summary)?;
+
     Ok(())
 }
 

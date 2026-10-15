@@ -12,7 +12,6 @@ analytics-engine = { path = "../engine", features = ["duckdb-native"] }
 analytics-core = { path = "../core" }
 analytics-storage = { path = "../storage" }
 analytics-factor = { path = "../factor" }
-analytics-ml = { path = "../ml", features = ["lightgbm-native", "duckdb-native"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -20,5 +19,9 @@ chrono.workspace = true
 uuid.workspace = true
 rustix = { version = "1", features = ["process"] }
 
-[dev-dependencies]
+arrow-array.workspace = true
+arrow-schema.workspace = true
+parquet.workspace = true
+thiserror.workspace = true
+
 tempfile = "3.23"

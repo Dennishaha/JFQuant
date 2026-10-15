@@ -12,8 +12,8 @@
 //!   -> LightGBM training + test prediction
 //! ```
 //!
-//! All DuckDB and LightGBM handles are created inside the calling thread and
-//! never cross thread boundaries. App, jfquant and the retained CLI example
+//! DuckDB handles stay on the Rust worker thread; LightGBM handles stay in
+//! the supervised Python process. App and jfquant
 //! use the same service worker for pipeline execution. Cancellation
 //! is cooperative through a shared [`Cancellation`] flag checked between
 //! stages and inside factor/trainer loops.
@@ -45,7 +45,7 @@ use std::{
 };
 use thiserror::Error;
 
-use crate::{
+use crate::research::{
     DenseMatrix, LightGbmPredictor, LightGbmTrainer, Predictor, TrainEvent, Trainer, TrainingSplit,
 };
 
@@ -71,7 +71,7 @@ pub struct PipelineRequest {
     pub training: TrainingConfig,
 }
 
-use crate::TrainingConfig;
+use crate::research::TrainingConfig;
 
 /// Progress stream emitted by [`run_factor_pipeline`] and
 /// [`train_from_factor_cache`].
@@ -128,7 +128,7 @@ pub enum PipelineError {
     Factor(#[from] analytics_factor::FactorError),
     /// LightGBM training or prediction failure.
     #[error("ml error: {0}")]
-    Ml(#[from] crate::MlError),
+    Ml(#[from] crate::research::MlError),
     /// Filesystem failure.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

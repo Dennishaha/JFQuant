@@ -556,6 +556,9 @@ pub enum ResearchCommand {
         actions: Option<String>,
     },
     Backtest {
+        /// Apply only account/portfolio settings from this template; retain trained model inputs.
+        #[arg(long)]
+        template: Option<PathBuf>,
         #[arg(long, value_enum, default_value = "provider")]
         event_check: EventCheckValue,
         #[arg(long)]
@@ -1126,10 +1129,19 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
                 actions,
             }),
             ResearchCommand::Backtest {
+                template,
                 training,
                 actions,
                 event_check,
             } => workflow(WorkflowRequest::BacktestResearch {
+                execution: template
+                    .as_ref()
+                    .map(|path| {
+                        ResearchTemplate::read(&resolve(&client.root, path))
+                            .map(|t| Box::new(t.execution_settings()))
+                            .map_err(invalid)
+                    })
+                    .transpose()?,
                 training,
                 actions,
                 event_check_policy: match event_check {

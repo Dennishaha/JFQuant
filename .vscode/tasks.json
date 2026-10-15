@@ -3,9 +3,7 @@
   "options": {
     "cwd": "${workspaceFolder}",
     "env": {
-      "DUCKDB_DOWNLOAD_LIB": "${config:jfquant.duckdbDownloadLib}",
-      "LIGHTGBM_LIB_DIR": "${env:LIGHTGBM_LIB_DIR}",
-      "DYLD_LIBRARY_PATH": "${env:LIGHTGBM_LIB_DIR}:${env:DYLD_LIBRARY_PATH}"
+      "DUCKDB_DOWNLOAD_LIB": "${config:jfquant.duckdbDownloadLib}"
     }
   },
   "tasks": [
@@ -36,32 +34,9 @@
       "problemMatcher": []
     },
     {
-      "label": "Rust: native smoke build",
-      "type": "shell",
-      "command": "cargo build -p analytics-ml --features lightgbm-native --example native_smoke",
-      "problemMatcher": "$rustc"
-    },
-    {
       "label": "Rust: build desktop app",
       "type": "shell",
       "command": "cargo build -p analytics-desktop -p analytics-cli",
-      "problemMatcher": "$rustc"
-    },
-    {
-      "label": "Rust: run native smoke (terminal)",
-      "type": "process",
-      "command": "cargo",
-      "args": [
-        "run",
-        "-p",
-        "analytics-ml",
-        "--features",
-        "lightgbm-native",
-        "--example",
-        "native_smoke",
-        "--",
-        "${workspaceFolder}/.jfquant/runs/native-smoke"
-      ],
       "problemMatcher": "$rustc"
     },
     {

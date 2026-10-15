@@ -5,7 +5,6 @@ members = [
     "crates/storage",
     "crates/engine",
     "crates/factor",
-    "crates/ml",
     "crates/app",
     "crates/workflow",
     "crates/cli",
@@ -36,6 +35,6 @@ uuid = { version = "1.18", features = ["serde", "v4"] }
 [profile.dev.package.analytics-factor]
 opt-level = 3
 
-[profile.dev.package.analytics-ml]
+[profile.dev.package.analytics-workflow]
 opt-level = 2
 

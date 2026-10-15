@@ -1,12 +1,12 @@
 //! Versioned local task service. Native handles stay in backend's worker thread.
 #![allow(missing_docs)]
+use crate::research::TrainingConfig;
+use crate::research::pipeline::PipelineRequest;
 use crate::{
     RunRecord, WorkflowRequest, Workspace,
     backend::{self, TaskKind, Wake, WorkerCommand, WorkerEvent},
 };
 use analytics_core::{ExportRequest, PageRequest};
-use analytics_ml::TrainingConfig;
-use analytics_ml::pipeline::PipelineRequest;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -26,7 +26,7 @@ use std::{
 };
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 13;
+pub const PROTOCOL_VERSION: u32 = 14;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TaskRequest {
@@ -160,7 +160,7 @@ fn failure(e: impl ToString) -> ServiceError {
     ServiceError::new("service_error", e)
 }
 fn result_error(e: Box<dyn std::error::Error>, task_id: Option<Uuid>) -> ServiceError {
-    let code = if e.is::<analytics_ml::backtest::UnsupportedResultFormat>() {
+    let code = if e.is::<crate::research::backtest::UnsupportedResultFormat>() {
         "unsupported_result_format"
     } else {
         "service_error"

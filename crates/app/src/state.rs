@@ -9,7 +9,7 @@ use analytics_core::{
     ColumnSchema, DataType, DatasetFile, DateRange, KeysetCursor, PageRequest, QueryPage,
     ScalarValue, SortKey,
 };
-use analytics_ml::TrainingConfig;
+use analytics_workflow::research::TrainingConfig;
 use chrono::NaiveDate;
 use std::collections::BTreeMap;
 use uuid::Uuid;

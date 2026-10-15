@@ -22,9 +22,7 @@ require_bundle_idle() {
 require_bundle_idle
 
 "$repo_root/crates/app/packaging/build-collector.sh"
-[ -f "$native_root/install/lib/lib_lightgbm.dylib" ] || "$repo_root/crates/app/packaging/build-native.sh"
 export MACOSX_DEPLOYMENT_TARGET=14.0
-export LIGHTGBM_LIB_DIR="$native_root/install/lib"
 export CARGO_TARGET_DIR="$package_root"
 # libduckdb-sys downloads its matching, pinned native release into the profile deps.
 unset DUCKDB_LIB_DIR
@@ -44,8 +42,6 @@ cp "$app/Contents/Resources/python/lib/python3.12/LICENSE.txt" "$app/Contents/Re
 cp "$repo_root/crates/factor/QLIB_LICENSE.txt" "$app/Contents/Resources/Licenses/Qlib-Alpha158.txt"
 cp "$repo_root/crates/app/packaging/Info.plist" "$app/Contents/Info.plist"
 cp "$package_root/release/deps/libduckdb.dylib" "$app/Contents/Frameworks/"
-cp "$native_root/install/lib/lib_lightgbm.dylib" "$native_root/install/lib/libomp.dylib" "$app/Contents/Frameworks/"
-cp "$native_root/LightGBM/LICENSE" "$app/Contents/Resources/Licenses/LightGBM.txt"
 cp "$native_root/openmp-20.1.8.src/LICENSE.TXT" "$app/Contents/Resources/Licenses/OpenMP.txt"
 curl --fail --location --retry 3 --output "$app/Contents/Resources/Licenses/DuckDB.txt" https://raw.githubusercontent.com/duckdb/duckdb/v1.5.6/LICENSE
 for binary in "$app/Contents/MacOS/"* "$app/Contents/Frameworks/"*.dylib; do

@@ -17,8 +17,11 @@ pub mod refresh;
 #[cfg(unix)]
 pub mod service;
 
+/// Shared research orchestration and supervised Python runtime.
+pub mod research;
+
+use crate::research::backtest::{ResearchConfig, ResearchRequest};
 use analytics_core::{market_rules::MarketRulesPreset, task::TaskContext};
-use analytics_ml::backtest::{ResearchConfig, ResearchRequest};
 use analytics_storage::{corporate_actions::ActionBundle, daily::DailyDataset};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -101,7 +104,7 @@ pub struct ResearchTemplate {
     pub factor_set: analytics_core::research_quality::FactorSet,
     /// Training source trust, separate from sample completeness.
     pub price_basis: analytics_core::research_quality::PriceBasis,
-    /// Resolved template schema, currently 8; absence is unsupported.
+    /// Resolved template schema, currently 10; absence is unsupported.
     #[serde(default = "missing_template_version")]
     pub schema_version: u32,
     /// Immutable pool version, or builtin:csi300/builtin:csi500 bound to the selected market.
@@ -150,7 +153,7 @@ impl Default for ResearchTemplate {
             ..ResearchConfig::default()
         };
         Self {
-            schema_version: 9,
+            schema_version: 10,
             factor_set: Default::default(),
             price_basis: Default::default(),
             pool_version: "builtin:csi500".into(),
@@ -171,6 +174,17 @@ impl Default for ResearchTemplate {
     }
 }
 impl ResearchTemplate {
+    /// Extract account settings without changing frozen training inputs.
+    pub fn execution_settings(&self) -> research::backtest::ResearchExecution {
+        research::backtest::ResearchExecution {
+            initial_cash_cny: self.initial_cash_cny,
+            market_rules: self.market_rules.clone(),
+            top_n: self.config.top_n,
+            rebalance_days: self.config.rebalance_days,
+            pool_exit_policy: self.pool_exit_policy,
+        }
+    }
+
     /// Select a single family and reset its canonical feature order.
     pub fn select_factor_set(&mut self, set: analytics_core::research_quality::FactorSet) {
         self.factor_set = set;
@@ -211,7 +225,7 @@ impl ResearchTemplate {
     }
     /// Validate before saving or starting a task.
     pub fn validate(&self) -> Result<()> {
-        if self.schema_version != 9
+        if self.schema_version != 10
             || self.id.trim().is_empty()
             || self.formula_version != analytics_factor::alpha158::version(self.factor_set)
             || self.name.trim().is_empty()
@@ -596,7 +610,7 @@ impl Workspace {
     /// Register a current-format strict research result as read-only.
     pub fn import_run(&self, path: &Path) -> Result<RunRecord> {
         let summary: Value = serde_json::from_slice(&fs::read(path.join("summary.json"))?)?;
-        analytics_ml::backtest::validate_result(&summary)?;
+        crate::research::backtest::validate_result(&summary)?;
         let mut run = self.begin(
             Uuid::new_v4(),
             "历史研究（只读）",
@@ -609,7 +623,7 @@ impl Workspace {
     /// Load saved artifacts, rejecting unsupported research result formats.
     pub fn results(&self, run: &RunRecord) -> Result<Value> {
         if run.read_only {
-            analytics_ml::backtest::validate_result(&run.request["summary"])?;
+            crate::research::backtest::validate_result(&run.request["summary"])?;
             return Ok(run.request["summary"].clone());
         }
         let dir = self.resolve(&run.output);
@@ -621,7 +635,7 @@ impl Workspace {
         let training_value = if training.exists() {
             {
                 let artifact = serde_json::from_slice::<Value>(&fs::read(&training)?)?;
-                analytics_ml::backtest::validate_training_artifact(&artifact)?;
+                crate::research::backtest::validate_training_artifact(&artifact)?;
                 Some(artifact)
             }
         } else {
@@ -630,7 +644,7 @@ impl Workspace {
         let p = dir.join("summary.json");
         if p.exists() {
             let summary = serde_json::from_slice(&fs::read(p)?)?;
-            analytics_ml::backtest::validate_result(&summary)?;
+            crate::research::backtest::validate_result(&summary)?;
             Ok(summary)
         } else {
             if matches!(
@@ -840,6 +854,9 @@ pub enum WorkflowRequest {
     },
     /// Execute previously trained models without calling the trainer.
     BacktestResearch {
+        /// Optional account-only settings; omitted values reuse the training task account.
+        #[serde(default)]
+        execution: Option<Box<research::backtest::ResearchExecution>>,
         /// Explicit execution trust for the new account task; it does not invalidate models.
         #[serde(default)]
         event_check_policy: analytics_core::execution::EventCheckPolicy,
@@ -1429,10 +1446,11 @@ fn execute_scoped(
             let mut r = research_request(w, run, template, &m, a.as_ref(), false)?;
             r.train_only = true;
             context.report("批量检查训练输入")?;
-            analytics_ml::backtest::run_with_context(&r, context)?;
+            crate::research::backtest::run_with_context(&r, context)?;
             details = w.results(run)?;
         }
         WorkflowRequest::BacktestResearch {
+            execution,
             training,
             actions,
             event_check_policy,
@@ -1469,12 +1487,13 @@ fn execute_scoped(
             }
             let a = version(w, actions, "actions")?;
             context.report("读取已有模型并回测")?;
-            analytics_ml::backtest::backtest_from_training_with_policy(
+            crate::research::backtest::backtest_from_training_with_policy(
                 &source,
                 &w.resolve(&run.output),
                 &w.resolve(a.path),
                 Some(&w.resolve(market.path)),
                 Some(*event_check_policy),
+                execution.as_deref(),
                 context,
             )?;
             details = w.results(run)?;
@@ -1625,10 +1644,10 @@ impl Drop for WorkspaceLease {
 /// Verify packaged native loading with a real query, small training and prediction.
 /// Invoke on a worker thread; generated test artifacts remain in the supplied local folder.
 pub fn self_check(root: &Path) -> Result<Value> {
-    use analytics_engine::{DuckDbEngine, QueryEngine};
-    use analytics_ml::{
+    use crate::research::{
         DenseMatrix, LightGbmPredictor, LightGbmTrainer, Predictor, Trainer, TrainingSplit,
     };
+    use analytics_engine::{DuckDbEngine, QueryEngine};
     fs::create_dir_all(root)?;
     let mut engine = DuckDbEngine::open_in_memory()?;
     let query = engine.query_page(analytics_core::PageRequest {
@@ -1732,7 +1751,7 @@ pub(crate) fn research(
 ) -> Result<Value> {
     let r = research_request(w, run, template, market, actions, audit_only)?;
     context.report("检查训练输入；训练完成后按需回测")?;
-    analytics_ml::backtest::run_with_context(&r, context)?;
+    crate::research::backtest::run_with_context(&r, context)?;
     w.results(run)
 }
 
@@ -1806,14 +1825,14 @@ pub fn research_requirements_with_actions(
         rs.retain(|r| r.end >= lo && r.start <= hi);
         !rs.is_empty()
     });
-    let quality = analytics_ml::backtest::quality::qualify(
+    let quality = crate::research::backtest::quality::qualify(
         &dataset,
         &preview_pool,
         &t.quality_policy,
         &analytics_core::DateRange { start: lo, end: hi },
         &t.config.factor_ids,
     )?;
-    let sample_readiness = analytics_ml::backtest::preview_samples_with_policy(
+    let sample_readiness = crate::research::backtest::preview_samples_with_policy(
         &dataset,
         &quality.effective_pool,
         &folds,

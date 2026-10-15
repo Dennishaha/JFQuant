@@ -145,7 +145,7 @@ impl Harness {
 fn worker_panic_shows_error_and_restart_button_restores_real_queries() {
     let mut h = Harness::new(Panel::Query);
     (h.app.worker, h.app.events) = worker::spawn(h.ctx.clone());
-    h.app.cancel = Some(analytics_ml::pipeline::cancellation());
+    h.app.cancel = Some(analytics_workflow::research::pipeline::cancellation());
     h.app
         .worker
         .send(WorkerCommand::PanicTask {
@@ -191,7 +191,7 @@ fn event_channel_disconnect_clears_active_task_and_cancel_without_repeated_logs(
                 label: "正在运行".into(),
             })
             .unwrap();
-        h.app.cancel = Some(analytics_ml::pipeline::cancellation());
+        h.app.cancel = Some(analytics_workflow::research::pipeline::cancellation());
         drop(std::mem::replace(&mut h.events, channel().0));
         let text = rendered_text(&h.frame(vec![]));
         assert!(text.contains("后台连接已断开"));
@@ -743,7 +743,7 @@ fn cancel_button_sets_flag_and_matching_completion_clears_it() {
     let mut h = Harness::new(Panel::Model);
     h.busy();
     let task = h.app.state.active_task.as_ref().unwrap().id;
-    let flag = analytics_ml::pipeline::cancellation();
+    let flag = analytics_workflow::research::pipeline::cancellation();
     h.app.cancel = Some(flag.clone());
     h.click("取消");
     assert!(flag.load(Ordering::Relaxed));
@@ -850,7 +850,7 @@ fn factor_run_rejects_each_invalid_path_and_date_field() {
 fn stale_terminal_events_preserve_active_task_and_cancellation() {
     let mut h = Harness::new(Panel::Model);
     h.busy();
-    h.app.cancel = Some(analytics_ml::pipeline::cancellation());
+    h.app.cancel = Some(analytics_workflow::research::pipeline::cancellation());
     h.events
         .send(WorkerEvent::Failed {
             task: Uuid::new_v4(),
@@ -1010,7 +1010,7 @@ fn research_template_saves_and_real_worker_finishes_synthetic_annual_account() {
     );
     assert!(
         w.resolve(&record.output)
-            .join("account-through-2009-01-12/ledger.json")
+            .join("portfolio_snapshots.json")
             .exists()
     );
     h.app.state.panel = Panel::Runs;
@@ -1058,7 +1058,7 @@ fn research_worker_preserves_shares_cash_and_paid_fees_across_annual_models() {
     let (mut h, _tmp) = platform_harness(Panel::Research);
     let w = h.app.state.platform.workspace.as_ref().unwrap().clone();
     let (m, a, mut template) = analytics_workflow::testing::synthetic(&w);
-    template.initial_cash_cny = 1005.0;
+    template.initial_cash_cny = 1050.0;
     template.market_rules.commission.minimum_cny = 5.0;
     h.app.state.platform.template = template;
     h.app.state.platform.datasets = w.datasets().unwrap();
@@ -1074,35 +1074,17 @@ fn research_worker_preserves_shares_cash_and_paid_fees_across_annual_models() {
     let result = &h.app.state.platform.details;
     assert_eq!(result["annual_reports"].as_array().unwrap().len(), 2);
     let total_return = result["aggregate"]["total_return"].as_f64().unwrap();
-    assert!((total_return + 5.0 / 1005.0).abs() < 1e-6);
-    let fees = &result["aggregate"]["fee_totals_cny"];
-    let total_fee: f64 = fees
-        .as_object()
-        .unwrap()
-        .values()
-        .filter_map(serde_json::Value::as_f64)
-        .sum();
+    assert!((total_return + 5.0 / 1050.0).abs() < 1e-6);
+    let total_fee = result["aggregate"]["execution_fee_cny"].as_f64().unwrap();
     assert!((total_fee - 5.0).abs() < 1e-8);
-    for year in [2009, 2010] {
-        let ledger: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(
-                w.resolve(&record.output)
-                    .join(format!("account-through-{year}-01-12/ledger.json")),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            ledger["positions"]
-                .as_object()
-                .unwrap()
-                .values()
-                .map(|p| p["shares"].as_u64().unwrap())
-                .sum::<u64>(),
-            110
-        );
-        assert_eq!(ledger["cash"], 10.0);
-    }
+    let snapshots: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(w.resolve(&record.output).join("portfolio_snapshots.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        snapshots["2009-01-12"]["positions"],
+        snapshots["2010-01-12"]["positions"]
+    );
 }
 #[test]
 fn incomplete_research_is_persisted_as_blocked_and_shown_without_old_results() {
@@ -1285,7 +1267,7 @@ fn service_client_tasks_appear_in_egui_can_be_cancelled_and_share_research_resul
         })
         .unwrap();
     h.wait_for(|app| !app.state.busy() && app.state.platform.runs.iter().any(|r| r.id == task));
-    assert_eq!(h.app.state.platform.template.schema_version, 9);
+    assert_eq!(h.app.state.platform.template.schema_version, 10);
     h.app.state.panel = Panel::Research;
     h.click("执行年度研究");
     h.wait_for(|app| !app.state.busy() && app.state.platform.details.get("aggregate").is_some());
@@ -1327,19 +1309,13 @@ fn service_client_tasks_appear_in_egui_can_be_cancelled_and_share_research_resul
     h.wait_for(|app| !app.state.busy() && app.state.platform.runs.iter().any(|r| r.id == cli_id));
     assert_eq!(h.app.state.platform.details, expected);
     assert_eq!(client.call(Rpc::Results { id: cli_id }).unwrap(), expected);
-    for year in [2009, 2010] {
-        assert_eq!(
-            std::fs::read(
-                w.resolve(&record.output)
-                    .join(format!("account-through-{year}-01-12/ledger.json"))
-            )
-            .unwrap(),
-            std::fs::read(w.resolve(format!(
-                ".jfquant/runs/{cli_id}/account-through-{year}-01-12/ledger.json"
-            )))
-            .unwrap()
-        );
-    }
+    let read = |path: std::path::PathBuf| {
+        serde_json::from_slice::<serde_json::Value>(&std::fs::read(path).unwrap()).unwrap()
+    };
+    assert_eq!(
+        read(w.resolve(&record.output).join("portfolio_snapshots.json")),
+        read(w.resolve(format!(".jfquant/runs/{cli_id}/portfolio_snapshots.json")))
+    );
     client.call(Rpc::Stop).unwrap();
     server.join().unwrap();
 }

@@ -3,7 +3,7 @@ use crate::{
     state::AppState,
     worker::{WorkerCommand, WorkerHandle},
 };
-use analytics_ml::pipeline::{Cancellation, cancellation};
+use analytics_workflow::research::pipeline::{Cancellation, cancellation};
 use analytics_workflow::{
     DataVersion, ResearchTemplate, RunRecord, RunStatus, WorkflowRequest, Workspace, WorkspaceLease,
 };
@@ -971,10 +971,7 @@ pub fn research_panel(
             if old!=t.factor_set {t.select_factor_set(t.factor_set);}
         });
         crate::quality_ui::controls(ui, &mut t.quality_policy);
-        egui::ComboBox::from_id_salt("account_event_check").selected_text(t.event_check_policy.label()).show_ui(ui,|ui| {
-            for p in [analytics_core::execution::EventCheckPolicy::Provider, analytics_core::execution::EventCheckPolicy::Audited] {ui.selectable_value(&mut t.event_check_policy,p,p.label());}
-        });
-        ui.label("供应商资料模式保留特殊事件覆盖告警；已发现的权益缺项与冲突仍阻止执行。");
+        ui.label("AKQuant：分红与拆股按除权除息日处理；不支持的已知权益事件停止回测，保留模型。");
         ui.collapsing("日期调度：单次 / 滚动 / 手动多折", |ui| {
             let before=serde_json::to_string(&t.schedule).unwrap_or_default();
             crate::schedule_ui::draw(ui,&mut t.schedule);
@@ -983,7 +980,7 @@ pub fn research_panel(
             ui.label("任意train / validation（可为null）/ test日期；滚动支持days/months/years/trading_days及expanding。");
             ui.add(egui::TextEdit::multiline(&mut state.platform.schedule_editor).desired_rows(14).desired_width(f32::INFINITY));
             if ui.button("应用日期设置").clicked(){match serde_json::from_str::<analytics_core::schedule::Schedule>(&state.platform.schedule_editor){Ok(s)=>match s.validate(){Ok(())=>t.schedule=s,Err(e)=>state.platform.error=Some(e)},Err(e)=>state.platform.error=Some(e.to_string())}}
-            ui.checkbox(&mut t.action_policy.subscribe_with_available_cash,"配股：使用可用现金认购（不勾选则明确放弃）");
+
         });
         ui.horizontal(|ui| {
             ui.label("持仓数量");
@@ -1016,22 +1013,13 @@ pub fn research_panel(
                 .show_ui(ui, |ui| {
                     for (mode, label) in [
                         (CommissionMode::Gross, "全佣（含经手及证管费）"),
-                        (CommissionMode::Net, "净佣"),
                         (CommissionMode::AllInclusive, "含过户费全佣"),
                     ] {
                         ui.selectable_value(&mut t.market_rules.commission.mode, mode, label);
                     }
                 });
         });
-        ui.horizontal(|ui| {
-            ui.label("固定研究股息扣税比例");
-            ui.add(
-                egui::DragValue::new(&mut t.dividend_withholding_rate)
-                    .speed(0.01)
-                    .range(0.0..=1.0),
-            );
-            ui.label("默认0为税前；不模拟个人持股期税制");
-        });
+        ui.label("分红使用税前金额；费用只展示上游合计，不模拟个人持股期税。");
         ui.collapsing("训练参数", |ui| {
             egui::Grid::new("research_training").show(ui, |ui| {
                 for key in [
@@ -1176,6 +1164,7 @@ pub fn research_panel(
                     worker,
                     cancel_slot,
                     WorkflowRequest::BacktestResearch {
+                        execution: Some(Box::new(state.platform.template.execution_settings())),
                         event_check_policy: state.platform.template.event_check_policy,
                         training,
                         actions: state.platform.actions.clone(),
@@ -1451,7 +1440,7 @@ fn show_results(ui: &mut egui::Ui, value: &Value) {
         );
     }
     if value.get("aggregate").is_some() {
-        if let Err(error) = analytics_ml::backtest::validate_result(value) {
+        if let Err(error) = analytics_workflow::research::backtest::validate_result(value) {
             ui.colored_label(crate::theme::semantic(ui.ctx()).error, error.to_string());
             return;
         }
@@ -1487,9 +1476,8 @@ fn show_results(ui: &mut egui::Ui, value: &Value) {
                         ui.label(percent(&r["performance"]["max_drawdown"]));
                         ui.label(number(&r["ic"]));
                         ui.label(number(&r["rank_ic"]));
-                        let cost = r["performance"]["fee_totals_cny"]
-                            .as_object()
-                            .map(|o| o.values().filter_map(Value::as_f64).sum::<f64>())
+                        let cost = r["performance"]["execution_fee_cny"]
+                            .as_f64()
                             .unwrap_or(0.0);
                         ui.label(format!("{cost:.2}"));
                         ui.end_row();

@@ -3,16 +3,16 @@
 use analytics_core::{ExportRequest, PageRequest};
 #[cfg(test)]
 use analytics_engine::{DuckDbEngine, QueryEngine};
-#[cfg(test)]
-use analytics_ml::TrainingConfig;
 pub use analytics_workflow::backend::{
     RunSummary, TaskKind, WorkerCommand, WorkerEvent, WorkerHandle,
 };
 #[cfg(test)]
 use analytics_workflow::backend::{Worker, pipeline_error_message};
+#[cfg(test)]
+use analytics_workflow::research::TrainingConfig;
 
 #[cfg(test)]
-use analytics_ml::pipeline::{PipelineError, PipelineRequest};
+use analytics_workflow::research::pipeline::{PipelineError, PipelineRequest};
 
 #[cfg(test)]
 use std::path::PathBuf;
@@ -40,7 +40,7 @@ pub fn spawn_in_workspace(
 mod tests {
     use super::*;
     use analytics_core::{ExportFormat, ScalarValue, SortKey};
-    use analytics_ml::pipeline::cancellation;
+    use analytics_workflow::research::pipeline::cancellation;
     use std::time::{Duration, Instant};
 
     fn collect(rx: &Receiver<WorkerEvent>, task: Uuid) -> Vec<WorkerEvent> {
@@ -354,9 +354,9 @@ mod tests {
             "任务已取消"
         );
         assert_eq!(
-            pipeline_error_message(PipelineError::Ml(analytics_ml::MlError::Native(
-                "training cancelled".into()
-            ))),
+            pipeline_error_message(PipelineError::Ml(
+                analytics_workflow::research::MlError::Native("training cancelled".into())
+            )),
             "任务已取消"
         );
         assert!(
@@ -802,7 +802,7 @@ mod tests {
     fn cancelled_pipeline_reports_cancellation_and_never_emits_artifacts() {
         let dir = tempfile::tempdir().unwrap();
         let (worker, rx) = spawn(egui::Context::default());
-        let cancel = analytics_ml::pipeline::cancellation();
+        let cancel = analytics_workflow::research::pipeline::cancellation();
         cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         let task = Uuid::new_v4();
         worker
@@ -923,7 +923,7 @@ mod tests {
         worker
             .send(WorkerCommand::RunPipeline {
                 task,
-                cancel: analytics_ml::pipeline::cancellation(),
+                cancel: analytics_workflow::research::pipeline::cancellation(),
                 request: PipelineRequest {
                     factor_set: Default::default(),
                     market_path: market,
@@ -969,7 +969,7 @@ mod tests {
                 universe_id: None,
                 output_dir: dir.path().join("retrain"),
                 config,
-                cancel: analytics_ml::pipeline::cancellation(),
+                cancel: analytics_workflow::research::pipeline::cancellation(),
             })
             .unwrap();
         let events = collect(&rx, task);

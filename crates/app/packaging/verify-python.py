@@ -42,7 +42,7 @@ def verify_load_commands(file, root, load, dependencies):
             return inside(root / "bin" / name.removeprefix("@executable_path/"), root)
         raise RuntimeError(f"unsupported Python runtime path: {file}: {name}")
 
-    search_paths = [relative(path + "/") for path in rpaths]
+    search_paths = [relative(path if path.endswith("/") else path + "/") for path in rpaths]
     for index, name in enumerate(dependencies):
         # otool lists LC_ID_DYLIB first; its spelling is not a dependency target.
         if index == 0 and "cmd LC_ID_DYLIB" in load:

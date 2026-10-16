@@ -60,3 +60,8 @@ README updates accompany changes to contracts, artifacts or asynchronous work.
 
 `input_check`：版本化计划/报告、逐字段窗口与两种输入适配、整上下文 Parquet 收据缓存；
 `research/backtest/stages/input_report` 将共享检查嵌入已有 prepare/samples，避免重建训练准入系统。
+
+Daily input dependencies union identical cross-sectional contexts and raw-field intervals before
+materializing observation sets. This preserves disjoint windows, historical membership and
+recursive seeds while avoiding repeated full-pool expansion during real rolling fits.
+Regression compares the optimized sets against the original observation-by-observation algorithm.

@@ -219,6 +219,12 @@ impl Client<'_> {
             }
             let value = parsed.map_err(|_| invalid("hithink_invalid_json"))?;
             if code != 0 {
+                if path == "/api/a-share/corporate-actions/adjustment-factors"
+                    && let Some((_, symbol)) = params.iter().find(|(name, _)| *name == "thscode")
+                    && let Ok(data) = action_payload(&value, symbol)
+                {
+                    return Ok(data);
+                }
                 return Err(invalid(format!("hithink_business_error:{code}")));
             }
             if !value["data"].is_object() {
@@ -729,6 +735,24 @@ pub(crate) fn action_receipt_url(url: &str, code: &str, range: &DateRange) -> bo
             .is_some_and(|(_, path)| format!("/{path}") == suffix);
     matches
 }
+/// Authenticate the action endpoint's explicit no-event response without treating
+/// generic missing data, unknown codes, authentication or permissions as success.
+pub(crate) fn action_payload(value: &Value, code: &str) -> io::Result<Value> {
+    local_symbol(code)?;
+    if value["code"] == 0 && value["data"].is_object() {
+        return Ok(value["data"].clone());
+    }
+    if value["code"] == 3002
+        && value["message"] == format!("No adjustment events for thscode={code}")
+        && value.get("data").is_none_or(Value::is_null)
+    {
+        return Ok(
+            json!({"thscode":code,"ticker":&code[..6],"item":[],"empty_business_code":3002}),
+        );
+    }
+    Err(invalid("hithink_action_response_not_verified"))
+}
+
 fn actions(client: &mut Client<'_>, request: &CollectionRequest) -> io::Result<PathBuf> {
     let mut bundle = crate::corporate_actions::ActionBundle {
         schema_version: 6,
@@ -769,7 +793,7 @@ fn actions(client: &mut Client<'_>, request: &CollectionRequest) -> io::Result<P
                     ],
                 )?;
                 check_identity(&data, &code)?;
-                let records = parse_actions(
+                let (records, mut issues) = parse_action_events(
                     id,
                     &code,
                     &data,
@@ -783,7 +807,10 @@ fn actions(client: &mut Client<'_>, request: &CollectionRequest) -> io::Result<P
                 evidence["source_rule"] = json!("hithink.events/per-share-v1");
                 evidence["request_range"] = json!({"start":request.start,"end":request.end});
                 evidence["events"] = data;
-                let shard = json!({"instrument":id,"history_verified":true,"records":records,"evidence":evidence});
+                for issue in &mut issues {
+                    issue.evidence.push(name.clone());
+                }
+                let shard = json!({"instrument":id,"history_verified":true,"records":records,"execution_issues":issues,"evidence":evidence});
                 save(&saved, &shard)?;
                 let mut names = vec![format!("raw/{name}")];
                 for r in shard["evidence"]["http_receipts"].as_array().unwrap() {
@@ -822,6 +849,14 @@ fn actions(client: &mut Client<'_>, request: &CollectionRequest) -> io::Result<P
                 },
             );
             bundle.actions.extend(records);
+            if let Some(issues) = shard.get("execution_issues") {
+                bundle.execution_issues.extend(
+                    serde_json::from_value::<Vec<crate::execution_data::ExecutionIssue>>(
+                        issues.clone(),
+                    )
+                    .map_err(invalid)?,
+                );
+            }
             if symbol != id {
                 bundle.source_bindings.insert(
                     id.clone(),
@@ -865,12 +900,17 @@ fn actions(client: &mut Client<'_>, request: &CollectionRequest) -> io::Result<P
     Ok(path)
 }
 
-fn parse_actions(
+type ParsedActionEvents = (
+    Vec<analytics_core::execution::CorporateAction>,
+    Vec<crate::execution_data::ExecutionIssue>,
+);
+fn parse_action_events(
     id: &str,
     code: &str,
     data: &Value,
     range: &DateRange,
-) -> io::Result<Vec<analytics_core::execution::CorporateAction>> {
+) -> io::Result<ParsedActionEvents> {
+    let mut issues = vec![];
     let mut dates = BTreeSet::new();
     let mut records = vec![];
     for row in items(data)? {
@@ -884,7 +924,8 @@ fn parse_actions(
         let shares = numeric(&row["per_share_bonus"], false)?
             .ok_or_else(|| invalid("hithink_event_terms_missing"))?;
         if cash == 0. && shares == 0. {
-            return Err(invalid("hithink_event_type_unknown"));
+            issues.push(crate::execution_data::ExecutionIssue {id:format!("hithink-zero:{id}:{ex}"),instrument:id.into(),announced:None,dates:DateRange{start:ex,end:ex},code:"hithink_event_type_unknown".into(),event_category:"unknown".into(),evidence:vec![],message:"HiThink zero-cash zero-bonus event requires independent classification; no rights or dates inferred".into()});
+            continue;
         }
         records.push(analytics_core::execution::CorporateAction {
             id: format!("{id}:{ex}"),
@@ -902,7 +943,17 @@ fn parse_actions(
             ),
         });
     }
-    Ok(records)
+    Ok((records, issues))
+}
+
+#[cfg(test)]
+fn parse_actions(
+    id: &str,
+    code: &str,
+    data: &Value,
+    range: &DateRange,
+) -> io::Result<Vec<analytics_core::execution::CorporateAction>> {
+    Ok(parse_action_events(id, code, data, range)?.0)
 }
 
 #[cfg(test)]
@@ -920,6 +971,21 @@ mod tests {
             start: "2024-01-02".parse().unwrap(),
             end: "2024-01-05".parse().unwrap(),
         }
+    }
+    #[test]
+    fn explicit_empty_actions_and_unknown_zero_events_keep_evidence_semantics() {
+        let empty = json!({"code":3002,"message":"No adjustment events for thscode=600000.SH"});
+        let data = action_payload(&empty, "600000.SH").unwrap();
+        assert!(data["item"].as_array().unwrap().is_empty());
+        assert!(action_payload(&empty, "000001.SZ").is_err());
+        assert!(action_payload(&json!({"code":3002,"message":"no data"}), "600000.SH").is_err());
+        let events = json!({"thscode":"600000.SH","item":[{"ex_date_ms":millis(range().start),"dividend_per_share":0,"per_share_bonus":0},{"ex_date_ms":millis(range().end),"dividend_per_share":0.2,"per_share_bonus":0}]});
+        let (ordinary, issues) =
+            parse_action_events("SH600000", "600000.SH", &events, &range()).unwrap();
+        assert_eq!(ordinary.len(), 1);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].event_category, "unknown");
+        assert!(!issues[0].skipped_by_engine());
     }
     #[test]
     fn codes_exchange_dates_units_null_and_duplicates_are_strict() {
@@ -1056,7 +1122,11 @@ mod tests {
         let mut data = data;
         data["item"][0]["dividend_per_share"] = json!(0);
         data["item"][0]["per_share_bonus"] = json!(0);
-        assert!(parse_actions("SH600000", "600000.SH", &data, &range()).is_err());
+        let (ordinary, issues) =
+            parse_action_events("SH600000", "600000.SH", &data, &range()).unwrap();
+        assert!(ordinary.is_empty());
+        assert_eq!(issues.len(), 1);
+        assert!(!issues[0].skipped_by_engine());
     }
     fn server(replies: Vec<(u16, Value)>) -> (String, std::thread::JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1207,6 +1277,50 @@ mod tests {
         )
         .unwrap();
         assert!(actions(&mut client, &request).is_err());
+    }
+    #[test]
+    fn captured_empty_and_unknown_events_survive_bundle_verification_and_tampering_is_rejected() {
+        for zero in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            fs::create_dir(temp.path().join("raw")).unwrap();
+            let context = TaskContext::default();
+            let body = if zero {
+                json!({"code":0,"data":{"thscode":"600000.SH","ticker":"600000","item":[{"ticker":"600000","ex_date_ms":millis(range().start),"dividend_per_share":0,"per_share_bonus":0}]}})
+            } else {
+                json!({"code":3002,"message":"No adjustment events for thscode=600000.SH"})
+            };
+            let (base, server) = server(vec![(200, body)]);
+            let mut client = Client {
+                key: "fixture-private-hithink-key".into(),
+                root: temp.path(),
+                context: &context,
+                receipts: vec![],
+                test_base: Some(base),
+            };
+            let request = CollectionRequest {
+                provider: Provider::Hithink,
+                adjustment_source: crate::adjustment::AdjustmentSource::HithinkForward,
+                source_bindings: BTreeMap::new(),
+                start: range().start,
+                end: range().end,
+                instruments: ["SH600000".into()].into(),
+                benchmarks: BTreeSet::new(),
+                universes: BTreeSet::new(),
+            };
+            let path = actions(&mut client, &request).unwrap();
+            assert_eq!(server.join().unwrap().len(), 1);
+            let book = crate::corporate_actions::ActionBundle::read(&path).unwrap();
+            assert!(book.actions.is_empty());
+            assert_eq!(book.execution_issues.len(), usize::from(zero));
+            assert!(book.structured_coverage.contains_key("SH600000"));
+            let raw = book
+                .raw_sha256
+                .keys()
+                .find(|name| name.ends_with(".body"))
+                .unwrap();
+            fs::write(temp.path().join("raw").join(raw), b"tampered").unwrap();
+            assert!(crate::corporate_actions::ActionBundle::read(&path).is_err());
+        }
     }
     #[test]
     fn old_providers_cannot_deserialize_and_old_source_policy_has_no_fallback() {

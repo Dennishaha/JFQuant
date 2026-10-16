@@ -1,5 +1,6 @@
 //! Native annual rolling research using independently acquired daily data.
 //! All factor, LightGBM and portfolio work stays on the calling worker thread.
+mod account;
 mod adjustment;
 mod akquant;
 mod data;
@@ -9,6 +10,8 @@ mod predictions;
 /// Shared dated input qualification and audit artifacts.
 pub mod quality;
 mod report;
+/// Read-only verification of completed native research artifacts.
+pub mod verification;
 use crate::research::{
     DenseMatrix, LightGbmPredictor, LightGbmTrainer, Predictor, Trainer, TrainingSplit,
 };
@@ -1526,7 +1529,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         } else {
             "provider-quotations;events-not-training-input".into()
         };
-    let mut execution = serde_json::json!({"unsupported_event_policy":"warn_and_skip","market_content_sha256":market_content_sha256,"runtime_signature":crate::research::worker::runtime_signature(),"dependency_signature":crate::research::worker::dependency_signature(),"engine":"akquant","engine_version":"0.3.66","target_exposure":0.98,"volume_limit_pct":0.1,"trade_unit_policy":"AKQuant lot_size uses board increment; distinct minimum quantity and price-limit rules are not modeled","corporate_action_policy":"ex_date","mode":"akquant_ex_date","factor_set":request.factor_set,"price_basis":request.price_basis,
+    let mut execution = serde_json::json!({"accounting_version":"rust-filled-trade-ledger-v1","event_validation_version":"actual-opening-exposure-v1","reference_precision_policy":"two-decimal-per-ten-compatible-primary-terms-retained","suspension_valuation_policy":"gp29-status-days-v2+dated-current-episode-v1;retain-traded-bars;zero-volume-valuation-only-v2","unsupported_event_policy":"warn_and_skip","market_content_sha256":market_content_sha256,"runtime_signature":crate::research::worker::runtime_signature(),"dependency_signature":crate::research::worker::dependency_signature(),"engine":"akquant","engine_version":"0.3.66","target_exposure":0.98,"volume_limit_pct":0.1,"trade_unit_policy":"AKQuant lot_size uses board increment; distinct minimum quantity and price-limit rules are not modeled","corporate_action_policy":"ex_date","mode":"akquant_ex_date","factor_set":request.factor_set,"price_basis":request.price_basis,
         "quality_policy":request.quality_policy,"quality":quality_snapshot,"quality_sha256":format!("sha256:{:x}",Sha256::digest(serde_json::to_vec(&quality_snapshot)?)),
         "fee_application":"latest_only_for_all_dates", "market_rules":request.market_rules, "initial_cash_cny":request.initial_cash_cny,
 

@@ -2,6 +2,9 @@
 
 import copy
 import unittest
+from contextlib import contextmanager
+from unittest.mock import patch
+from jfquant_collectors import tdx
 
 from jfquant_collectors.tdx import (
     action_references,
@@ -27,6 +30,40 @@ def table():
 
 
 class TdxContracts(unittest.TestCase):
+    def test_empty_actions_still_query_and_capture_independent_gp29(self):
+        calls, responses, emitted = [], [], []
+        class SDK:
+            def get_divid_factors(self, *args):
+                calls.append("actions")
+                responses.append({"ErrorId":"0","Value":[]})
+            def get_trading_dates(self, *args, **kwargs):
+                calls.append("calendar")
+                responses.append({"Date":["20210104"]})
+                return ["20210104"]
+            def get_gpjy_value(self, *args):
+                calls.append("GP29")
+                responses.append({"ErrorId":"0","Value":{"GP29":[]}})
+            def get_more_info(self, *args, **kwargs):
+                calls.append("current_status")
+                responses.append({"ErrorId":"0","Value":{"TPFlag":"1","HqDate":"20220104","StopJYDate_Recent":"20211230"}})
+        @contextmanager
+        def session(*args):
+            yield SDK(), [], responses
+        request = {"start":"2021-01-01","end":"2021-12-31","operation":"actions","instruments":["SH688981"]}
+        with patch.object(tdx, "session", session):
+            tdx.collect(request, lambda event, **value: emitted.append((event, value)))
+        self.assertEqual(calls, ["actions", "calendar", "GP29", "current_status"])
+        shard = next(value for event, value in emitted if event == "action_shard")
+        self.assertEqual(shard["evidence"]["stock_status"]["status"], "captured")
+        self.assertEqual(shard["evidence"]["stock_status"]["current_snapshot"], "captured")
+        self.assertFalse(shard["history_verified"])
+        self.assertEqual(shard["records"], [])
+
+    def test_successful_empty_action_reference_does_not_suppress_auxiliary_status(self):
+        self.assertEqual(action_references({"ErrorId":"0","Error":"","Value":[]}, "2021-01-01", "2021-12-31"), [])
+        with self.assertRaises(ValueError):
+            action_references({"ErrorId":"2","Value":[]}, "2021-01-01", "2021-12-31")
+
     def test_unfilled_units_and_explicit_factor_direction(self):
         data = table()
         raw, factors = bars("SH600000", data, "2020-01-02", "2020-01-03")

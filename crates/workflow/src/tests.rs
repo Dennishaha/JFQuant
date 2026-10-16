@@ -849,7 +849,7 @@ fn independent_training_survives_settlement_gap_and_repaired_backtest_does_not_r
     );
 }
 #[test]
-fn known_execution_conflict_blocks_before_training() {
+fn known_execution_conflict_blocks_on_actual_exposure_before_return_publication() {
     let tmp = tempfile::tempdir().unwrap();
     let w = Workspace::open(tmp.path()).unwrap();
     let (m, a, t) = demo::create(&w).unwrap();
@@ -880,9 +880,14 @@ fn known_execution_conflict_blocks_before_training() {
             audit_only: false,
         },
     );
-    assert!(out.unwrap_err().to_string().contains("data_not_ready"));
+    assert!(
+        out.unwrap_err()
+            .to_string()
+            .contains("execution_event_exposure_unresolved")
+    );
     let p = w.resolve(&run.output);
-    assert!(!p.join("training.json").exists());
+    assert!(p.join("training.json").exists());
+    assert!(p.join("event_exposure_checks.json").exists());
     assert!(!p.join("summary.json").exists());
     assert!(p.join("execution_readiness.json").exists());
 }
@@ -966,6 +971,16 @@ fn supplier_account_policy_can_trade_without_manual_categories_and_audited_stays
                 },
             );
         }
+        // The engine starts in cash. An unresolved event at the first test
+        // session is irrelevant to entitlement even if the stock is later bought.
+        book.execution_issues.push(
+            serde_json::from_value(json!({
+                "id":"opening-cash-event","instrument":book.actions[0].instrument,
+                "announced":null,"dates":{"start":"2009-01-01","end":"2009-01-01"},
+                "code":"source_event_conflict","message":"fixture","evidence":["fixture"]
+            }))
+            .unwrap(),
+        );
         atomic_json(&path, &book).unwrap();
         let a = w.register(&path).unwrap();
         let (_, out) = execute_stage(
@@ -1287,7 +1302,12 @@ fn identified_special_event_warns_and_trades_while_ordinary_conflict_stays_block
             audit_only: false,
         },
     );
-    assert!(result.unwrap_err().to_string().contains("data_not_ready"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("execution_event_exposure_unresolved")
+    );
     assert!(!w.resolve(run.output).join("summary.json").exists());
 }
 

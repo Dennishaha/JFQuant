@@ -17,11 +17,10 @@ def backtest(request, cancelled, emit):
     for date in request.get("signal_dates", []):
         by_date.setdefault(str(date), {})
     pool = request.get("pool", {}).get("intervals", {})
-    quoted = {str(date): set(frame["symbol"]) for date, frame in bars.assign(date=bars["date"].dt.date.astype(str)).groupby("date")}
     actions = request["actions"]
     initial = request["initial_cash"]
     events = []
-    snapshots = {}
+    terminal = {}
     trades_by_day = {}
 
     # Register native actions before engine.run through the public analyzer lifecycle.
@@ -79,11 +78,11 @@ def backtest(request, cancelled, emit):
         def on_after_trading(self, trading_date, timestamp):
             if cancelled.is_set():
                 raise InterruptedError("backtest cancelled")
-            date = str(trading_date)
-            for symbol, quantity in self.positions.items():
-                if quantity and symbol not in quoted.get(date, set()):
-                    raise ValueError(f"execution_valuation_missing: {symbol} {date}; previous close is not substituted")
-            snapshots[str(trading_date)] = {"holdings": sum(q != 0 for q in self.positions.values()), "positions": self.positions, "cash": float(self.cash), "equity": float(self.equity)}
+            # The callback can precede final deferred fills or be dispatched lazily
+            # on the next session. It is not an authoritative closing snapshot.
+
+        def on_stop(self):
+            terminal.update({"positions":dict(self.positions),"cash":float(self.cash),"equity":float(self.equity)})
 
     configs = [aq.InstrumentConfig(symbol=symbol, lot_size=int(lot), sellable_after_days=1, tick_size=0.01) for symbol, lot in request["lot_sizes"].items()]
     config = aq.BacktestConfig(strategy_config=aq.StrategyConfig(initial_cash=initial, commission_rate=request["commission_rate"], min_commission=request["minimum_commission"], stamp_tax_rate=request["stamp_tax"], transfer_fee_rate=request["transfer_fee"], exit_on_last_bar=False, enable_fractional_shares=False, volume_limit_pct=0.1), instruments_config=configs, show_progress=False, timezone="Asia/Shanghai", bootstrap_samples=0)
@@ -94,15 +93,22 @@ def backtest(request, cancelled, emit):
         raise InterruptedError("backtest cancelled")
     output = Path(request["output"])
     (output / "order_events.jsonl").write_text("".join(json.dumps(event, allow_nan=False) + "\n" for event in events))
-    (output / "portfolio_snapshots.json").write_text(json.dumps(snapshots, allow_nan=False))
     curve = result.equity_curve_daily
+    cash = {str(pd.Timestamp(t).date()): float(v) for t, v in result.cash_curve_daily.items()}
+    native_days = {}
+    for timestamp, equity in curve.items():
+        date = str(pd.Timestamp(timestamp).date())
+        if date not in cash:
+            raise ValueError(f"execution_cash_snapshot_missing: {date}")
+        native_days[date] = {"cash":cash[date],"equity":float(equity)}
+    (output / "native_account_daily.json").write_text(json.dumps({"schema_version":1,"days":native_days,"terminal":terminal},allow_nan=False))
     previous = initial
     days = []
     benchmark = request["benchmark_returns"]
     for timestamp, equity in curve.items():
         date = str(pd.Timestamp(timestamp).date())
         totals = trades_by_day.get(date, {"notional": 0.0, "fee": 0.0, "blocked": 0})
-        days.append({"date": date, "net_return": float(equity) / previous - 1, "benchmark_return": benchmark.get(date, 0.0), "turnover": totals["notional"] / previous, "cost": totals["fee"] / previous, "execution_fee_cny": totals["fee"], "holdings": snapshots.get(date, {}).get("holdings", 0), "blocked_orders": totals["blocked"]})
+        days.append({"date": date, "net_return": float(equity) / previous - 1, "benchmark_return": benchmark.get(date, 0.0), "turnover": totals["notional"] / previous, "cost": totals["fee"] / previous, "execution_fee_cny": totals["fee"], "blocked_orders": totals["blocked"]})
         previous = float(equity)
     if not days:
         raise ValueError("AKQuant produced no daily equity observations")

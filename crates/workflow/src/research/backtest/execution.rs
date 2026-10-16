@@ -208,6 +208,13 @@ pub(super) fn event_checks(
                 Some(issue.message.clone()),
                 issue.evidence.clone(),
             );
+            if policy == EventCheckPolicy::Provider && !issue.skipped_by_engine() {
+                c.category = "account_events".into();
+                c.disposition = ProblemDisposition::Warn;
+                c.status = CheckStatus::NotRun;
+                c.message
+                    .push_str("；待实际持仓暴露核验，未受影响不阻断收益发布");
+            }
             if issue.skipped_by_engine() {
                 c.category = "account_events".into();
                 c.disposition = ProblemDisposition::Warn;
@@ -218,6 +225,44 @@ pub(super) fn event_checks(
     }
     checks
 }
+/// Verify actual opening exposure before publishing any portfolio result.
+/// Engine starts in cash; an ex-date trade does not create yesterday's entitlement.
+pub(super) fn exposure_checks(
+    book: &ActionBundle,
+    snapshots: &BTreeMap<Date, serde_json::Value>,
+    range: &DateRange,
+    policy: EventCheckPolicy,
+) -> Vec<serde_json::Value> {
+    let mut checks = Vec::new();
+    let mut previous: Option<&serde_json::Value> = None;
+    let mut previous_date = range.start.pred_opt().unwrap_or(range.start);
+    for (date, snapshot) in snapshots {
+        if !range.contains(*date) {
+            continue;
+        }
+        for issue in &book.execution_issues {
+            if issue.skipped_by_engine()
+                || issue.dates.start > *date
+                || issue.dates.end <= previous_date
+                || issue.dates.end < range.start
+            {
+                continue;
+            }
+            let quantity = previous
+                .and_then(|v| v["positions"][&issue.instrument].as_f64())
+                .unwrap_or(0.);
+            let reference_only = policy == EventCheckPolicy::Provider
+                && issue.code == "tdx_reference_precision_difference";
+            checks.push(serde_json::json!({"date":date,"instrument":issue.instrument,
+                "code":issue.code,"opening_quantity":quantity,"evidence":issue.evidence,
+                "status":if quantity != 0. && !reference_only {"blocked"} else {"unexposed_or_reference_only"}}));
+        }
+        previous = Some(snapshot);
+        previous_date = *date;
+    }
+    checks
+}
+
 pub(super) fn skipped_events(
     book: &ActionBundle,
     scope: &BTreeMap<String, DateRange>,
@@ -331,6 +376,60 @@ mod tests {
     }
     fn book() -> ActionBundle {
         serde_json::from_value(serde_json::json!({"schema_version":5,"downloader":"test","downloaded_at":"2026-01-01T00:00:00Z","source_bindings":{},"coverage":{},"queried_symbols":["SH600000"],"actions":[],"failures":{},"raw_sha256":{},"structured_coverage":{"SH600000":{"dates":{"start":"2012-01-01","end":"2026-12-31"},"source":"fixture","evidence":["raw"]}}})).unwrap()
+    }
+    #[test]
+    fn unresolved_events_require_actual_opening_exposure() {
+        let mut b = book();
+        b.execution_issues.push(
+            serde_json::from_value(serde_json::json!({
+                "id":"event", "instrument":"SH600000", "announced":null,
+                "dates":{"start":"2021-01-04","end":"2021-01-04"},
+                "code":"source_event_conflict","message":"unresolved","evidence":["raw"]
+            }))
+            .unwrap(),
+        );
+        let r = range("2021-01-01", "2021-01-05");
+        let scope = BTreeMap::from([("SH600000".into(), r.clone())]);
+        let checks = event_checks(Some(&b), &scope, EventCheckPolicy::Provider);
+        assert_eq!(checks.last().unwrap().status, CheckStatus::NotRun);
+        assert_eq!(
+            event_checks(Some(&b), &scope, EventCheckPolicy::Audited)
+                .last()
+                .unwrap()
+                .status,
+            CheckStatus::Failed
+        );
+        let mut snapshots = BTreeMap::from([
+            (
+                "2021-01-01".parse().unwrap(),
+                serde_json::json!({"positions":{}}),
+            ),
+            (
+                "2021-01-04".parse().unwrap(),
+                serde_json::json!({"positions":{"SH600000":100}}),
+            ),
+        ]);
+        assert_eq!(
+            exposure_checks(&b, &snapshots, &r, EventCheckPolicy::Provider)[0]["status"],
+            "unexposed_or_reference_only"
+        );
+        snapshots.insert(
+            "2021-01-01".parse().unwrap(),
+            serde_json::json!({"positions":{"SH600000":100}}),
+        );
+        assert_eq!(
+            exposure_checks(&b, &snapshots, &r, EventCheckPolicy::Provider)[0]["status"],
+            "blocked"
+        );
+        b.execution_issues[0].code = "tdx_reference_precision_difference".into();
+        assert_eq!(
+            exposure_checks(&b, &snapshots, &r, EventCheckPolicy::Provider)[0]["status"],
+            "unexposed_or_reference_only"
+        );
+        assert_eq!(
+            exposure_checks(&b, &snapshots, &r, EventCheckPolicy::Audited)[0]["status"],
+            "blocked"
+        );
     }
     #[test]
     fn former_members_do_not_block_and_exit_does_not_end_coverage() {

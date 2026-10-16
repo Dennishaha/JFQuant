@@ -26,7 +26,7 @@ use std::{
 };
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 18;
+pub const PROTOCOL_VERSION: u32 = 19;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TaskRequest {
@@ -191,6 +191,15 @@ pub enum Rpc {
         id: Uuid,
     },
     Cancel {
+        id: Uuid,
+    },
+    RefreshCoverage {
+        id: Uuid,
+        inspect_bars: bool,
+        #[serde(default)]
+        sources: Vec<crate::refresh::ShardSource>,
+    },
+    VerifyResearch {
         id: Uuid,
     },
     Versions,
@@ -407,8 +416,23 @@ impl Server {
                 active.cancel.store(true, Ordering::Relaxed);
                 Ok(json!({"task_id":id,"cancel_requested":true}))
             }
+            Rpc::RefreshCoverage {
+                id,
+                inspect_bars,
+                sources,
+            } => crate::coverage::combined_refresh_report(
+                &self.workspace,
+                id,
+                &sources,
+                inspect_bars,
+            )
+            .map_err(failure),
             Rpc::Versions => {
                 serde_json::to_value(self.workspace.datasets().map_err(failure)?).map_err(failure)
+            }
+            Rpc::VerifyResearch { id } => {
+                crate::research::backtest::verification::report(&self.workspace, id)
+                    .map_err(failure)
             }
             Rpc::ImportRun { path } => serde_json::to_value(
                 self.workspace

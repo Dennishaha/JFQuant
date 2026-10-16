@@ -74,6 +74,16 @@ pub enum DataCommand {
     #[command(subcommand)]
     Sources(SourceCommand),
     Refresh(RefreshArgs),
+    /// Inspect acquisition progress and optional daily historical-member quote coverage.
+    Coverage {
+        #[arg(long)]
+        refresh: Uuid,
+        #[arg(long)]
+        inspect_bars: bool,
+        /// Optional JSON array of additional native workspace/task shard sources.
+        #[arg(long)]
+        sources_manifest: Option<PathBuf>,
+    },
     Compose {
         #[arg(long)]
         market: String,
@@ -206,6 +216,7 @@ pub enum RefreshModeValue {
     Incremental,
     Repair,
     Full,
+    Actions,
 }
 #[derive(Debug, Args)]
 pub struct RefreshArgs {
@@ -225,6 +236,15 @@ pub struct RefreshArgs {
     pub preview: bool,
     #[arg(long)]
     pub resume: Option<Uuid>,
+    /// Number of independently checkpointed security workers (1..8).
+    #[arg(long, default_value_t = 3)]
+    pub workers: usize,
+    /// Import completed compatible security checkpoints; collectors revalidate all hashes.
+    #[arg(long = "reuse-shards-from")]
+    pub reuse_shards_from: Vec<Uuid>,
+    /// JSON array of task UUIDs or {workspace,task_id} native shard sources.
+    #[arg(long)]
+    pub reuse_shards_manifest: Option<PathBuf>,
 }
 #[derive(Debug, Subcommand)]
 pub enum PoolCommand {
@@ -456,6 +476,11 @@ impl QualityOptions {
 
 #[derive(Debug, Subcommand)]
 pub enum ResearchCommand {
+    /// Verify completed result artifacts without rerunning training or simulation.
+    Verify {
+        #[arg(long)]
+        task: Uuid,
+    },
     Demo,
     DemoParquet,
     Preview {
@@ -732,7 +757,32 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
             DataCommand::Sources(SourceCommand::Configure { .. }) => {
                 unreachable!("handled before connecting")
             }
+            DataCommand::Coverage {
+                refresh,
+                inspect_bars,
+                sources_manifest,
+            } => {
+                let sources = sources_manifest
+                    .map(|path| read(&client.root, &path))
+                    .transpose()?
+                    .unwrap_or_default();
+                return client.call(Rpc::RefreshCoverage {
+                    id: refresh,
+                    inspect_bars,
+                    sources,
+                });
+            }
             DataCommand::Refresh(args) => {
+                let mut reuse_shards_from: Vec<_> = args
+                    .reuse_shards_from
+                    .into_iter()
+                    .map(analytics_workflow::refresh::ShardSource::Task)
+                    .collect();
+                if let Some(path) = args.reuse_shards_manifest {
+                    reuse_shards_from.extend(
+                        read::<Vec<analytics_workflow::refresh::ShardSource>>(&client.root, &path)?,
+                    );
+                }
                 let template = ResearchTemplate::read(&resolve(&client.root, &args.template))
                     .map_err(invalid)?;
                 synchronous = args.preview;
@@ -751,11 +801,16 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
                             RefreshModeValue::Full => {
                                 analytics_workflow::refresh::RefreshMode::Full
                             }
+                            RefreshModeValue::Actions => {
+                                analytics_workflow::refresh::RefreshMode::Actions
+                            }
                         },
                         provider: args.provider.map(Into::into),
                         end: args.end.map(|s| s.parse().map_err(invalid)).transpose()?,
                         preview: args.preview,
                         resume: args.resume,
+                        workers: args.workers,
+                        reuse_shards_from,
                     }),
                 })
             }
@@ -985,6 +1040,9 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
         },
         Command::Model(ModelCommand::Artifacts { id }) => return client.call(Rpc::Results { id }),
         Command::Research(command) => match *command {
+            ResearchCommand::Verify { task } => {
+                return client.call(Rpc::VerifyResearch { id: task });
+            }
             ResearchCommand::Preview {
                 actions,
                 template,

@@ -32,9 +32,17 @@ class RuntimeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "order/schema"):
                 predict({"model": str(p/"model.txt"), "matrix": str(p/"wrong.parquet"), "output": str(p/"prediction.parquet"), "contributions": False}, {})
 
-    def run_backtest(self, root, actions=(), signals=True, opening_gap=False, initial_cash=100000., reference_drop=0.):
+    def run_backtest(self, root, actions=(), signals=True, opening_gap=False, initial_cash=100000., reference_drop=0., zero_volume_dates=(), rotate=False):
         dates = pd.bdate_range("2020-12-28", periods=8).date
         rows = [{"date": str(d), "symbol": s, "open": 10., "high": 10., "low": 10., "close": 10., "volume": 10000000.} for d in dates for s in ("SH600000", "SZ000001")]
+        if rotate:
+            for row in rows:
+                price = 10. + list(dates).index(pd.Timestamp(row["date"]).date()) * (0.2 if row["symbol"] == "SH600000" else 0.3)
+                for field in ("open","high","low","close"):
+                    row[field] = price
+        for row in rows:
+            if row["symbol"] == "SH600000" and row["date"] in zero_volume_dates:
+                row["volume"] = 0.
         if opening_gap:
             for row in rows:
                 if row["date"] > str(dates[0]):
@@ -52,9 +60,39 @@ class RuntimeTests(unittest.TestCase):
                             row[field] /= float(event["value"])
         pq.write_table(pa.Table.from_pylist(rows), root/"bars.parquet")
         scores = [{"date": str(d), "symbol": s, "score": -0.5 if s=="SH600000" else -1.} for d in dates for s in ("SH600000", "SZ000001")] if signals else []
+        if rotate:
+            for score in scores:
+                index = list(dates).index(pd.Timestamp(score["date"]).date())
+                score["score"] = float((score["symbol"] == "SH600000") == (index % 2 == 0))
         pq.write_table(pa.Table.from_pylist(scores, schema=pa.schema([("date",pa.string()),("symbol",pa.string()),("score",pa.float64())])), root/"scores.parquet")
-        result = backtest({"bars": str(root/"bars.parquet"), "signals": str(root/"scores.parquet"), "signal_dates": [str(d) for d in dates], "output": str(root), "initial_cash": initial_cash, "top_n": 1, "rebalance_days": 20, "commission_rate": 0.00025, "minimum_commission": 5., "stamp_tax": 0.0005, "transfer_fee": 0.00001, "lot_sizes": {"SH600000":100,"SZ000001":100}, "actions": list(actions), "benchmark_returns": {str(d): 0. for d in dates}}, threading.Event(), lambda *a,**k: None)
+        result = backtest({"bars": str(root/"bars.parquet"), "signals": str(root/"scores.parquet"), "signal_dates": [str(d) for d in dates], "output": str(root), "initial_cash": initial_cash, "top_n": 1, "rebalance_days": 1 if rotate else 20, "commission_rate": 0.00025, "minimum_commission": 5., "stamp_tax": 0.0005, "transfer_fee": 0.00001, "lot_sizes": {"SH600000":100,"SZ000001":100}, "actions": list(actions), "benchmark_returns": {str(d): 0. for d in dates}}, threading.Event(), lambda *a,**k: None)
         events = [json.loads(line) for line in (root/"order_events.jsonl").read_text().splitlines()]
+        # Test-only oracle for the Rust ledger boundary: dated native cash/equity
+        # must agree with known fixture fills, ex-date terms and raw closes.
+        native=json.loads((root/"native_account_daily.json").read_text())
+        positions,snapshots,ledger_cash={},{},initial_cash
+        closes={(row["date"],row["symbol"]):row["close"] for row in rows}
+        for day in result["days"]:
+            date=day["date"]
+            for action in actions:
+                if action["date"]==date:
+                    if action["kind"]=="Dividend":
+                        ledger_cash+=positions.get(action["symbol"],0.)*float(action["value"])
+                    if action["kind"]=="Split":
+                        positions[action["symbol"]]=positions.get(action["symbol"],0.)*float(action["value"])
+            for event in events:
+                if event["date"]==date and event["filled_quantity"]:
+                    direction=1 if event["side"]=="buy" else -1
+                    positions[event["instrument"]]=positions.get(event["instrument"],0.)+event["filled_quantity"]*direction
+                    ledger_cash-=direction*event["filled_quantity"]*event["price"]+event["fee"]
+            positions={s:q for s,q in positions.items() if abs(q)>1e-8}
+            state=dict(cash=ledger_cash,equity=ledger_cash+sum(q*closes[(date,s)] for s,q in positions.items()),positions=dict(positions),holdings=len(positions))
+            snapshots[date]=state
+            day["holdings"]=len(positions)
+        self.assertEqual(native["terminal"]["positions"],positions)
+        self.assertAlmostEqual(native["terminal"]["cash"],ledger_cash,places=7)
+        self.assertAlmostEqual(native["terminal"]["equity"],state["equity"],places=7)
+        (root/"portfolio_snapshots.json").write_text(json.dumps(snapshots))
         return result, events
 
     def test_next_open_negative_scores_fees_and_cross_year_holdings(self):
@@ -68,6 +106,29 @@ class RuntimeTests(unittest.TestCase):
             self.assertTrue(all(d["holdings"]==1 for d in result["days"][1:]))
             self.assertAlmostEqual(sum(e["fee"] for e in fills), sum(d["execution_fee_cny"] for d in result["days"]))
             self.assertFalse(any(e["side"]=="sell" for e in fills))
+
+    def test_valuation_only_zero_volume_marks_never_fill_orders(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, baseline = self.run_backtest(Path(tmp))
+            self.assertTrue(any(e["status"] == "filled" and e["date"] == "2020-12-29" for e in baseline))
+            _, events = self.run_backtest(Path(tmp), zero_volume_dates=("2020-12-29", "2020-12-30"))
+            fills = [e for e in events if e["status"] == "filled"]
+            self.assertTrue(all(e["date"] not in ("2020-12-29", "2020-12-30") for e in fills))
+
+    def test_rotating_portfolio_closing_snapshots_match_dated_native_equity_and_raw_marks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            result,events=self.run_backtest(root,rotate=True)
+            snapshots=json.loads((root/"portfolio_snapshots.json").read_text())
+            bars=pq.read_table(root/"bars.parquet").to_pylist()
+            closes={(bar["date"],bar["symbol"]):bar["close"] for bar in bars}
+            self.assertGreater(sum(e["side"]=="sell" for e in events),1)
+            equity=100000.
+            for day in result["days"]:
+                equity*=1+day["net_return"]
+                snapshot=snapshots[day["date"]]
+                self.assertAlmostEqual(snapshot["cash"]+sum(q*closes[(day["date"],s)] for s,q in snapshot["positions"].items()),snapshot["equity"],places=7)
+            self.assertTrue(any(abs(snapshots[d["date"]]["equity"]-json.loads((root/"native_account_daily.json").read_text())["days"][d["date"]]["equity"])>0.01 for d in result["days"]))
 
     def test_no_signals_does_not_claim_trades(self):
         with tempfile.TemporaryDirectory() as tmp:

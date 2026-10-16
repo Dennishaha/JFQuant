@@ -103,6 +103,10 @@ pub(super) fn qualify_with_registry(
                     .map(ToString::to_string)
             })
             .collect();
+        // HiThink declares supplier-forward prices, raw share volume and a null
+        // VWAP; it has no independent factor. Those contract nulls still enter
+        // factor execution as null, but must not erase the security's membership.
+        let supplier_prices = dataset.uses_supplier_prices(id);
         let mut retained = vec![];
         for day in lo..hi {
             if day % 256 == 0 {
@@ -114,6 +118,9 @@ pub(super) fn qualify_with_registry(
             }
             let mut missing = 0u16;
             for (i, r) in data.iter().enumerate() {
+                if supplier_prices && matches!(fields[i], "vwap" | "factor") {
+                    continue;
+                }
                 if fields[i] == "vwap" && data[4].as_ref().ok().and_then(|f| f.get(day)) == Some(0.)
                 {
                     continue;
@@ -283,4 +290,116 @@ pub(super) fn qualify_with_registry(
         decisions,
         daily_counts,
     })
+}
+
+#[cfg(test)]
+mod supplier_tests {
+    use super::*;
+    use analytics_storage::{
+        adjustment::{AdjustmentBasis, AdjustmentRecord, HITHINK_NORMALIZATION},
+        daily::{DailyBar, DailyManifest, write_bars},
+    };
+    #[test]
+    fn supplier_contract_nulls_keep_membership_but_missing_prices_still_exclude_dates() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("bars")).unwrap();
+        std::fs::create_dir_all(root.join("adjustments")).unwrap();
+        let calendar: Vec<Date> = ["2024-01-02", "2024-01-03", "2024-01-04"]
+            .map(|s| s.parse().unwrap())
+            .into();
+        let range = DateRange {
+            start: calendar[0],
+            end: calendar[2],
+        };
+        let id = "SH600000";
+        let pool = PoolMembership {
+            coverage: range.clone(),
+            intervals: [(id.into(), vec![range.clone()])].into(),
+        };
+        let adjustment = AdjustmentRecord {
+            schema_version: 3,
+            instrument_id: id.into(),
+            source_symbol: id.into(),
+            basis: AdjustmentBasis::SupplierForward {
+                verified_through: range.end,
+            },
+        };
+        crate::atomic_json(&root.join("adjustments/SH600000.json"), &adjustment).unwrap();
+        let manifest = DailyManifest {
+            schema_version: 6,
+            calendar: calendar.clone(),
+            universes: [("csi300".into(), pool.clone())].into(),
+            instruments: [id.into()].into(),
+            price_basis: "unadjusted".into(),
+            normalization: HITHINK_NORMALIZATION.into(),
+            adjustment_anchors: [(id.into(), adjustment.anchor(range.start).unwrap())].into(),
+        };
+        crate::atomic_json(&root.join("daily_manifest.json"), &manifest).unwrap();
+        let mut bars: Vec<_> = calendar
+            .iter()
+            .map(|day| DailyBar {
+                instrument_id: id.into(),
+                trade_date: *day,
+                open: Some(10.),
+                high: Some(11.),
+                low: Some(9.),
+                close: Some(10.),
+                volume: Some(1000.),
+                amount: Some(10000.),
+                adj_open: Some(8.),
+                adj_high: Some(9.),
+                adj_low: Some(7.),
+                adj_close: Some(8.),
+            })
+            .collect();
+        write_bars(&root.join("bars/SH600000.parquet"), &bars).unwrap();
+        let data = DailyDataset::open(root).unwrap();
+        for strictness in [
+            ResearchStrictness::Strict,
+            ResearchStrictness::AllowMissing,
+            ResearchStrictness::QualifiedOnly,
+        ] {
+            let policy = ResearchQualityPolicy {
+                strictness,
+                min_valid_feature_ratio: 0.,
+                min_labeled_rows: 1,
+            };
+            let quality = qualify(&data, &pool, &policy, &range, &["alpha_012".into()]).unwrap();
+            assert_eq!(quality.effective_pool, pool);
+            assert!(quality.decisions.is_empty());
+        }
+        assert!(
+            data.field(id, "vwap")
+                .unwrap()
+                .values
+                .iter()
+                .all(Option::is_none)
+        );
+        assert!(
+            data.field(id, "factor")
+                .unwrap()
+                .values
+                .iter()
+                .all(Option::is_none)
+        );
+        bars[1].open = None;
+        bars[1].adj_open = None;
+        write_bars(&root.join("bars/SH600000.parquet"), &bars).unwrap();
+        let data = DailyDataset::open(root).unwrap();
+        let policy = ResearchQualityPolicy {
+            strictness: ResearchStrictness::QualifiedOnly,
+            min_valid_feature_ratio: 0.,
+            min_labeled_rows: 1,
+        };
+        let quality = qualify(&data, &pool, &policy, &range, &["alpha_012".into()]).unwrap();
+        assert!(!quality.effective_pool.on(calendar[1]).contains(id));
+        assert!(quality.effective_pool.on(calendar[0]).contains(id));
+        assert!(
+            quality
+                .decisions
+                .iter()
+                .all(|d| !d.message.contains("factor") && !d.message.contains("vwap"))
+        );
+    }
 }

@@ -14,7 +14,7 @@ fn positive(p: f64) -> bool {
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EventCheckPolicy {
-    /// Accept complete structured histories, retaining unknown special-category coverage warnings.
+    /// Accept complete structured histories; unresolved events require actual account exposure validation.
     #[default]
     Provider,
     /// Require independently audited coverage for every event category.
@@ -24,7 +24,7 @@ impl EventCheckPolicy {
     /// User-facing execution policy, shared by App and CLI.
     pub fn label(self) -> &'static str {
         match self {
-            Self::Provider => "供应商资料；普通事件异常停止，特殊事件警告",
+            Self::Provider => "供应商资料；实际持仓事件异常停止，特殊事件警告",
             Self::Audited => "要求全类别覆盖核验",
         }
     }

@@ -416,6 +416,7 @@ pub fn data_panel(
                 ui.horizontal(|ui| {
                     for (label, mode, preview) in [
                         ("刷新预览",analytics_workflow::refresh::RefreshMode::Incremental,true),
+                        ("更新行动",analytics_workflow::refresh::RefreshMode::Actions,false),
                         ("补新数据",analytics_workflow::refresh::RefreshMode::Incremental,false),
                         ("修复缺口",analytics_workflow::refresh::RefreshMode::Repair,false),
                         ("完整重取",analytics_workflow::refresh::RefreshMode::Full,false),
@@ -425,7 +426,7 @@ pub fn data_panel(
                 });
                 if let Some((mode,preview))=refresh {
                     request=Some(WorkflowRequest::RefreshData {request:Box::new(analytics_workflow::refresh::RefreshRequest {
-                        template:Box::new(state.platform.template.clone()),market:state.platform.market.clone(),actions:(!state.platform.actions.is_empty()).then(||state.platform.actions.clone()),mode,provider:None,end:None,preview,resume:None,
+                        template:Box::new(state.platform.template.clone()),market:state.platform.market.clone(),actions:if mode==analytics_workflow::refresh::RefreshMode::Actions {None} else {(!state.platform.actions.is_empty()).then(||state.platform.actions.clone())},mode,provider:None,end:None,preview,resume:None,workers:3,reuse_shards_from:vec![],
                     })});
                 }
             });

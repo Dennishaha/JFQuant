@@ -3,6 +3,8 @@
 #![warn(missing_docs)]
 /// Shared computation worker and plain-data protocol.
 pub mod backend;
+/// Acquisition progress, historical coverage and explicit availability-pool proposals.
+pub mod coverage;
 /// Explicit synthetic demo generator.
 pub mod demo;
 /// Immutable date-effective stock pools.
@@ -1179,7 +1181,8 @@ fn execute_scoped(
             } else {
                 Vec::new()
             };
-            details = json!({"instrument":instrument,"events":events,"source_failure":book.failures.get(instrument),"issues":book.execution_issues.iter().filter(|i| i.instrument == *instrument).map(|i| Ok(json!({"issue":i,"sha256":signature(i)?}))).collect::<Result<Vec<_>>>()?,"reconciliation_evidence":book.raw_sha256.get("reconciliation-v1.json"),"documents":documents});
+            let stock_status=book.execution_data.as_ref().map(|data|json!({"schema_version":data.schema_version,"days":data.suspensions.get(instrument),"capability":data.capabilities.get(&format!("{}:{instrument}",analytics_storage::tdx_status::RULE)),"not_a_complete_status_history":true}));
+            details = json!({"instrument":instrument,"events":events,"source_failure":book.failures.get(instrument),"issues":book.execution_issues.iter().filter(|i| i.instrument == *instrument).map(|i| Ok(json!({"issue":i,"sha256":signature(i)?}))).collect::<Result<Vec<_>>>()?,"reconciliation_evidence":book.raw_sha256.get("reconciliation-v1.json"),"documents":documents,"stock_status":stock_status});
         }
         WorkflowRequest::ReconcileActions {
             actions,

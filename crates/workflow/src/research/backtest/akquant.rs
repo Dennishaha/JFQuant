@@ -4,6 +4,33 @@ use analytics_storage::corporate_actions::ActionBundle;
 use arrow_array::{ArrayRef, Float64Array, RecordBatch, StringArray};
 use arrow_schema::{Field, Schema};
 use std::sync::Arc;
+
+#[derive(Debug, PartialEq)]
+enum BarUse {
+    Quote,
+    Valuation,
+    Missing,
+}
+fn bar_use(status: bool, prices: &[Option<f64>], volume: Option<f64>) -> BarUse {
+    let complete = prices
+        .iter()
+        .all(|p| p.is_some_and(|v| v.is_finite() && v > 0.));
+    if volume.is_some_and(|v| v.is_finite() && v > 0.) {
+        return if complete {
+            BarUse::Quote
+        } else {
+            BarUse::Missing
+        };
+    }
+    if status && (volume == Some(0.) || (volume.is_none() && prices.iter().all(Option::is_none))) {
+        return BarUse::Valuation;
+    }
+    if complete && volume == Some(0.) {
+        BarUse::Quote
+    } else {
+        BarUse::Missing
+    }
+}
 pub(super) fn table(path: &Path, names: &[&str], columns: Vec<ArrayRef>) -> Result<()> {
     let schema = Arc::new(Schema::new(
         names
@@ -64,7 +91,11 @@ pub(super) fn simulate(
     let mut ids = Vec::new();
     let mut values = vec![Vec::<Option<f64>>::new(); 5];
     let mut lots = BTreeMap::new();
+    let mut suspension_marks = Vec::new();
+    let mut suspension_traded_days = Vec::new();
+    let mut execution_closes = BTreeMap::new();
     for id in &symbols {
+        let mut closes = vec![None; dataset.calendar.len()];
         let lot = if id == &request.benchmark {
             1
         } else {
@@ -83,6 +114,13 @@ pub(super) fn simulate(
             .map(|n| dataset.research_raw_field(id, n, true))
             .collect::<std::io::Result<Vec<_>>>()?;
         let volume = dataset.research_raw_volume(id, true)?;
+        let mut last_close = dataset
+            .calendar
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, date)| **date < start)
+            .find_map(|(day, _)| fields[3].get(day).filter(|p| p.is_finite() && *p > 0.));
         for (day, date) in dataset
             .calendar
             .iter()
@@ -90,20 +128,41 @@ pub(super) fn simulate(
             .filter(|(_, d)| **d >= start && **d <= end)
         {
             analytics_core::task::TaskContext::current().check()?;
-            let prices = fields.iter().map(|f| f.get(day)).collect::<Vec<_>>();
-            // Missing bars are absent, never synthesized into tradable zero-price bars.
-            if prices
-                .iter()
-                .any(|p| p.is_none_or(|v| !v.is_finite() || v <= 0.))
-            {
+            let mut prices = fields.iter().map(|f| f.get(day)).collect::<Vec<_>>();
+            let status_day = analytics_storage::tdx_status::suspension_day(book, id, *date);
+            let volume = if id == &request.benchmark {
+                Some(0.)
+            } else {
+                volume.get(day)
+            };
+            let usage = bar_use(status_day, &prices, volume);
+            if usage == BarUse::Missing {
                 continue;
             }
-            let vol = if id == &request.benchmark {
+            let suspended = usage == BarUse::Valuation;
+            if status_day && !suspended && volume.is_some_and(|v| v > 0.) {
+                suspension_traded_days.push(serde_json::json!({"instrument":id,"date":date,"volume":volume,"policy":"GP29 interval may include intraday suspension; retain real quoted bar"}));
+            }
+            if suspended {
+                // No anchor remains a missing quote; only an actual holding may
+                // turn that into an account valuation failure in the worker.
+                let Some(mut mark) = last_close else { continue };
+                for action in book.actions.iter().filter(|a| {
+                    a.instrument == *id
+                        && a.ex_date == *date
+                        && super::execution::supported_distribution(a)
+                }) {
+                    mark = action.reference_price(mark)?;
+                }
+                prices = vec![Some(mark); 4];
+                suspension_marks.push(serde_json::json!({"instrument":id,"date":date,"mark":mark,"volume":0,"policy":"GP29-confirmed-suspension-day;no-observed-trading;valuation-only;not-a-market-quote"}));
+            }
+            last_close = prices[3];
+            closes[day] = prices[3];
+            let vol = if suspended || id == &request.benchmark {
                 0.
             } else {
-                volume
-                    .get(day)
-                    .ok_or_else(|| format!("execution_volume_missing: {id} {date}"))?
+                volume.ok_or_else(|| format!("execution_volume_missing: {id} {date}"))?
             };
             dates.push(date.to_string());
             ids.push(id.clone());
@@ -112,7 +171,16 @@ pub(super) fn simulate(
             }
             values[4].push(Some(vol));
         }
+        execution_closes.insert(id.clone(), closes);
     }
+    save(
+        request.output.join("suspension_valuation_marks.json"),
+        &suspension_marks,
+    )?;
+    save(
+        request.output.join("suspension_traded_days.json"),
+        &suspension_traded_days,
+    )?;
     let mut warnings=scope.iter().filter(|(id, dates)| !super::execution::audited_coverage(book,id,dates)).map(|(id,_)|serde_json::json!({"instrument":id,"code":"special_event_coverage_unknown","message":"AKQuant event-date simulation; complete special-event coverage not verified"})).collect::<Vec<_>>();
     warnings.extend(super::execution::skipped_events(book, &scope));
     fs::write(
@@ -135,15 +203,6 @@ pub(super) fn simulate(
         }
         if event.shares() > 0. {
             actions.push(serde_json::json!({"symbol":event.instrument,"date":event.ex_date,"kind":"Split","value":event.share_multiplier()?}));
-        }
-    }
-    for issue in &book.execution_issues {
-        if !issue.skipped_by_engine()
-            && scope
-                .get(&issue.instrument)
-                .is_some_and(|r| issue.dates.start <= r.end && issue.dates.end >= r.start)
-        {
-            return Err(format!("execution_event_issue: {issue:?}").into());
         }
     }
     let benchmark = dataset.research_field(&request.benchmark, "close", false)?;
@@ -201,8 +260,45 @@ pub(super) fn simulate(
         analytics_core::task::TaskContext::current().cancel,
     );
     let _ = fs::remove_file(bars);
-    let result = result?;
-    Ok(serde_json::from_value(result["days"].clone())?)
+    result?;
+    save(
+        output.join("execution_actions.json"),
+        &serde_json::json!({"schema_version":1,"actions":actions}),
+    )?;
+    let reconciled = super::account::reconcile(
+        &output,
+        &dataset.calendar,
+        range,
+        request.initial_cash_cny,
+        &execution_closes,
+        &actions,
+        &benchmark_returns,
+    )?;
+    save(
+        output.join("engine_curve_differences.json"),
+        &reconciled.differences,
+    )?;
+    let snapshots = reconciled.snapshots;
+    save(output.join("portfolio_snapshots.json"), &snapshots)?;
+    for date in dataset.calendar.iter().filter(|d| range.contains(**d)) {
+        let positions = snapshots
+            .get(date)
+            .and_then(|v| v["positions"].as_object())
+            .ok_or("execution_exposure_snapshot_missing")?;
+        if positions
+            .values()
+            .any(|v| v.as_f64().is_none_or(|q| !q.is_finite()))
+        {
+            return Err("execution_exposure_snapshot_invalid".into());
+        }
+    }
+    let exposure =
+        super::execution::exposure_checks(book, &snapshots, range, request.event_check_policy);
+    save(output.join("event_exposure_checks.json"), &exposure)?;
+    if exposure.iter().any(|c| c["status"] == "blocked") {
+        return Err("execution_event_exposure_unresolved: actual opening position intersects an unresolved event; provisional simulation is not a published return".into());
+    }
+    Ok(reconciled.days)
 }
 
 pub(super) fn validate_rules(request: &ResearchRequest) -> Result<()> {
@@ -249,4 +345,23 @@ pub(super) fn validate_rules(request: &ResearchRequest) -> Result<()> {
         return Err("unsupported_fee_mapping: mixed exchange stamp/transfer rates".into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod bar_tests {
+    use super::*;
+    #[test]
+    fn traded_partial_bars_and_unknown_volume_never_become_suspension_marks() {
+        let complete = [Some(10.); 4];
+        let partial = [Some(10.), None, Some(9.), Some(9.5)];
+        assert_eq!(bar_use(true, &complete, Some(100.)), BarUse::Quote);
+        assert_eq!(bar_use(true, &partial, Some(100.)), BarUse::Missing);
+        assert_eq!(bar_use(true, &complete, None), BarUse::Missing);
+        assert_eq!(bar_use(true, &partial, None), BarUse::Missing);
+        assert_eq!(bar_use(true, &[None; 4], None), BarUse::Valuation);
+        assert_eq!(bar_use(false, &[None; 4], None), BarUse::Missing);
+        assert_eq!(bar_use(true, &partial, Some(0.)), BarUse::Valuation);
+        assert_eq!(bar_use(false, &complete, Some(0.)), BarUse::Quote);
+        assert_eq!(bar_use(true, &complete, Some(-1.)), BarUse::Missing);
+    }
 }

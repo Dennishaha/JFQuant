@@ -132,6 +132,9 @@ run_cli research backtest --training "$training_id" --actions "$actions" --templ
 backtest_id="$(plutil -extract task_id raw -o - "$check_root/backtest-submit.json")"
 run_cli jobs wait "$backtest_id" --timeout 60 > "$check_root/backtest-wait.json"
 [ "$(plutil -extract results.schema_version raw -o - "$check_root/backtest-wait.json")" = 16 ]
+run_cli research verify --task "$backtest_id" > "$check_root/backtest-verification.json"
+[ "$(plutil -extract status raw -o - "$check_root/backtest-verification.json")" = consistent ]
+[ "$(plutil -extract fills_on_valuation_only_rows raw -o - "$check_root/backtest-verification.json")" = 0 ]
 
 # Exercise provider training on the retained Qlib reader; HiThink has separate REST fixtures.
 run_cli research demo > "$check_root/qlib-demo-submit.json"

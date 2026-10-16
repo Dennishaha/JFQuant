@@ -309,11 +309,29 @@ def collect(request, report):
             if request["operation"] == "actions":
                 tqs.get_divid_factors(symbol(code), start, end)
                 candidates = action_references(responses[-1], start, end)
+                # Status is auxiliary evidence; unavailable status must not erase
+                # a successfully captured ordinary-action history.
+                status = {"status": "unavailable"}
+                try:
+                    calendar_start = (dt.date.fromisoformat(start) - dt.timedelta(days=3660)).isoformat()
+                    tqs.get_trading_dates("SH", calendar_start, end, count=-1)
+                    tqs.get_gpjy_value([symbol(code)], ["GP29"], start, end)
+                    status = {"status": "captured", "rule": "tdxaidata.gp29-resumption-v1", "calendar_start": calendar_start}
+                except Exception:
+                    status = {"status": "unavailable"}
+                # A dated current suspension can prove only the latest ongoing
+                # episode retrospectively, including episodes without a resume.
+                try:
+                    tqs.get_more_info(symbol(code), field_list=["TPFlag", "HqDate", "StopJYDate_Recent"])
+                    status["current_snapshot"] = "captured"
+                except Exception:
+                    status["current_snapshot"] = "unavailable"
                 evidence = {
                     "provider": "tdxaidata",
                     "sdk_version": VERSION,
                     "sdk_receipts": receipts[:],
                     "source_rule": "tdxaidata.get_divid_factors/reference-v1",
+                    "stock_status": status,
                     "request_range": {"start": start, "end": end},
                     "candidates": candidates,
                     "history_complete": False,
@@ -433,6 +451,10 @@ def check(request, report):
 def action_references(value, start, end):
     """Native dividend reference only; never synthesize settlement dates or pad fields."""
     data = payload(value)
+    # A successful native empty array has no dividend references. It does not
+    # establish account coverage, and must not suppress an independent GP29 query.
+    if data.get("Value") == [] and "Date" not in data and "Type" not in data:
+        return []
     dates, kinds, values = (data.get(k) for k in ("Date", "Type", "Value"))
     if not all(isinstance(v, list) for v in (dates, kinds, values)) or not len(dates) == len(
         kinds

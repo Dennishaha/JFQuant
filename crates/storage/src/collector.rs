@@ -207,6 +207,8 @@ pub(crate) fn verify_http_receipts(
                             | "GetSTOCKInStr"
                             | "GetCWDATAInStr"
                             | "GetSpecZSGPInStr"
+                            | "GetProDataInStr"
+                            | "GetMoreInfoInStr"
                     )
                 )
             {
@@ -587,6 +589,15 @@ fn collect_with_command(
         .filter(|id| !receipts.contains_key(*id))
         .cloned()
         .collect();
+    // A completed, authenticated checkpoint must not launch Python with an empty
+    // pending list: that produces an empty completion calendar. Rebuild derived
+    // metadata from its original verified completion and keep the evidence intact.
+    let completion_path = staging.join("raw/complete-sources-structured.json");
+    if pending.is_empty() && completion_path.is_file() {
+        let complete: Value =
+            serde_json::from_slice(&fs::read(completion_path)?).map_err(invalid)?;
+        return finish_collection(request, staging, operation, receipts, complete);
+    }
     let cache = staging.join("cache");
     fs::create_dir_all(&cache)?;
     let mut log = fs::OpenOptions::new()
@@ -1036,7 +1047,7 @@ fn collect_with_command(
     if request.provider == Provider::Tdxaidata && complete["versions"]["tdxaidata"] != "1.2.2" {
         return Err(invalid("tdx_sdk_version_missing"));
     }
-    let completion_receipts = verify_http_receipts(staging, &complete["evidence"])?;
+    verify_http_receipts(staging, &complete["evidence"])?;
     complete["dependencies_sha256"] = json!(dependencies_signature());
     complete["python_runtime"] =
         serde_json::from_slice(include_bytes!("../collectors/python-runtime.lock.json"))
@@ -1046,6 +1057,21 @@ fn collect_with_command(
         &complete,
     )?;
 
+    finish_collection(request, staging, operation, receipts, complete)
+}
+
+fn finish_collection(
+    request: &CollectionRequest,
+    staging: &Path,
+    operation: &str,
+    receipts: BTreeMap<String, String>,
+    complete: Value,
+) -> io::Result<PathBuf> {
+    verify_collector_identity(&complete)?;
+    if request.provider == Provider::Tdxaidata && complete["versions"]["tdxaidata"] != "1.2.2" {
+        return Err(invalid("tdx_sdk_version_missing"));
+    }
+    let completion_receipts = verify_http_receipts(staging, &complete["evidence"])?;
     if receipts.keys().cloned().collect::<BTreeSet<_>>() != request.instruments {
         let mut failures = BTreeMap::<String, Value>::new();
         for id in request
@@ -1595,6 +1621,59 @@ if mode=='after_complete': print(json.dumps({'version':12,'event':'progress','me
         assert_eq!(
             crate::market_view::tree_hash(&base).unwrap(),
             view.base_sha256
+        );
+    }
+    #[test]
+    fn complete_checkpoint_resume_preserves_calendar_without_starting_a_process() {
+        let temp = tempfile::tempdir().unwrap();
+        let stage = temp.path().join("stage");
+        let request = request();
+        let context = TaskContext::current();
+        collect_with_command(
+            &request,
+            &stage,
+            &context,
+            "market",
+            command(temp.path(), "ok"),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let original = fs::read(stage.join("raw/complete-sources-structured.json")).unwrap();
+        let manifest = fs::read(stage.join("market/daily_manifest.json")).unwrap();
+        collect_with_command(
+            &request,
+            &stage,
+            &context,
+            "market",
+            Command::new("/nonexistent-must-not-start"),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(stage.join("market/daily_manifest.json")).unwrap(),
+            manifest
+        );
+        assert_eq!(
+            fs::read(stage.join("raw/complete-sources-structured.json")).unwrap(),
+            original
+        );
+        let mut complete: Value = serde_json::from_slice(&original).unwrap();
+        complete["collector_signature"] = json!("tampered");
+        save(
+            &stage.join("raw/complete-sources-structured.json"),
+            &complete,
+        )
+        .unwrap();
+        assert!(
+            collect_with_command(
+                &request,
+                &stage,
+                &context,
+                "market",
+                Command::new("/nonexistent-must-not-start"),
+                Duration::from_secs(2)
+            )
+            .is_err()
         );
     }
     #[test]

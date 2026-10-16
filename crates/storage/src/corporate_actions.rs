@@ -499,7 +499,10 @@ impl ActionBundle {
                                             .as_str()
                                             .and_then(|n| fs::read(root.join("raw").join(n)).ok())
                                             .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-                                            .is_some_and(|v| v["code"] == 0 && v["data"] == *events)
+                                            .is_some_and(|v| {
+                                                crate::hithink::action_payload(&v, &code)
+                                                    .is_ok_and(|data| data == *events)
+                                            })
                                 })
                             });
                     if !captured {
@@ -551,6 +554,38 @@ impl ActionBundle {
                         }
                         crate::collector::verify_http_receipts(root, &receipt["evidence"])?;
                     }
+                }
+            }
+        }
+        if let Some(data) = &bundle.execution_data {
+            for (key, capability) in &data.capabilities {
+                let Some(id) = key.strip_prefix(&format!("{}:", crate::tdx_status::RULE)) else {
+                    continue;
+                };
+                analytics_core::pool::validate_instrument(id).map_err(invalid)?;
+                let name = capability["structured"]
+                    .as_str()
+                    .ok_or_else(|| invalid("status structured receipt missing"))?;
+                if Path::new(name).file_name().and_then(|s| s.to_str()) != Some(name)
+                    || !bundle.raw_sha256.contains_key(name)
+                {
+                    return Err(invalid("status evidence binding missing"));
+                }
+                let range: analytics_core::DateRange =
+                    serde_json::from_value(capability["range"].clone()).map_err(invalid)?;
+                range.validate().map_err(invalid)?;
+                let symbol = capability["source_symbol"]
+                    .as_str()
+                    .ok_or_else(|| invalid("status symbol missing"))?;
+                let shard: Value = serde_json::from_slice(&fs::read(root.join("raw").join(name))?)
+                    .map_err(invalid)?;
+                if shard["instrument"] != id || capability["status"] != "available" {
+                    return Err(invalid("status identity mismatch"));
+                }
+                let expected =
+                    crate::tdx_status::from_evidence(root, &shard["evidence"], symbol, &range)?;
+                if data.suspensions.get(id) != Some(&expected) {
+                    return Err(invalid("status normalization/evidence mismatch"));
                 }
             }
         }

@@ -60,9 +60,9 @@ impl ExecutionIssue {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionData {
-    /// Execution-data format 1.
+    /// Execution-data format 1, or 2 for suspension-day intervals with intraday boundaries.
     pub schema_version: u32,
-    /// Known suspension dates; values full_day or intraday.
+    /// Known suspension dates: full_day, intraday, or suspension_day (format 2).
     pub suspensions: BTreeMap<String, BTreeMap<Date, String>>,
     /// Exact daily (lower, upper) raw-CNY limits.
     pub limits: BTreeMap<String, BTreeMap<Date, [f64; 2]>>,
@@ -74,7 +74,7 @@ pub struct ExecutionData {
 impl ExecutionData {
     /// Reject invalid values before indexing or publishing a snapshot.
     pub fn validate(&self) -> std::io::Result<()> {
-        if self.schema_version != 1
+        if !matches!(self.schema_version, 1 | 2)
             || self
                 .limits
                 .values()
@@ -85,11 +85,10 @@ impl ExecutionData {
                 .values()
                 .flat_map(|v| v.values())
                 .any(|v| !v.is_finite() || *v <= 0.)
-            || self
-                .suspensions
-                .values()
-                .flat_map(|v| v.values())
-                .any(|v| !matches!(v.as_str(), "full_day" | "intraday"))
+            || self.suspensions.values().flat_map(|v| v.values()).any(|v| {
+                !(matches!(v.as_str(), "full_day" | "intraday")
+                    || (self.schema_version == 2 && v == "suspension_day"))
+            })
         {
             return Err(std::io::Error::other("invalid_execution_data"));
         }

@@ -636,6 +636,28 @@ fn current_research_cli_and_api_share_results_and_reject_old_imports_without_mod
         .unwrap()
     };
     assert_eq!(snapshot(&id.to_string()), snapshot(&cli_id.to_string()));
+    let verification = s.json(&["research", "verify", "--task", &cli_id.to_string()]);
+    assert_eq!(verification["status"], "consistent");
+    assert_eq!(
+        verification["event_simulation_complete"],
+        expected["event_simulation_complete"]
+    );
+    assert_eq!(verification["fills_on_valuation_only_rows"], 0);
+    assert_eq!(
+        verification,
+        analytics_workflow::research::backtest::verification::report(&w, cli_id).unwrap()
+    );
+    let daily_path = w.resolve(format!(".jfquant/runs/{cli_id}/daily.json"));
+    let daily_bytes = std::fs::read(&daily_path).unwrap();
+    let mut bad_daily: Value = serde_json::from_slice(&daily_bytes).unwrap();
+    bad_daily[0]["execution_fee_cny"] = json!(999.);
+    std::fs::write(&daily_path, serde_json::to_vec(&bad_daily).unwrap()).unwrap();
+    assert!(
+        !s.cli(&["research", "verify", "--task", &cli_id.to_string()])
+            .status
+            .success()
+    );
+    std::fs::write(&daily_path, daily_bytes).unwrap();
     let imported = s.json(&["jobs", "import", &format!(".jfquant/runs/{id}")]);
     let import_id = imported["id"].as_str().unwrap();
     assert_eq!(s.json(&["jobs", "results", import_id]), expected);
@@ -995,10 +1017,11 @@ fn stopping_idle_service_then_immediately_reconnecting_does_not_parse_empty_json
 }
 
 #[test]
-fn execution_data_rejections_exit_three_before_training_with_diagnostics() {
+fn audited_execution_data_rejections_exit_three_before_training_with_diagnostics() {
     let s = Sandbox::new();
     let w = Workspace::open(&s.client.root).unwrap();
-    let (m, a, t) = analytics_workflow::demo::create(&w).unwrap();
+    let (m, a, mut t) = analytics_workflow::demo::create(&w).unwrap();
+    t.event_check_policy = analytics_core::execution::EventCheckPolicy::Audited;
     let path = w.resolve(a.path);
     let mut book = analytics_storage::corporate_actions::ActionBundle::read(&path).unwrap();
     book.execution_issues

@@ -1469,6 +1469,25 @@ fn date_preview_and_manual_fold_editor_submit_shared_requests_without_training()
 }
 
 #[test]
+fn structured_action_inspection_uses_existing_workflow_without_announcement_manifest() {
+    let (mut h, _tmp) = platform_harness(Panel::Research);
+    let w = h.app.state.platform.workspace.as_ref().unwrap().clone();
+    let (m, a, t) = analytics_workflow::testing::synthetic(&w);
+    h.app.state.platform.template = t;
+    h.app.state.platform.datasets = w.datasets().unwrap();
+    h.app.state.platform.market = m.id;
+    h.app.state.platform.actions = a.id.clone();
+    h.app.state.platform.action_review_instrument = "SH600030".into();
+    h.ctx.all_styles_mut(|s| s.animation_time = 0.0);
+    h.click("公司行动：查看证据与审计修订");
+    h.click("加载事件、结构化字段与公告证据");
+    let command = h.commands.recv().unwrap();
+    assert!(
+        matches!(command, WorkerCommand::ExecuteWorkflow {request,..} if matches!(&*request, analytics_workflow::WorkflowRequest::InspectActions {actions,instrument,evidence_manifest:None} if actions==&a.id && instrument=="SH600030"))
+    );
+}
+
+#[test]
 fn research_stage_buttons_submit_shared_tasks_without_identity_controls() {
     let (mut h, _tmp) = platform_harness(Panel::Research);
     let w = h.app.state.platform.workspace.as_ref().unwrap().clone();

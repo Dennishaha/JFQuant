@@ -7,6 +7,23 @@ from jfquant_collectors.announcements import attachment_url, collect, extract_ca
 
 
 class AnnouncementTests(unittest.TestCase):
+    def test_final_rights_documents_are_field_evidence_but_proposals_and_reminders_are_not(self):
+        for title in ("A股配股发行公告", "配股发行结果公告", "配股股份变动及获配股票上市公告书"):
+            self.assertEqual(extract_candidates("", title)["stage"], "implementation")
+        for title in ("配股预案", "A股配股提示性公告", "配股发行公告草案"):
+            self.assertEqual(extract_candidates("", title)["stage"], "unverified")
+
+    def test_broker_directory_namespace_is_opaque_but_code_and_venue_remain_checked(self):
+        from jfquant_collectors.announcements import security_identity
+        table = [{"code": "600958", "category": "A股", "orgId": "qsgn0000065"}]
+        with patch("jfquant_collectors.announcements.security_directory", return_value=table):
+            self.assertEqual(security_identity("SH600958"), "qsgn0000065")
+            with self.assertRaises(ValueError):
+                security_identity("SZ600958")
+        for org in ("qsgn/0000065", "qsgn0000065-extra", "qsgn65"):
+            with patch("jfquant_collectors.announcements.security_directory", return_value=[{**table[0], "orgId": org}]), self.assertRaises(ValueError):
+                security_identity("SH600958")
+
     def test_pdf_spaces_and_share_listing_wording_keep_exact_evidence(self):
         text = "股权登记日：2016 年 6 月22 日\n新增无限售条件流通股份上市日：2016 年 6 月 24 日"
         result = extract_candidates(text, "利润分配及资本公积转增股本实施公告")

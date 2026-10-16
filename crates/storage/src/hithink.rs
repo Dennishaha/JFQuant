@@ -522,7 +522,7 @@ pub fn collect_with_calendar(
     if request.start > effective_end {
         return Err(invalid("hithink_no_completed_trading_date"));
     }
-    let identity = json!({"schema_version":1,"operation":operation,"request":request,"collector_protocol":12,"collector_signature":producer_signature(),"calendar":calendar,"effective_end":effective_end,"normalization":HITHINK_NORMALIZATION});
+    let identity = json!({"schema_version":1,"operation":operation,"request":request,"collector_protocol":13,"collector_signature":producer_signature(),"calendar":calendar,"effective_end":effective_end,"normalization":HITHINK_NORMALIZATION});
     let owner = root.join("owner.json");
     if owner.exists() {
         if serde_json::from_slice::<Value>(&fs::read(&owner)?).map_err(invalid)? != identity {
@@ -755,7 +755,8 @@ pub(crate) fn action_payload(value: &Value, code: &str) -> io::Result<Value> {
 
 fn actions(client: &mut Client<'_>, request: &CollectionRequest) -> io::Result<PathBuf> {
     let mut bundle = crate::corporate_actions::ActionBundle {
-        schema_version: 6,
+        field_facts: Default::default(),
+        schema_version: 7,
         source_bindings: Default::default(),
         structured_coverage: Default::default(),
         execution_issues: vec![],
@@ -879,7 +880,7 @@ fn actions(client: &mut Client<'_>, request: &CollectionRequest) -> io::Result<P
             client.receipts.clear();
         }
     }
-    let complete = json!({"collector_signature":producer_signature(),"provider":"hithink","collector_protocol":12});
+    let complete = json!({"collector_signature":producer_signature(),"provider":"hithink","collector_protocol":13});
     save(
         &client.root.join("raw/complete-sources-structured.json"),
         &complete,

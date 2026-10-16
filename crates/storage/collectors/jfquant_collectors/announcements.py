@@ -51,6 +51,10 @@ def security_identity(symbol):
     org = matches[0]["orgId"]
     if re.fullmatch(r"99[0-9]{8}", org):
         return org
+    # Broker issuers use directory-issued qsgn IDs; this namespace does not
+    # encode a trading venue. The canonical code/venue was validated above.
+    if re.fullmatch(r"qsgn[0-9]{7}", org):
+        return org
     if (symbol.startswith("SH") and not org.startswith("gssh")) or (
         symbol.startswith("SZ") and not org.startswith("gssz")
     ):
@@ -71,7 +75,7 @@ def attachment_url(path):
 def extract_candidates(text, title):
     stage = (
         "implementation"
-        if re.search(r"实施|清算|交割结果|换股结果|终止上市|摘牌|证券代码.*变更", title)
+        if re.search(r"实施|清算|交割结果|换股结果|终止上市|摘牌|证券代码.*变更|配股发行公告|配股发行结果公告|配股股份变动及获配股票上市公告书", title)
         else "unverified"
     )
     if re.search(r"预案|草案|摘要|提示性|风险提示|可能|拟|股东大会|董事会", title):
@@ -263,7 +267,7 @@ def collect(request, report):
                         "pdf_sha256": "sha256:" + hashlib.sha256(pdf.content).hexdigest(),
                         "text": name + ".txt",
                         "text_sha256": "sha256:" + hashlib.sha256(text.encode()).hexdigest(),
-                        "parser_version": "cninfo-candidates-v3",
+                        "parser_version": "cninfo-candidates-v4",
                         "candidates": extract_candidates(text, title),
                     }
                 )

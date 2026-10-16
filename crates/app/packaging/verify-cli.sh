@@ -23,6 +23,16 @@ run_cli jobs results "$demo_id" > "$check_root/demo.json"
 recipe="$(plutil -extract details.demo_template_path raw -o - "$check_root/demo.json")"
 market="$(plutil -extract data.id raw -o - "$check_root/demo.json")"
 actions="$(plutil -extract details.demo_actions raw -o - "$check_root/demo.json")"
+run_cli data inspect-actions --actions "$actions" --instrument SH600000 > "$check_root/field-inspection-submit.json"
+inspection_id="$(plutil -extract task_id raw -o - "$check_root/field-inspection-submit.json")"
+run_cli jobs wait "$inspection_id" --timeout 30 > "$check_root/field-inspection.json"
+"$app/Contents/Resources/python/bin/python3" -I -B - "$check_root/field-inspection.json" <<'PY_FIELDS'
+import json, sys
+with open(sys.argv[1]) as handle:
+    details = json.load(handle)["results"]["details"]
+assert details["instrument"] == "SH600000"
+assert "structured_fields" in details and details["structured_fields"] is None
+PY_FIELDS
 run_cli data sources list > "$check_root/sources.json"
 for role in quotes actions members calendar; do
   [ "$(plutil -extract "result.results.details.policy.priorities.$role.0" raw -o - "$check_root/sources.json")" = hithink ]

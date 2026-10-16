@@ -285,7 +285,7 @@ fn verify_collector_identity(message: &Value) -> io::Result<()> {
 }
 /// Current evidence owner only; obsolete provider checkpoints must be reacquired.
 pub(crate) fn reviewed_collection_owner(owner: &Value) -> bool {
-    owner["collector_protocol"] == 12
+    owner["collector_protocol"] == 13
         && owner["collector_signature"] == collector_signature()
         && owner["dependencies_sha256"] == dependencies_signature()
         && owner["python_runtime_sha256"]
@@ -298,7 +298,7 @@ pub(crate) fn reviewed_collection_owner(owner: &Value) -> bool {
 /// Verify an immutable current producer receipt without authorizing old implementations.
 pub(crate) fn verify_coefficient_producer(message: &Value, _provider: Provider) -> io::Result<u32> {
     verify_collector_identity(message)?;
-    Ok(12)
+    Ok(13)
 }
 /// Resolve the package runtime first; development builds may use the documented local build.
 pub fn runtime() -> io::Result<PathBuf> {
@@ -516,7 +516,7 @@ fn collect_with_command(
     fs::create_dir_all(staging.join("market/adjustments"))?;
     fs::create_dir_all(staging.join("raw"))?;
     let owner = staging.join("owner.json");
-    let mut owner_value = json!({"operation":operation,"request":request,"collector_protocol":12,"normalization":NORMALIZATION,
+    let mut owner_value = json!({"operation":operation,"request":request,"collector_protocol":13,"normalization":NORMALIZATION,
         "collector_signature":collector_signature(),"dependencies_sha256":dependencies_signature(),
         "python_runtime_sha256":format!("sha256:{:x}",Sha256::digest(include_bytes!("../collectors/python-runtime.lock.json")))});
     if operation == "reconcile_actions" {
@@ -673,7 +673,7 @@ fn collect_with_command(
         log.sync_all()
     });
     let mut payload = serde_json::to_value(request).map_err(invalid)?;
-    payload["version"] = json!(12);
+    payload["version"] = json!(13);
     payload["expected_collector_signature"] = json!(collector_signature());
     payload["operation"] = json!(operation);
     if operation == "reconcile_actions" {
@@ -786,7 +786,7 @@ fn collect_with_command(
                             }
                         }
                     }
-                    if msg["version"] != 12 {
+                    if msg["version"] != 13 {
                         return Err(invalid("collector_protocol_mismatch"));
                     }
                     if completed.is_some() {
@@ -1239,6 +1239,7 @@ fn finish_collection(
     }
     if operation == "actions" {
         let mut book = crate::corporate_actions::ActionBundle {
+            field_facts: Default::default(),
             structured_coverage: Default::default(),
             execution_issues: Vec::new(),
             execution_data: None,
@@ -1327,6 +1328,7 @@ fn finish_collection(
                 }
             }
         }
+        crate::corporate_actions::facts::refresh(&mut book, staging)?;
         save(&staging.join("actions.json"), &book)?;
         crate::corporate_actions::ActionBundle::read(&staging.join("actions.json"))?;
         return Ok(staging.join("actions.json"));
@@ -1411,7 +1413,7 @@ fn finish_collection(
     }
     save(
         &staging.join("jfquant_source.json"),
-        &json!({"downloader":"JFQuant analytics-storage","independent_download":true,"snapshot_verified":true,"exception_bindings":!request.source_bindings.is_empty(),"provider":request.provider,"request":request,"evidence_sha256":evidence_hashes,"collector_protocol":12,"versions":complete["versions"],"collector_signature":complete["collector_signature"],"python_runtime":serde_json::from_slice::<Value>(include_bytes!("../collectors/python-runtime.lock.json")).map_err(invalid)?,"calendar_source":if request.provider==Provider::Tdxaidata {"tdxaidata.get_trading_dates"} else {"unsupported"},"dependencies_sha256":format!("sha256:{:x}",Sha256::digest(include_bytes!("../collectors/requirements.lock"))),"price_basis":manifest.price_basis,"normalization":manifest.normalization,"adjustment_source":request.adjustment_source,"adjustment_anchors":manifest.adjustment_anchors}),
+        &json!({"downloader":"JFQuant analytics-storage","independent_download":true,"snapshot_verified":true,"exception_bindings":!request.source_bindings.is_empty(),"provider":request.provider,"request":request,"evidence_sha256":evidence_hashes,"collector_protocol":13,"versions":complete["versions"],"collector_signature":complete["collector_signature"],"python_runtime":serde_json::from_slice::<Value>(include_bytes!("../collectors/python-runtime.lock.json")).map_err(invalid)?,"calendar_source":if request.provider==Provider::Tdxaidata {"tdxaidata.get_trading_dates"} else {"unsupported"},"dependencies_sha256":format!("sha256:{:x}",Sha256::digest(include_bytes!("../collectors/requirements.lock"))),"price_basis":manifest.price_basis,"normalization":manifest.normalization,"adjustment_source":request.adjustment_source,"adjustment_anchors":manifest.adjustment_anchors}),
     )?;
     Ok(staging.join("market"))
 }
@@ -1481,8 +1483,8 @@ r=json.loads(sys.stdin.readline());mode=sys.argv[1]
 open('collector.pid','w').write(str(os.getpid()))
 versions={'tdxaidata':'1.2.2','python':'3.12.15'}
 identity=r['expected_collector_signature'] if mode!='bad_identity' else 'wrong code'
-if mode!='missing_identity': print(json.dumps({'version':12,'event':'ready','collector_signature':identity,'versions':versions}),flush=True)
-print(json.dumps({'version':12,'event':'progress','message':'ready'}),flush=True)
+if mode!='missing_identity': print(json.dumps({'version':13,'event':'ready','collector_signature':identity,'versions':versions}),flush=True)
+print(json.dumps({'version':13,'event':'progress','message':'ready'}),flush=True)
 if mode=='timeout': time.sleep(30)
 if mode=='crash': sys.exit(1)
 if mode=='bad_protocol': print(json.dumps({'version':0,'event':'complete'}),flush=True);sys.exit(0)
@@ -1492,15 +1494,15 @@ if 'SH600000' in r['instruments']:
  open('raw/sdk-fixture.body','wb').write(body)
  evidence={'provider':'tdxaidata','sdk_version':'1.2.2','sdk_receipts':[{'kind':'sdk_native_response','sdk':'tdxaidata','version':'1.2.2','function':'GetHISDATsInStr','filename':'sdk-fixture.body','sha256':'sha256:'+hashlib.sha256(body).hexdigest()}],'kind':'structured_library_response','http_receipts':[{'filename':'http-fixture.body','sha256':'sha256:'+hashlib.sha256(body).hexdigest(),'url':'https://example.test/history'}]}
  if r['operation']=='actions':
-  print(json.dumps({'version':12,'event':'action_shard','instrument':'SH600000','history_verified':True,'records':[],'evidence':evidence}),flush=True)
+  print(json.dumps({'version':13,'event':'action_shard','instrument':'SH600000','history_verified':True,'records':[],'evidence':evidence}),flush=True)
  b={'instrument_id':'SH600000','trade_date':'2020-01-02','open':10.,'high':11.,'low':9.,'close':10.,'adj_open':10.,'adj_high':11.,'adj_low':9.,'adj_close':10.,'volume':1000.,'amount':10000.}
  adjustment={'schema_version':3,'instrument_id':'SH600000','source_symbol':'SH600000','basis':{'kind':'explicit','source':'tdx_forward','source_url':'tdxaidata:get_market_data:none:ForwardFactor','verified_through':r['end'],'points':[{'effective_date':'1900-01-01','factor':'2'}]}}
  if r['operation']=='coefficients': adjustment['basis']['points'].append({'effective_date':'2020-01-03','factor':'4'})
- if r['operation']=='coefficients': print(json.dumps({'version':12,'event':'adjustment_shard','instrument':'SH600000','adjustment':adjustment,'evidence':evidence}),flush=True)
- if r['operation']=='market': print(json.dumps({'version':12,'event':'shard','instrument':'SH600000','bars':[b],'adjustment':adjustment,'evidence':evidence}),flush=True)
+ if r['operation']=='coefficients': print(json.dumps({'version':13,'event':'adjustment_shard','instrument':'SH600000','adjustment':adjustment,'evidence':evidence}),flush=True)
+ if r['operation']=='market': print(json.dumps({'version':13,'event':'shard','instrument':'SH600000','bars':[b],'adjustment':adjustment,'evidence':evidence}),flush=True)
 if mode=='partial': sys.exit(1)
-print(json.dumps({'version':12,'event':'complete','collector_signature':r['expected_collector_signature'],'calendar':['2020-01-02','2020-01-03'],'universes':{},'versions':versions}),flush=True)
-if mode=='after_complete': print(json.dumps({'version':12,'event':'progress','message':'late'}),flush=True)
+print(json.dumps({'version':13,'event':'complete','collector_signature':r['expected_collector_signature'],'calendar':['2020-01-02','2020-01-03'],'universes':{},'versions':versions}),flush=True)
+if mode=='after_complete': print(json.dumps({'version':13,'event':'progress','message':'late'}),flush=True)
 "#).unwrap();
         let mut c = Command::new(runtime().unwrap());
         c.args(["-I", "-B", "-u"]).arg(script).arg(mode);

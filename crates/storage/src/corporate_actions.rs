@@ -1,6 +1,7 @@
 //! Immutable company-action bundles and evidence validation. Incomplete dates stay null.
 //! Provider success is recorded separately from execution eligibility.
 pub mod execution_index;
+pub mod facts;
 pub mod reconcile;
 pub mod review;
 
@@ -51,6 +52,9 @@ pub struct EventCoverage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActionBundle {
+    /// Replayed structured field facts, distinct from executable event terms.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub field_facts: BTreeMap<String, facts::FactReport>,
     /// Complete structured queries accepted by the supplier execution policy.
     #[serde(default)]
     pub structured_coverage: BTreeMap<String, crate::execution_data::StructuredCoverage>,
@@ -188,12 +192,12 @@ impl ActionBundle {
     }
 
     fn validate_identity(&self) -> io::Result<()> {
-        if !matches!(self.schema_version, 5 | 6)
+        if !matches!(self.schema_version, 5..=7)
             || (self.downloader != "JFQuant analytics-storage corporate-actions"
                 && self.downloader != "JFQuant analytics-workflow synthetic-demo-v1")
         {
             return Err(invalid(
-                "unsupported_data_format: action bundle requires supported format 5/6 and known source",
+                "unsupported_data_format: action bundle requires supported format 5/6/7 and known source",
             ));
         }
         analytics_core::source_map::reject_removed_sources(
@@ -332,7 +336,7 @@ impl ActionBundle {
     /// Read without silently upgrading a historical schema.
     pub fn read(path: &Path) -> io::Result<Self> {
         let raw: Value = serde_json::from_slice(&fs::read(path)?).map_err(invalid)?;
-        if raw["schema_version"] == 6
+        if matches!(raw["schema_version"].as_u64(), Some(6 | 7))
             && raw["actions"].as_array().is_none_or(|rows| {
                 rows.iter()
                     .any(|a| !a["cash_per_share"].is_string() || !a["shares_per_share"].is_string())
@@ -376,7 +380,7 @@ impl ActionBundle {
             }
         }
         bundle.validate_identity()?;
-        if bundle.schema_version == 6 {
+        if bundle.schema_version >= 6 {
             let root = path
                 .parent()
                 .ok_or_else(|| invalid("missing action root"))?;
@@ -589,6 +593,17 @@ impl ActionBundle {
                 }
             }
         }
+        if bundle.schema_version < 7 && !bundle.field_facts.is_empty() {
+            return Err(invalid("field facts require format 7"));
+        }
+        if bundle.schema_version == 7 && facts::derive(&bundle, root)? != bundle.field_facts {
+            return Err(invalid(
+                "structured field facts differ from original evidence",
+            ));
+        }
+        if bundle.schema_version == 7 {
+            review::verify_structured_revisions(&bundle, root)?;
+        }
         Ok(bundle)
     }
 }
@@ -603,6 +618,7 @@ mod removed_source_tests {
         let raw = br#"{"provider":"hithink","receipts":[{"url":"https://money.finance.sina.com.cn/history"}]}"#;
         fs::write(root.path().join("raw/receipt.json"), raw).unwrap();
         let book = ActionBundle {
+            field_facts: Default::default(),
             schema_version: 5,
             downloader: "JFQuant analytics-storage corporate-actions".into(),
             downloaded_at: "2026-10-15T00:00:00Z".into(),

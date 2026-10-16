@@ -309,6 +309,14 @@ def collect(request, report):
             if request["operation"] == "actions":
                 tqs.get_divid_factors(symbol(code), start, end)
                 candidates = action_references(responses[-1], start, end)
+                rights_fields = {}
+                for field in ("GP41", "GP43"):
+                    before = len(responses)
+                    try:
+                        tqs.get_gpjy_value([symbol(code)], [field], start, end)
+                        rights_fields[field] = "captured" if len(responses) > before else "unavailable"
+                    except (ValueError, TypeError, OSError, RuntimeError, AttributeError, KeyError, IndexError, ctypes.ArgumentError):
+                        rights_fields[field] = "failed"
                 # Status is auxiliary evidence; unavailable status must not erase
                 # a successfully captured ordinary-action history.
                 status = {"status": "unavailable"}
@@ -317,14 +325,14 @@ def collect(request, report):
                     tqs.get_trading_dates("SH", calendar_start, end, count=-1)
                     tqs.get_gpjy_value([symbol(code)], ["GP29"], start, end)
                     status = {"status": "captured", "rule": "tdxaidata.gp29-resumption-v1", "calendar_start": calendar_start}
-                except Exception:
+                except (ValueError, TypeError, OSError, RuntimeError, AttributeError, KeyError, IndexError, ctypes.ArgumentError):
                     status = {"status": "unavailable"}
                 # A dated current suspension can prove only the latest ongoing
                 # episode retrospectively, including episodes without a resume.
                 try:
                     tqs.get_more_info(symbol(code), field_list=["TPFlag", "HqDate", "StopJYDate_Recent"])
                     status["current_snapshot"] = "captured"
-                except Exception:
+                except (ValueError, TypeError, OSError, RuntimeError, AttributeError, KeyError, IndexError, ctypes.ArgumentError):
                     status["current_snapshot"] = "unavailable"
                 evidence = {
                     "provider": "tdxaidata",
@@ -332,6 +340,8 @@ def collect(request, report):
                     "sdk_receipts": receipts[:],
                     "source_rule": "tdxaidata.get_divid_factors/reference-v1",
                     "stock_status": status,
+                    "rights_fields": rights_fields,
+                    "acquired_at": dt.datetime.now(dt.UTC).isoformat(),
                     "request_range": {"start": start, "end": end},
                     "candidates": candidates,
                     "history_complete": False,

@@ -2,7 +2,7 @@
 
 仅负责固定 `tdxaidata` 原生SDK、独立巨潮实施公告和离线行动核对。HiThink由Rust直接HTTP接入。公共任务、数据校验、不可变发布由Rust负责；完整接口与命令见[采集组件](../README.md)。
 
-`__main__` 每进程一个任务，JSON Lines协议12；stdout专用于协议，原生printf和诊断进入stderr。启动及完成核对源码签名、CPython3.12.15和tdxaidata1.2.2。签名覆盖全部白名单模块，修改后必须重建包内运行时。
+`__main__` 每进程一个任务，JSON Lines协议13；stdout专用于协议，原生printf和诊断进入stderr。启动及完成核对源码签名、CPython3.12.15和tdxaidata1.2.2。签名覆盖全部白名单模块，修改后必须重建包内运行时。
 
 `tdx.py`在SDK填充前保留原生字节及哈希。原价强制none/fill_data=False，成交量为股，万元金额转元；ForwardFactor按共同观察日归一化并与送配参考核对。Key只在私有子进程环境及0700临时SDK目录使用，结束/取消清理。
 
@@ -15,3 +15,5 @@ crates/app/packaging/build-collector.sh
 DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-storage
 uvx ruff check crates/storage/collectors
 ```
+
+TDX行动分片增加独立GP41/GP43原文请求及获取时间，字段解释、每十股比例、总量单位和跨事件关联由Rust facts模块执行；不在Python自动生成交收条款。单字段失败不会覆盖普通事件或GP29。巨潮qsgn机构ID按目录身份接受，仍校验证券市场。验收：包内Python运行 `-m unittest discover -s crates/storage/collectors/tests`。

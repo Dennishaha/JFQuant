@@ -93,6 +93,7 @@ pub fn create(w: &Workspace) -> Result<(DataVersion, DataVersion, ResearchTempla
         })
         .to_vec();
     let mut book = ActionBundle {
+        field_facts: Default::default(),
         structured_coverage: Default::default(),
         execution_issues: Vec::new(),
         execution_data: None,

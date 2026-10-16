@@ -872,7 +872,7 @@ pub fn research_panel(
     });
     ui.add_enabled_ui(enabled, |ui| {
             ui.horizontal(|ui|{ui.label("证券");ui.text_edit_singleline(&mut state.platform.action_review_instrument);ui.label("公告manifest");ui.text_edit_singleline(&mut state.platform.action_evidence_manifest);});
-            if ui.button("加载原事件、哈希与公告候选").clicked(){submit(state,worker,cancel_slot,WorkflowRequest::InspectActions{actions:state.platform.actions.clone(),instrument:state.platform.action_review_instrument.clone(),evidence_manifest:if state.platform.action_evidence_manifest.trim().is_empty(){None}else{Some(PathBuf::from(state.platform.action_evidence_manifest.trim()))}});}
+            if ui.button("加载事件、结构化字段与公告证据").clicked(){submit(state,worker,cancel_slot,WorkflowRequest::InspectActions{actions:state.platform.actions.clone(),instrument:state.platform.action_review_instrument.clone(),evidence_manifest:if state.platform.action_evidence_manifest.trim().is_empty(){None}else{Some(PathBuf::from(state.platform.action_evidence_manifest.trim()))}});}
         let t = &mut state.platform.template;
         ui.horizontal(|ui| {
             ui.label("训练价格口径");

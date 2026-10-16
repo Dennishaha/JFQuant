@@ -586,7 +586,7 @@ pub fn apply(
     bundle
         .execution_issues
         .sort_by_key(|i| (i.instrument.clone(), i.id.clone(), i.code.clone()));
-    bundle.schema_version = 6;
+    super::facts::refresh(&mut bundle, output)?;
     let receipt = json!({"schema_version":1,"rule_version":"jfquant-actions-v2","base_actions_sha256":format!("sha256:{:x}",Sha256::digest(fs::read(source_path)?)),
         "collector_signature":result["collector_signature"],"announcement_evidence":announcements,"inputs_sha256":input_hash,"evidence_sha256":bundle.raw_sha256,"timings_seconds":{"evidence":evidence_seconds,"replay":replay_seconds,"before_publication":started.elapsed().as_secs_f64()},"results":receipt_results,"reconciled_securities":resolved,"unresolved_count":bundle.execution_issues.iter().filter(|i| !i.skipped_by_engine()).count(),"warnings_count":bundle.execution_issues.iter().filter(|i| i.skipped_by_engine()).count()});
     // The supervised replay directory is temporary; immutable proof is the hashed receipt.
@@ -627,7 +627,7 @@ mod tests {
         let context = analytics_core::task::TaskContext::current();
         let output = tmp.path().join("reconciled");
         let normalized = apply(&path, &[], &[], &output, &context).unwrap();
-        assert_eq!(normalized.schema_version, 6);
+        assert_eq!(normalized.schema_version, 7);
         assert_eq!(normalized.failures, book.failures);
         assert_eq!(normalized.actions.len(), 1);
         assert_eq!(normalized.actions[0].cash_per_share, "4.30");
@@ -668,7 +668,7 @@ mod tests {
         let output = tmp.path().join("out");
         fs::create_dir_all(root.join("raw")).unwrap();
         fs::create_dir_all(output.join("raw")).unwrap();
-        let owner = json!({"operation":"actions","collector_protocol":12,"collector_signature":crate::collector::collector_signature(),"normalization":crate::adjustment::NORMALIZATION,
+        let owner = json!({"operation":"actions","collector_protocol":13,"collector_signature":crate::collector::collector_signature(),"normalization":crate::adjustment::NORMALIZATION,
             "dependencies_sha256":format!("sha256:{:x}",Sha256::digest(include_bytes!("../../collectors/requirements.lock"))),
             "python_runtime_sha256":format!("sha256:{:x}",Sha256::digest(include_bytes!("../../collectors/python-runtime.lock.json"))),
             "request":{"provider":"tdxaidata","adjustment_source":"tdx_forward","start":"2024-01-01","end":"2024-12-31","instruments":["SH600188"],"source_bindings":{},"benchmarks":[],"universes":[]}});

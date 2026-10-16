@@ -69,6 +69,44 @@ impl Drop for Sandbox {
     }
 }
 #[test]
+fn supported_older_actions_expose_unknown_structured_fields_through_public_inspection() {
+    let s = Sandbox::new();
+    let w = Workspace::open(&s.client.root).unwrap();
+    let (_, actions, _) = analytics_workflow::testing::synthetic(&w);
+    let submitted = s.json(&[
+        "data",
+        "inspect-actions",
+        "--actions",
+        &actions.id,
+        "--instrument",
+        "SH600000",
+    ]);
+    let result = s.json(&[
+        "jobs",
+        "wait",
+        submitted["task_id"].as_str().unwrap(),
+        "--timeout",
+        "10",
+    ]);
+    assert_eq!(result["record"]["status"], "succeeded");
+    assert!(
+        result["results"]["details"]
+            .get("structured_fields")
+            .is_some()
+    );
+    assert_eq!(
+        result["results"]["details"]["structured_fields"],
+        Value::Null
+    );
+    assert_eq!(
+        analytics_storage::corporate_actions::ActionBundle::read(&w.resolve(actions.path))
+            .unwrap()
+            .schema_version,
+        5
+    );
+}
+
+#[test]
 fn clap_help_validation_json_and_exit_codes_require_no_workspace() {
     let output = Command::new(env!("CARGO_BIN_EXE_jfquant"))
         .arg("--help")

@@ -19,7 +19,7 @@ flowchart LR
 
 `collector::{collect,collect_quotes,collect_actions,collect_reference,collect_announcements}` 使用同一 `CollectionRequest`。默认 `Provider::Hithink`；通达信 `Tdxaidata` 是备用；`Cninfo` 仅支持公告。自动 workflow 按角色尝试来源，显式任务不切源。切换行情来源重取整个证券历史，不混合不同来源的字段。
 
-`collect_coefficients` 仅支持通达信独立 ForwardFactor。HiThink `AdjustmentSource::HithinkForward` 对应 `AdjustmentBasis::SupplierForward`，不是系数序列。巨潮请求使用 `AdjustmentSource::None`。服务协议19、Python JSON Lines协议12、来源策略2；旧任务和旧来源配置需重建，不改写或删除用户旧文件。
+`collect_coefficients` 仅支持通达信独立 ForwardFactor。HiThink `AdjustmentSource::HithinkForward` 对应 `AdjustmentBasis::SupplierForward`，不是系数序列。巨潮请求使用 `AdjustmentSource::None`。服务协议20、Python JSON Lines协议13、来源策略2；旧任务和旧来源配置需重建，不改写或删除用户旧文件。
 
 ## HiThink 数据与价格口径
 
@@ -79,6 +79,8 @@ cargo fmt --all --check
 
 通达信 `tdxaidata==1.2.2` 继续使用原生动态库；官方 `127.0.0.1:17709` HTTP属于TQ客户端模式，不是tdxaidata云端HTTP版本，本次不引入。来源：[TdxAiData](https://help.tdx.com.cn/quant/docs/markdown/mindoc-1hjbgqpdhv114.html)、[TQ HTTP](https://help.tdx.com.cn/quant/docs/markdown/mindoc-1hdhbmi50d038.html)。
 
+另有 `download_file` 的独立 HTTP 文件子集（股东、ETF申赎、舆情、综合信息、经营分析、龙虎榜、解禁），不覆盖主要行情/专业数据。2026-10-16 已核对 SDK、完整字段目录和 HiThink 契约，并实测关键公司行动、状态、财报与文件响应；其中GP41/43已接入固定采集和Rust字段证据，其余新增能力尚未接入生产。字段替代矩阵、真实覆盖边界、日期/单位异常与 Rust 接入建议见[结构化事实替代评审](../src/corporate_actions/README.md#结构化事实替代评审2026-10-16)。
+
 ## 公司行动对账与证据修订
 
 旧网页补采及其恢复入口已删除。固定离线规则 `jfquant-actions-v2`只接收HiThink标准事件和通达信参考，按原始证券身份与日期区间校验，精确比较每股条款；重复事件去重，身份冲突拒绝，数值冲突保留证据。历史代码使用冻结的日期化来源映射，不能按下载代码改写证券身份。登记、支付、上市日期保持null，巨潮实施证据修订单独发布。
@@ -90,7 +92,7 @@ jfquant data revise-actions --actions ACTION_VERSION --request REVISION_JSON
 jfquant jobs wait TASK_UUID
 ```
 
-来源识别规则集中在core；注册、读取、对账、修订和任务恢复均拒绝废弃来源及混合来源证据。旧任务可以查看，用户文件、凭据和历史产物不删除。协议19/12与来源策略2不自动迁移旧检查点。
+来源识别规则集中在core；注册、读取、对账、修订和任务恢复均拒绝废弃来源及混合来源证据。旧任务可以查看，用户文件、凭据和历史产物不删除。协议20/13与来源策略2不自动迁移旧检查点。
 
 ## 2026-10-15 真实账户抽查
 
@@ -110,3 +112,5 @@ GP29确认停牌日且缺少原始日线/成交量为零时，在日频账户适
 通达信普通行动成功返回`Value: []`时只记录空参考，账户事件覆盖仍未核验；独立GP29及交易日历照常查询。完整调用序列fixture防止无分红证券丢失停复牌状态。分片导入同时核对通达信生产者签名，旧生产者检查点跳过重采，HiThink签名未变的完整分片可独立复用。
 
 最近持续停牌补充使用通达信`get_more_info`的`TPFlag=1`、`HqDate`、`StopJYDate_Recent`三字段组合，捕获固定`GetMoreInfoInStr`原生调用并绑定证券/哈希。仅当快照行情日期覆盖研究截止日、最近停牌日起未见相冲突的GP29复牌记录时，确认最近这一段持续停牌；当前标记单独存在、过期快照和缺失日期均不能回填历史。此证据只用于回溯账户估值，不用于因子或选股；保留更早未知区间。结果清单增加`dated-current-episode-v1`以隔离旧缓存。
+
+行动采集现在独立请求GP41/GP43，Rust事实格式7与版本2修订契约见[公司行动组件](../src/corporate_actions/README.md)。单字段失败保留其他回执；旧采集协议和生产者检查点需重取。巨潮目录除gssh/gssz和99数字ID外，也接受目录中匹配证券的qsgn经纪机构ID；该前缀不推断交易所，证券代码/市场仍独立校验。

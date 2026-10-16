@@ -205,6 +205,7 @@ mod tests {
     fn book() -> ActionBundle {
         let id = "SH600000".to_string();
         ActionBundle {
+            field_facts: Default::default(),
             schema_version: 5,
             downloader: "JFQuant analytics-storage corporate-actions".into(),
             downloaded_at: "fixture".into(),

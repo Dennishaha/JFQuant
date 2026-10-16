@@ -1448,6 +1448,7 @@ fn refresh_actions(
         "source-evidence-sha256.json".into(),
         format!("sha256:{:x}", Sha256::digest(fs::read(&proof)?)),
     );
+    analytics_storage::corporate_actions::facts::refresh(&mut book, &dest)?;
     atomic_json(&dest.join("actions.json"), &book)?;
     ActionBundle::read(&dest.join("actions.json"))?;
     let published = w.resolve(format!("data/refresh-actions-{}", run.id));

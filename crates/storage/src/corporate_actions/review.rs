@@ -16,6 +16,9 @@ pub struct FieldEvidence {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EventRevision {
+    /// Version-2 leaf field to an authenticated structured fact (not an announcement quote).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub structured_fields: BTreeMap<String, StructuredFieldRef>,
     /// Existing logical event ID, None for a verified missing event.
     pub original_id: Option<String>,
     /// Exact original serialized event hash; required for replacements.
@@ -26,6 +29,110 @@ pub struct EventRevision {
     pub reason: String,
     /// Evidence for all changed fields, named by serialized field name.
     pub fields: BTreeMap<String, FieldEvidence>,
+}
+/// Select an exact field from the source bundle's replayed structured facts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StructuredFieldRef {
+    /// Ex-date anchored event identity.
+    pub event_id: String,
+    /// Field within that event, e.g. record_date or subscription_price.
+    pub field: String,
+}
+fn verify_structured(
+    source: &ActionBundle,
+    event: &CorporateAction,
+    path: &str,
+    value: &Value,
+    reference: &StructuredFieldRef,
+) -> io::Result<()> {
+    let expected = match path {
+        "record_date" => "record_date",
+        "ex_date" => "ex_date",
+        "terms.price" => "subscription_price",
+        "terms.ratio" => "rights_ratio",
+        _ => return Err(invalid("structured fact cannot prove this event field")),
+    };
+    if expected != reference.field || reference.event_id != event.id {
+        return Err(invalid("structured field/event identity mismatch"));
+    }
+    let facts = source
+        .field_facts
+        .get(&event.instrument)
+        .and_then(|r| {
+            r.events
+                .iter()
+                .find(|e| e.event_id == reference.event_id && e.status == "verified")
+        })
+        .and_then(|e| e.fields.get(&reference.field))
+        .ok_or_else(|| invalid("verified structured field missing"))?;
+    if facts.value != *value {
+        return Err(invalid("structured field value mismatch"));
+    }
+    Ok(())
+}
+/// Verify structured revision fields and immutable outputs again when loading a bundle.
+pub(super) fn verify_structured_revisions(bundle: &ActionBundle, root: &Path) -> io::Result<()> {
+    let mut affected = BTreeSet::new();
+    let mut outputs = Vec::new();
+    for name in bundle
+        .raw_sha256
+        .keys()
+        .filter(|n| n.starts_with("review-") && n.ends_with(".json"))
+    {
+        let receipt: Value =
+            serde_json::from_slice(&fs::read(root.join("raw").join(name))?).map_err(invalid)?;
+        if let Some(events) = receipt["request"]["events"].as_array() {
+            outputs.extend(events.iter().map(|r| r["replacement"].clone()));
+        }
+        if receipt["request"]["schema_version"] != 2 {
+            continue;
+        }
+        let request: RevisionRequest =
+            serde_json::from_value(receipt["request"].clone()).map_err(invalid)?;
+        for revision in &request.events {
+            for (path, reference) in &revision.structured_fields {
+                let event = serde_json::to_value(&revision.replacement).map_err(invalid)?;
+                let pointer = format!("/{}", path.replace('.', "/"));
+                let value = event
+                    .pointer(&pointer)
+                    .ok_or_else(|| invalid("structured revision path missing"))?;
+                verify_structured(bundle, &revision.replacement, path, value, reference)?;
+                affected.insert(revision.replacement.id.clone());
+            }
+        }
+    }
+    for id in affected {
+        let current = bundle
+            .actions
+            .iter()
+            .find(|e| e.id == id)
+            .ok_or_else(|| invalid("structured revised event missing"))?;
+        if !outputs.contains(&serde_json::to_value(current).map_err(invalid)?) {
+            return Err(invalid(
+                "structured revised event differs from captured output",
+            ));
+        }
+    }
+    Ok(())
+}
+fn changed_leaves(prefix: &str, old: &Value, new: &Value, out: &mut Vec<(String, Value)>) {
+    if old == new {
+        return;
+    }
+    if let Some(fields) = new.as_object() {
+        for (field, value) in fields {
+            changed_leaves(&format!("{prefix}.{field}"), &old[field], value, out);
+        }
+        // Deleting any key also needs evidence; structured facts cannot prove deletions.
+        if let Some(fields) = old.as_object() {
+            for field in fields.keys().filter(|f| new.get(*f).is_none()) {
+                out.push((format!("{prefix}.{field}"), Value::Null));
+            }
+        }
+    } else {
+        out.push((prefix.into(), new.clone()));
+    }
 }
 /// Explicit resolution of a recorded source failure, requiring an actual event correction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,9 +160,9 @@ pub struct IssueResolution {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RevisionRequest {
-    /// Version of this review request, 1.
+    /// Version 1 for announcement quotes, or 2 for structured field references.
     pub schema_version: u32,
-    /// Captured announcements.json from this project's collector.
+    /// Captured announcements.json, or the current actions.json for a structured-only revision.
     pub evidence_manifest: PathBuf,
     /// Event corrections, at least one.
     pub events: Vec<EventRevision>,
@@ -191,12 +298,46 @@ pub fn apply(
         &serde_json::to_value(request).map_err(invalid)?,
     )
     .map_err(invalid)?;
-    if request.schema_version != 1
+    if !matches!(request.schema_version, 1 | 2)
         || (request.events.is_empty() && request.coverage_reviews.is_empty())
     {
         return Err(invalid("invalid/empty action revision"));
     }
-    let documents = verified_documents(&request.evidence_manifest)?;
+    let structured = request
+        .events
+        .iter()
+        .any(|r| !r.structured_fields.is_empty());
+    if structured
+        && (request.schema_version != 2
+            || !request.resolve_failures.is_empty()
+            || !request.resolve_issues.is_empty())
+    {
+        return Err(invalid(
+            "structured revisions require version 2 and cannot clear history failures or execution issues",
+        ));
+    }
+    if structured {
+        let authenticated = ActionBundle::read(&source_root.join("actions.json"))?;
+        if digest(&authenticated)? != digest(source)? {
+            return Err(invalid("structured revision source snapshot mismatch"));
+        }
+    }
+    let manifest_value: Value =
+        serde_json::from_slice(&fs::read(&request.evidence_manifest)?).map_err(invalid)?;
+    let documents = if request.schema_version == 2 && manifest_value["schema_version"] == 7 {
+        let authenticated = ActionBundle::read(&request.evidence_manifest)?;
+        if digest(&authenticated)? != digest(source)?
+            || !request.coverage_reviews.is_empty()
+            || request.events.iter().any(|e| !e.fields.is_empty())
+        {
+            return Err(invalid(
+                "structured manifest must match source and cannot prove announcement fields",
+            ));
+        }
+        BTreeMap::new()
+    } else {
+        verified_documents(&request.evidence_manifest)?
+    };
     let mut bundle = source.clone();
     let mut changed = BTreeSet::new();
     let mut used = BTreeSet::new();
@@ -280,7 +421,9 @@ pub fn apply(
     for revision in &request.events {
         let a = &revision.replacement;
         a.validate_adjustment_terms().map_err(invalid)?;
-        if revision.reason.trim().is_empty() || revision.fields.is_empty() {
+        if revision.reason.trim().is_empty()
+            || (revision.fields.is_empty() && revision.structured_fields.is_empty())
+        {
             return Err(invalid("review reason and field evidence required"));
         }
         let old = revision
@@ -315,6 +458,18 @@ pub fn apply(
         }
         for (field, value) in replacement.as_object().unwrap() {
             if original.get(field) == Some(value) {
+                continue;
+            }
+            if !revision.fields.contains_key(field) {
+                let mut leaves = vec![];
+                changed_leaves(field, &original[field], value, &mut leaves);
+                for (path, value) in leaves {
+                    let reference = revision
+                        .structured_fields
+                        .get(&path)
+                        .ok_or_else(|| invalid(format!("changed field lacks evidence: {path}")))?;
+                    verify_structured(source, a, &path, &value, reference)?;
+                }
                 continue;
             }
             let proof = revision
@@ -421,7 +576,7 @@ pub fn apply(
         )?;
         bundle.raw_sha256.insert(archive, hash);
     }
-    bundle.schema_version = 6;
+    bundle.schema_version = 7;
     let selected_documents: Vec<_> = used.iter().map(|id| documents[id].0.clone()).collect();
     let evidence_root = request.evidence_manifest.parent().unwrap();
     let mut collection_receipts = BTreeMap::new();
@@ -538,6 +693,7 @@ mod tests {
             source: "https://static.cninfo.com.cn/finalpage/2024-06-01/a.PDF".into(),
         };
         let book = ActionBundle {
+            field_facts: Default::default(),
             structured_coverage: Default::default(),
             execution_issues: Vec::new(),
             execution_data: None,
@@ -570,7 +726,7 @@ mod tests {
         )
         .unwrap();
         // A failed batch can still contain a complete, immutable security receipt.
-        let owner = serde_json::json!({"operation":"announcements","collector_protocol":12,"collector_signature":crate::collector::collector_signature(),"normalization":crate::adjustment::NORMALIZATION,"dependencies_sha256":format!("sha256:{:x}",Sha256::digest(include_bytes!("../../collectors/requirements.lock"))),"python_runtime_sha256":format!("sha256:{:x}",Sha256::digest(include_bytes!("../../collectors/python-runtime.lock.json"))),"request":{"provider":"cninfo","adjustment_source":"none","start":"2024-06-01","end":"2024-06-30","instruments":["SH600000"],"source_bindings":{},"benchmarks":[],"universes":[]}});
+        let owner = serde_json::json!({"operation":"announcements","collector_protocol":13,"collector_signature":crate::collector::collector_signature(),"normalization":crate::adjustment::NORMALIZATION,"dependencies_sha256":format!("sha256:{:x}",Sha256::digest(include_bytes!("../../collectors/requirements.lock"))),"python_runtime_sha256":format!("sha256:{:x}",Sha256::digest(include_bytes!("../../collectors/python-runtime.lock.json"))),"request":{"provider":"cninfo","adjustment_source":"none","start":"2024-06-01","end":"2024-06-30","instruments":["SH600000"],"source_bindings":{},"benchmarks":[],"universes":[]}});
         fs::write(root.join("owner.json"), serde_json::to_vec(&owner).unwrap()).unwrap();
         fs::write(
             root.join("receipts.json"),
@@ -594,6 +750,7 @@ mod tests {
             schema_version: 1,
             evidence_manifest: root.join("announcements.json"),
             events: vec![EventRevision {
+                structured_fields: Default::default(),
                 original_id: Some(a.id.clone()),
                 original_sha256: Some(original),
                 replacement: a.clone(),
@@ -677,6 +834,7 @@ mod coverage_tests {
         fs::create_dir_all(original.join("raw")).unwrap();
         fs::create_dir_all(evidence.join("raw")).unwrap();
         let source = ActionBundle {
+            field_facts: Default::default(),
             structured_coverage: Default::default(),
             execution_issues: Vec::new(),
             execution_data: None,

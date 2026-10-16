@@ -4,8 +4,8 @@ import copy
 import unittest
 from contextlib import contextmanager
 from unittest.mock import patch
-from jfquant_collectors import tdx
 
+from jfquant_collectors import tdx
 from jfquant_collectors.tdx import (
     action_references,
     bars,
@@ -41,7 +41,7 @@ class TdxContracts(unittest.TestCase):
                 responses.append({"Date":["20210104"]})
                 return ["20210104"]
             def get_gpjy_value(self, *args):
-                calls.append("GP29")
+                calls.append(args[1][0])
                 responses.append({"ErrorId":"0","Value":{"GP29":[]}})
             def get_more_info(self, *args, **kwargs):
                 calls.append("current_status")
@@ -52,7 +52,7 @@ class TdxContracts(unittest.TestCase):
         request = {"start":"2021-01-01","end":"2021-12-31","operation":"actions","instruments":["SH688981"]}
         with patch.object(tdx, "session", session):
             tdx.collect(request, lambda event, **value: emitted.append((event, value)))
-        self.assertEqual(calls, ["actions", "calendar", "GP29", "current_status"])
+        self.assertEqual(calls, ["actions", "GP41", "GP43", "calendar", "GP29", "current_status"])
         shard = next(value for event, value in emitted if event == "action_shard")
         self.assertEqual(shard["evidence"]["stock_status"]["status"], "captured")
         self.assertEqual(shard["evidence"]["stock_status"]["current_snapshot"], "captured")

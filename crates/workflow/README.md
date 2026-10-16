@@ -1,4 +1,4 @@
-当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议19、采集协议12、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
+当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议20、采集协议13、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
 
 # analytics-workflow
 
@@ -142,7 +142,7 @@ jfquant data refresh --template available-workflow.json --market MARKET_ID --wor
 DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow --lib
 ```
 
-验收包含并发上限、线程任务上下文、确定性接收、取消保留分片、日期成员去重、缺失覆盖、请求篡改拒绝和可用池仅提议不发布。传输及检查点篡改沿用storage fixture。凭据位置和采集协议12不变；网络和SDK等待仍是采集主要耗时。
+验收包含并发上限、线程任务上下文、确定性接收、取消保留分片、日期成员去重、缺失覆盖、请求篡改拒绝和可用池仅提议不发布。传输及检查点篡改沿用storage fixture。凭据位置和采集协议13不变；网络和SDK等待仍是采集主要耗时。
 
 分区位于不同本地工作区时，可用`--sources-manifest sources.json`汇总覆盖，或`--reuse-shards-manifest sources.json`复用；JSON数组元素为当前工作区任务UUID字符串，或`{"workspace":"/absolute/workspace","task_id":"UUID"}`。只读验证原生任务、同一不可变基础数据/窗口/基准及证券子集；不修改来源工作区。尚有分区待检查的证券不被误列为缺失。复用仍由采集器重新验证全部身份及哈希。
 
@@ -207,3 +207,5 @@ flowchart LR
 ```
 
 验收覆盖多次换股及延后成交、旧股基数先现金后送股、最终账户篡改、持仓缺价、费用不一致、估值行成交和未模拟事件披露。
+
+结构化行动：采集、动作刷新汇总及离线对账发布格式7，读取时重放字段证据；`InspectActions`返回`details.structured_fields`，`ReviseActions`接受版本2字段引用并保留版本1公告请求。字段补齐不清除配股执行告警，不重训模型；规则及案例见[公司行动组件](../storage/src/corporate_actions/README.md)。

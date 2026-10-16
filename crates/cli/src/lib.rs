@@ -66,7 +66,14 @@ pub enum Command {
 }
 #[derive(Debug, Subcommand)]
 pub enum WorkspaceCommand {
-    Create { path: PathBuf },
+    Create {
+        path: PathBuf,
+    },
+    /// Preview archival, or apply/resume offline while preserving source data.
+    Maintain {
+        #[arg(long)]
+        apply: bool,
+    },
     Show,
 }
 #[derive(Debug, Subcommand)]
@@ -843,6 +850,14 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
     if matches!(cli.command, Command::Service(ServiceCommand::Serve)) {
         analytics_workflow::service::serve(&root)?;
         return Ok(Value::Null);
+    }
+    if let Command::Workspace(WorkspaceCommand::Maintain { apply }) = &cli.command {
+        return if *apply {
+            analytics_workflow::maintenance::apply(&root).map_err(invalid)
+        } else {
+            serde_json::to_value(analytics_workflow::maintenance::preview(&root).map_err(invalid)?)
+                .map_err(invalid)
+        };
     }
     let client = Client::connect(&root)?;
     client.ensure(None)?;

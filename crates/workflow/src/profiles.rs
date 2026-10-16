@@ -1,6 +1,15 @@
 //! Separate reusable workflow, feature and target files; tasks freeze a resolved template.
 //! Why: changing an index must not duplicate or silently reset a reviewed feature order.
+use crate::research::backtest::ResearchConfig;
 use crate::*;
+use analytics_core::market_rules::MarketRulesPreset;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+
 use analytics_core::research_quality::{FactorSet, PriceBasis};
 
 /// Standalone feature selection; no dates, universe or account parameters.

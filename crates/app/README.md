@@ -1,4 +1,4 @@
-当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议24、采集协议13、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
+当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议25、采集协议13、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
 
 # analytics-desktop
 
@@ -10,7 +10,7 @@ flowchart LR
  UI[egui面板] --> C[服务客户端与事件适配]
  C --> W[workflow：任务与持久化]
  W --> R[Rust因子 / Python LightGBM / AKQuant]
- R --> O[结果16与运行日志]
+ R --> O[当前结果与运行日志]
  O --> UI
 ```
 
@@ -18,7 +18,7 @@ flowchart LR
 配置独立编辑；任务开始时冻结，关闭界面不终止后台。界面支持进度、取消、重试、
 仅训练和使用已有模型回测，展示训练产物与回测停止原因。
 
-当前服务24、工作流10、训练描述3/4/5、模型manifest2/3、结果19（兼容16/17/18读取）。旧格式不自动转换，
+当前服务25、工作流10、训练描述4/5、模型manifest3、结果19。旧结果不按当前口径解释，
 状态和日志仍可查看。研究页展示AKQuant事件日口径及执行费用合计，不展示已删除的
 精细权益账本，不提供不支持的净佣、配股认购或个人分红扣税控件。
 
@@ -39,10 +39,10 @@ DUCKDB_DOWNLOAD_LIB=1 cargo nextest run -p analytics-desktop
 研究前置检查失败与账户未完成分别展示；提示以阶段产物为准，不再声称失败时一定已有账户记录。未执行账户的收益字段为空，不渲染为零收益；完成但无成交时展示有效信号、成交回报和拒单回报。与CLI共用workflow结构化状态及结果校验。验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-desktop`。
 
 公司行动页支持输入一个或多个证据任务UUID，提交共用`ReconcileActions`任务；核对结果是新数据版本。
-结果16对未模拟特殊事件显示“回测完成，含未模拟事件”，并保留未解决普通问题的阻断状态。
+当前结果对未模拟特殊事件显示“回测完成，含未模拟事件”，并保留未解决普通问题的阻断状态。
 核对规则、格式6与复现命令见storage/workflow组件README。验收包含公共任务、结果警告与旧格式隔离。
 
-原生刷新现在以3个证券工作线程获取行情和公司行动，沿用监督进程、检查点、取消及完整发布校验。后端`RefreshRequest`允许1—8线程及显式跨任务分片复用；公共`RefreshCoverage`只读RPC可读取进度、历史成员覆盖及候选可用池，报告不自动授权训练或改变股票池。CLI命令及完整验收见[工作流README](../workflow/README.md)。服务协议24。
+原生刷新现在以3个证券工作线程获取行情和公司行动，沿用监督进程、检查点、取消及完整发布校验。后端`RefreshRequest`允许1—8线程及显式跨任务分片复用；公共`RefreshCoverage`只读RPC可读取进度、历史成员覆盖及候选可用池，报告不自动授权训练或改变股票池。CLI命令及完整验收见[工作流README](../workflow/README.md)。服务协议25。
 
 “更新行动”按钮使用同一Rust动作分片流程，保持当前登记行情，重新获取事件；不读废弃动作版本作为补采输入。
 
@@ -59,7 +59,7 @@ Packaged CLI acceptance also invokes `research verify --task <UUID>` after the t
 
 因子页提供只读Alpha158/GTJA191组，以及复制、改名、编辑说明、筛选、保存、删除自定义组；
 “应用到研究配置”只替换因子选择，保留日期和股票池。修改内置组必须先复制。
-“因子有效性测试”独立发送服务协议24的EvaluateFactors任务，支持进度和取消；默认5日、5分层、
+“因子有效性测试”独立发送服务协议25的EvaluateFactors任务，支持进度和取消；默认5日、5分层、
 30个日内有效样本。报告展示覆盖率、配对率、有效天数、IC、RankIC、RankIC IR、正RankIC比例、
 高减低收益，展开查看每日统计与分层收益，可导出JSON及逐项加入自定义选择后保存。
 结果使用冻结参数，即使表单后来改变也不会改写报告；模型训练仍保留原入口。
@@ -93,9 +93,19 @@ Packaged CLI acceptance also invokes `research verify --task <UUID>` after the t
 
 A/B可重叠，横截面计算互相隔离；B不参与验证或早停。首日没有合法模型则拒绝回测。
 账户跨模型连续运行；报告显示曾见/未见标的及同一账户贡献，预测可独立重放。
-旧“年度研究/仅训练/已有模型回测”入口保持原配置语义。服务协议24，结果19兼容读取16—18。
+旧“年度研究/仅训练/已有模型回测”入口保持原配置语义。服务协议25，结果19仅读取当前格式。
 
 ```bash
 DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-desktop independent_training_and_backtest_editors
 DUCKDB_DOWNLOAD_LIB=1 cargo run -p analytics-desktop
+```
+
+## 工作区界面边界
+
+`platform` 按 workspace/data/research/runs 分页组织。工作区目录、运行结果、日志与
+NAV 由后台 `views` 读取并缓存；渲染线程只消费普通数据，过期选择的响应被丢弃。
+导入结果通过后台服务执行。见 [面板组件](src/platform/README.md)。
+
+```bash
+DUCKDB_DOWNLOAD_LIB=1 cargo nextest run -p analytics-desktop
 ```

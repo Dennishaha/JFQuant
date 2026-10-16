@@ -1,10 +1,10 @@
-当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议21、采集协议13、来源策略2；接口、价格口径、构建和验收见[采集组件](collectors/README.md)。
+当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务版本见 workflow::service::PROTOCOL_VERSION、采集协议13、来源策略2；接口、价格口径、构建和验收见[采集组件](collectors/README.md)。
 
 ## 当前采集契约（2026-10-15）
 
 HiThink 为默认主源，由 Rust 直接调用 REST；通达信备用，维持内置 Python `tdxaidata==1.2.2`；巨潮公告使用独立 `cninfo` 来源。旧来源依赖、配置、权限检查及历史兼容入口已移除；旧数据不迁移、不删除，重新配置来源并采集。
 
-公共来源为 `hithink|tdxaidata|cninfo`，复权选项为 `hithink-forward|tdx-forward|none`。服务协议21、采集协议13、来源策略2；HiThink 行情格式6，通达信格式5与 Qlib 读取保留。HiThink 训练选择供应商口径（`price_basis=provider`），前复权 OHLC、原始股数及人民币成交额、VWAP null；回测使用原价。训练缓存与 manifest 冻结口径、来源和证据哈希，特征顺序及公式版本保持。
+公共来源为 `hithink|tdxaidata|cninfo`，复权选项为 `hithink-forward|tdx-forward|none`。服务版本见 workflow::service::PROTOCOL_VERSION、采集协议13、来源策略2；HiThink 行情格式6，通达信格式5与 Qlib 读取保留。HiThink 训练选择供应商口径（`price_basis=provider`），前复权 OHLC、原始股数及人民币成交额、VWAP null；回测使用原价。训练缓存与 manifest 冻结口径、来源和证据哈希，特征顺序及公式版本保持。
 
 接口、凭据、覆盖范围与复现命令见[采集组件](collectors/README.md)。当前成分不能回填历史，下载成功不代表研究或账户资料完整。
 
@@ -122,7 +122,7 @@ flowchart LR
 
 ## 任务、协议与旧产物
 
-服务协议21、Python采集协议13、来源策略2。协议或生产者签名不匹配的检查点不能恢复；旧来源数据、凭据和任务记录保留在用户工作区，但不进入新采集或研究。废弃任务重新采集，缺失事件字段通过巨潮证据修订。
+服务版本见 workflow::service::PROTOCOL_VERSION、Python采集协议13、来源策略2。协议或生产者签名不匹配的检查点不能恢复；旧来源数据、凭据和任务记录保留在用户工作区，但不进入新采集或研究。废弃任务重新采集，缺失事件字段通过巨潮证据修订。
 
 传输经过受监管进程，取消时kill并wait；超时、业务错误、身份/覆盖不足或证据篡改不得发布完整版本。HiThink完整窗口刷新与分段重叠校验、通达信单证券恢复和巨潮分页证据分别验收，不以拼接不同来源字段补齐行情。
 
@@ -162,3 +162,10 @@ GP29确认停牌日且缺少原始日线/成交量为零时，在日频账户适
 公司行动写入格式8、修订请求3，支持部分配股事实和外部结构化证据附件；保留旧行动5/6/7和请求1/2读取。资料合法性与执行就绪分别检查，未知不转为不适用，修订继承独立采集证据目录及哈希。
 
 依赖升级：sha2 0.11.1 的摘要经共享固定十六进制格式化器输出，不改变历史文件及树哈希。`cargo test -p analytics-storage sha256_vectors` 验证历史摘要。公告解析升级不重新提取既有证据文本。
+
+## 采集职责边界
+
+采集请求和来源路由留在 `collector`，子进程监督和产物发布分别位于
+`collector/process`、`collector/publication`。见 [采集执行边界](src/collector/README.md)。
+采集依赖由 `collectors/requirements.in` 和对应哈希锁拥有；研究依赖由 workflow 拥有。
+打包同时安装两组锁，采集指纹只包含采集依赖。

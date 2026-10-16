@@ -1,4 +1,4 @@
-当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议18、采集协议12、来源策略2；接口、价格口径、构建和验收见[采集组件](crates/storage/collectors/README.md)。
+当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。版本权威定义见各组件源码；接口、价格口径、构建和验收见[采集组件](crates/storage/collectors/README.md)。
 
 # JFQuant Analytics
 
@@ -8,12 +8,12 @@ macOS 优先的本地量化研究平台。Rust App 和独立 `jfquant` CLI 共�
 
 ```mermaid
 flowchart TD
- UI[App / CLI] --> S[工作区服务：协议15]
+ UI[App / CLI] --> S[工作区服务：当前协议]
  S --> D[数据版本 / 查询 / Rust因子]
  D --> W[受监督的包内Python研究worker]
  W --> L[LightGBM 4.7.0]
  L --> A[AKQuant：连续回测]
- A --> R[模型 / 预测 / 结果16]
+ A --> R[模型 / 预测 / 当前结果]
  R --> S
 ```
 
@@ -30,8 +30,8 @@ flowchart TD
 | analytics-cli | 独立命令行与JSON接口 |
 
 逐组件文档见 [crates/README.md](crates/README.md)。研究后端协议、构建和能力边界见
-[研究worker](crates/workflow/research/README.md)。已删除独立 ml crate、Rust LightGBM
-FFI、自建账户模拟及到账／上市日精细权益账本；本轮不迁移因子执行器，不增加实盘。
+[研究worker](crates/workflow/research/README.md)。研究执行保持 Rust 因子、Python 撮合和 Rust 成交账本校验；配股使用固定原生扩展。
+架构重构不改变量化计算口径，不增加实盘。
 
 ## 使用与构建
 
@@ -52,9 +52,9 @@ jfquant jobs results TASK_UUID
 一个工作区同时执行一个计算任务。关闭客户端不终止服务任务；取消先协作退出，
 无法退出时终止研究进程组。数据、模型、日志和运行产物保留在工作区，不提交Git。
 
-因子、标的和工作流独立保存。工作流格式10、服务协议18、模型manifest2、独立训练
-描述3、结果16；采集与行情格式保持原版本。旧文件不自动转换或删除，旧状态与日志
-可读，旧结果不得以新回测口径展示。
+因子、标的和工作流独立保存，研究输入在提交时冻结。协议与产物的权威定义见
+[工作流组件边界](crates/workflow/src/README.md)。旧研究产物归档后重建，保留原始数据、
+证据和用户配置；离线操作见[维护说明](crates/workflow/README.md#架构边界与离线维护)。
 
 ## 回测口径与兼容
 

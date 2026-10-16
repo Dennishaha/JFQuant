@@ -1015,6 +1015,7 @@ fn research_template_saves_and_real_worker_finishes_synthetic_annual_account() {
             .exists()
     );
     h.app.state.panel = Panel::Runs;
+    h.wait_for(|app| app.state.platform.result_loaded());
     let out = h.frame(vec![]);
     assert!(rendered_text(&out).contains("年化"));
 }
@@ -1344,6 +1345,7 @@ fn unsupported_history_shows_error_without_nav_or_resumption_and_other_records_r
     assert!(h.commands.try_recv().is_err());
     h.app.state.platform.import_run_path = old.output.display().to_string();
     h.click("导入只读记录");
+    h.wait_for(|app| app.state.platform.error.is_some());
     assert!(
         h.app
             .state
@@ -1383,6 +1385,8 @@ fn unsupported_history_shows_error_without_nav_or_resumption_and_other_records_r
     h.app.state.platform.runs = w.runs().unwrap();
     h.app.state.platform.selected_run = Some(current.id);
     h.app.state.platform.error = None;
+    h.frame(vec![]);
+    h.wait_for(|app| app.state.platform.result_loaded());
     let text = rendered_text(&h.frame(vec![]));
     assert!(text.contains("年化"));
     assert!(!text.contains("unsupported_result_format"));

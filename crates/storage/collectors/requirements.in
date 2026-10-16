@@ -2,7 +2,3 @@ requests==2.34.2
 pandas==3.0.6
 pypdf==6.20.1
 tdxaidata==1.2.2
-
-# Shared bundled research runtime (no torch/full extra).
-akquant==0.3.66
-lightgbm==4.7.0

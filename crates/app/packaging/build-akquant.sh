@@ -8,7 +8,7 @@ mkdir -p "$build_root"
 "$python" -I -B - "$repo_root" "$build_root" <<'PY'
 import hashlib, json, pathlib, sys, tarfile, urllib.request
 repo, root = map(pathlib.Path, sys.argv[1:])
-lock = json.loads((repo / 'crates/app/packaging/akquant-source.lock.json').read_text())
+lock = json.loads((repo / 'crates/workflow/research/akquant-source.lock.json').read_text())
 for name, expected in lock['inputs'].items():
     if hashlib.sha256((repo / name).read_bytes()).hexdigest() != expected:
         raise SystemExit('AKQuant reviewed input hash mismatch: ' + name)
@@ -23,7 +23,7 @@ source.mkdir(exist_ok=True)
 with tarfile.open(archive) as tar:
     tar.extractall(source, filter='data')
 source = source / ('akquant-' + lock['upstream_version'])
-(source / 'jfquant-build-id').write_text('sha256:' + hashlib.sha256((repo / 'crates/app/packaging/akquant-source.lock.json').read_bytes()).hexdigest() + '\n')
+(source / 'jfquant-build-id').write_text('sha256:' + hashlib.sha256((repo / 'crates/workflow/research/akquant-source.lock.json').read_bytes()).hexdigest() + '\n')
 if hashlib.sha256((source / 'Cargo.lock').read_bytes()).hexdigest() != lock['cargo_lock_sha256']:
     raise SystemExit('AKQuant Cargo lock mismatch')
 for name in ('rights', 'rights_account'):
@@ -38,6 +38,6 @@ PYO3_PYTHON="$python" MACOSX_DEPLOYMENT_TARGET=14.0 "$build_root/tools/bin/matur
 import hashlib, json, pathlib, sys
 repo, root = map(pathlib.Path, sys.argv[1:])
 wheel = next((root / 'patched-wheels').glob('akquant-0.3.66-*.whl'))
-receipt = {'schema_version': 1, 'source_lock_sha256': hashlib.sha256((repo / 'crates/app/packaging/akquant-source.lock.json').read_bytes()).hexdigest(), 'wheel_sha256': hashlib.sha256(wheel.read_bytes()).hexdigest(), 'wheel': str(wheel)}
+receipt = {'schema_version': 1, 'source_lock_sha256': hashlib.sha256((repo / 'crates/workflow/research/akquant-source.lock.json').read_bytes()).hexdigest(), 'wheel_sha256': hashlib.sha256(wheel.read_bytes()).hexdigest(), 'wheel': str(wheel)}
 (root / 'build-receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
 PY

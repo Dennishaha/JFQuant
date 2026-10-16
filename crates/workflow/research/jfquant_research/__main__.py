@@ -47,7 +47,7 @@ def main():
     with contextlib.redirect_stdout(sys.stderr):
         from .backtest import backtest
         from .training import predict, train
-        lock = Path(sys.prefix) / "requirements.lock"
+        lock = Path(sys.prefix) / "research-requirements.lock"
         expected = {}
         for line in lock.read_text().splitlines():
             if line and not line[0].isspace() and "==" in line and not line.startswith("#"):

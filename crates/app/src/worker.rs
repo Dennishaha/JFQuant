@@ -7,7 +7,7 @@ pub use analytics_workflow::backend::{
     RunSummary, TaskKind, WorkerCommand, WorkerEvent, WorkerHandle,
 };
 #[cfg(test)]
-use analytics_workflow::backend::{Worker, pipeline_error_message};
+use analytics_workflow::backend::{TestWorker as Worker, pipeline_error_message};
 #[cfg(test)]
 use analytics_workflow::research::TrainingConfig;
 
@@ -72,19 +72,7 @@ mod tests {
     #[test]
     fn desktop_pages_preserve_duplicate_and_null_keys_and_quote_column_names() {
         let (tx, _) = channel();
-        let mut worker = Worker {
-            root: None,
-            record_request: None,
-            active_record: None,
-            active_cancel: None,
-            outcome: None,
-            engine: None,
-            events: tx,
-            ctx: analytics_workflow::backend::Wake::default(),
-            stop_reason: None,
-            query_snapshot: None,
-            query_sessions: std::collections::HashMap::new(),
-        };
+        let mut worker = Worker::new(tx);
         for descending in [false, true] {
             let sql = "SELECT * FROM (VALUES (NULL, 5), (1, 2), (1, 2), (1, 3), (2, 4), (NULL, 6)) AS v(\"排序 列\", \"__JFQUANT_PAGE_ROW\")";
             let mut after = None;
@@ -149,19 +137,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("source.parquet");
         let (tx, _) = channel();
-        let mut worker = Worker {
-            root: None,
-            record_request: None,
-            active_record: None,
-            active_cancel: None,
-            outcome: None,
-            engine: None,
-            events: tx,
-            ctx: analytics_workflow::backend::Wake::default(),
-            stop_reason: None,
-            query_snapshot: None,
-            query_sessions: std::collections::HashMap::new(),
-        };
+        let mut worker = Worker::new(tx);
         worker
             .engine()
             .unwrap()
@@ -423,21 +399,9 @@ mod tests {
     fn owned_and_non_string_panic_payloads_become_errors() {
         for owned_string in [true, false] {
             let (tx, rx) = channel();
-            let mut worker = Worker {
-                root: None,
-                record_request: None,
-                active_record: None,
-                active_cancel: None,
-                outcome: None,
-                engine: None,
-                events: tx,
-                ctx: analytics_workflow::backend::Wake::default(),
-                stop_reason: None,
-                query_snapshot: None,
-                query_sessions: std::collections::HashMap::new(),
-            };
+            let mut worker = Worker::new(tx);
             let task = Uuid::new_v4();
-            worker.run_task(task, TaskKind::Query, "测试 panic 内容".into(), |_| {
+            worker.run_task(task, TaskKind::Query, "测试 panic 内容".into(), || {
                 if owned_string {
                     std::panic::panic_any(String::from("动态错误内容"));
                 }
@@ -452,7 +416,7 @@ mod tests {
             assert!(
                 matches!(events.last(), Some(WorkerEvent::Failed { message, .. }) if message.contains(expected))
             );
-            assert!(worker.stop_reason.as_ref().unwrap().contains(expected));
+            assert!(worker.stop_reason().unwrap().contains(expected));
         }
     }
 

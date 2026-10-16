@@ -2,7 +2,7 @@
 
 `rights`将格式8部分配股事实投影到固定原生AKQuant状态机；`account`独立重放登记、认购、退款、上市及锁定资产估值。App/CLI共用BacktestPredictions，默认放弃认购；主动选择参与时，默认首日一次、现金内部分认购；实际持仓缺必要字段停止。原生账户使用共享配股快照，避免订单预算反复深拷贝增长中的审计记录；估值只查有配股资产的证券，锁定价值不增加购买力。
 
-结果17保留读取16；账本rights-v2与旧v1分别核验。预测复用验证冻结来源、原预测及样本缓存哈希，不读取模型，不绕过原模型的运行时校验。普通成交、费用、T+1、成交量限制沿用上游固定版。配股费用与本金单独记录，不能伪装成普通市场成交。
+结果仅读取当前格式；账本rights-v2与旧v1分别核验。预测复用验证冻结来源、原预测及样本缓存哈希，不读取模型，不绕过原模型的运行时校验。普通成交、费用、T+1、成交量限制沿用上游固定版。配股费用与本金单独记录，不能伪装成普通市场成交。
 
 `data` prepares the unchanged Rust factor families and dated sample masks;
 `quality` qualifies the universe without future-dependent exclusions; `adjustment`
@@ -11,7 +11,7 @@ verifies training coefficients independently of account settlement dates.
 `akquant` converts raw bars, frozen membership and sample-out-of-fold scores to the
 Python worker. It rejects known unsupported events and nonrepresentable fees.
 `portfolio` computes reporting statistics only; it does not simulate an account.
-`report` renders the schema14 AKQuant semantics and upstream fee totals.
+`report` renders the current validated result contract and upstream fee totals.
 
 All folds feed one backtest. Report gaps and calendar years do not reset positions.
 Missing execution prices are not filled with zero or a different price field.
@@ -29,4 +29,6 @@ HiThink真实账户验收：年度因子分片按逐证券供应商口径读取�
 
 ## 独立训练和跨池执行
 
-`independent.rs` 定义计划、模型收据、切换计划和共享App/CLI操作；`independent_tests.rs` 包含隔离、时间安全、手算排名、缓存、历史特征稳定及无模型预测重放验收。执行适配器把新阶段接入同一因子/账户内核，原Schedule路径不变。训练发布5、结果19兼容16—18；按实际A/B字段分别签名。详细格式和命令见workflow根README。
+`independent.rs` 定义计划、模型收据、切换计划和共享App/CLI操作；`independent_tests.rs` 包含隔离、时间安全、手算排名、缓存、历史特征稳定及无模型预测重放验收。执行适配器把新阶段接入同一因子/账户内核，原Schedule路径不变。训练发布5、结果仅读取当前格式；按实际A/B字段分别签名。详细格式和命令见workflow根README。
+
+研究编排的阶段接口与验收见 [stages](stages/README.md)，产物类型集中在 `artifacts.rs`。

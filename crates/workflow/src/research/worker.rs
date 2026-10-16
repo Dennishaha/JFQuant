@@ -48,12 +48,8 @@ pub fn runtime_signature() -> String {
 /// Dependency receipt for cache and model isolation.
 pub fn dependency_signature() -> String {
     let mut digest = Sha256::new();
-    digest.update(include_bytes!(
-        "../../../storage/collectors/requirements.lock"
-    ));
-    digest.update(include_bytes!(
-        "../../../app/packaging/akquant-source.lock.json"
-    ));
+    digest.update(include_bytes!("../../research/requirements.lock"));
+    digest.update(include_bytes!("../../research/akquant-source.lock.json"));
     format!("sha256:{:x}", analytics_core::hash::Hex(digest.finalize()))
 }
 /// Reuse one worker for all folds and final backtest; always retire it at scope exit.

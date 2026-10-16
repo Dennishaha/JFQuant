@@ -78,7 +78,7 @@ flowchart LR
 
 ResearchConfig.factor_refs可混合内置158/191及自定义定义；必须与factor_ids同序。算子与公式版本
 进入因子签名及模型格式3的训练schema哈希，模型读取重核完整定义与编译收据。带引用训练描述为格式4，
-旧纯内置描述3继续验证；结果格式18，旧16/17仍读取。年度缓存按依赖扩大预热，并记录实际载入起点和递归种子规则。
+旧纯内置描述3继续验证；当前结果格式；旧结果归档后重建。年度缓存按依赖扩大预热，并记录实际载入起点和递归种子规则。
 修改/归档库中公式不影响冻结模型；端到端验收见`custom_factors::tests::frozen_mixed_research_trains_and_old_model_survives_library_edits`。
 
 ## 独立模型生命周期

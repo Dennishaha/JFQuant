@@ -46,3 +46,10 @@ LightGBM 4.7.0来自哈希锁定wheel，AKQuant 0.3.66按源码锁构建配股�
 Packaged CLI acceptance also invokes `research verify --task <UUID>` after the train/backtest fixture: the Rust closing ledger must replay consistently and valuation-only rows must have zero fills. Python supplies upstream fills and terminal account observations; Rust owns closing valuation, event exposure and result verification. See the workflow research README for the accounting contract.
 
 2026-10 依赖基线：maturin 1.15.0、Python 3.12.15/20261013；AKQuant 上游仍为 0.3.66，补丁把原生 Decimal 精确固定到 1.43.0，并包含配套 Cargo.lock 变更。构建先核验上游原始锁，再应用补丁，随后 `--locked` 构建。OpenMP 保持 20.1.8。锁更新后先结束运行时重建，再运行研究测试，避免签名竞争。
+
+## Dependency ownership
+
+AKQuant source receipts now live in `crates/workflow/research/akquant-source.lock.json`.
+The research dependency lock is installed alongside the collector lock and copied
+into the runtime as `research-requirements.lock`. Build and verify scripts consume
+these component-owned resources; no lock is owned by the desktop frontend.

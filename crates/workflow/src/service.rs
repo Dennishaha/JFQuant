@@ -26,7 +26,7 @@ use std::{
 };
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 24;
+pub const PROTOCOL_VERSION: u32 = 25;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TaskRequest {
@@ -658,6 +658,7 @@ pub fn serve(root: &Path) -> Result<()> {
     let _lease = workspace
         .lease()
         .map_err(|e| ServiceError::new("workspace_locked", e))?;
+    crate::maintenance::require_complete(workspace.root()).map_err(failure)?;
     workspace.recover().map_err(failure)?;
     for directory in [".jfquant/staging", ".jfquant/runs"] {
         analytics_storage::collector::cleanup_private_runtimes(&workspace.resolve(directory))

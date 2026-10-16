@@ -2,7 +2,7 @@
 
 HiThink 为默认主源，由 Rust 直接调用 REST；通达信备用，维持内置 Python `tdxaidata==1.2.2`；巨潮公告使用独立 `cninfo` 来源。旧来源依赖、配置、权限检查及历史兼容入口已移除；旧数据不迁移、不删除，重新配置来源并采集。
 
-公共来源为 `hithink|tdxaidata|cninfo`，复权选项为 `hithink-forward|tdx-forward|none`。服务协议23、采集协议13、来源策略2；HiThink 行情格式6，通达信格式5与 Qlib 读取保留。HiThink 训练选择供应商口径（`price_basis=provider`），前复权 OHLC、原始股数及人民币成交额、VWAP null；回测使用原价。训练缓存与 manifest 冻结口径、来源和证据哈希，特征顺序及公式版本保持。
+公共来源为 `hithink|tdxaidata|cninfo`，复权选项为 `hithink-forward|tdx-forward|none`。服务版本见 workflow::service::PROTOCOL_VERSION、采集协议13、来源策略2；HiThink 行情格式6，通达信格式5与 Qlib 读取保留。HiThink 训练选择供应商口径（`price_basis=provider`），前复权 OHLC、原始股数及人民币成交额、VWAP null；回测使用原价。训练缓存与 manifest 冻结口径、来源和证据哈希，特征顺序及公式版本保持。
 
 接口、凭据、覆盖范围与复现命令见[采集组件](../../storage/collectors/README.md)。当前成分不能回填历史，下载成功不代表研究或账户资料完整。
 
@@ -61,7 +61,7 @@ cargo clippy -p analytics-cli --all-targets -- -D warnings
 
 ## 动态股票池与 Python 采集接口
 
-当前模板schema 10、研究结果schema14、服务协议14；公式仍为v4。解析后配置包含 `pool_version`、`benchmark` 和 `pool_exit_policy`（磁盘保存于TargetProfile）；默认 `builtin:csi500` / `SH000905`，沪深300模板使用 `builtin:csi300` / `SH000300`。自选和集合组合引用不可变pool版本，冻结成员区间、人工日期调整及输入哈希；模型manifest和缓存签名包含这些研究输入。原schema结果明确拒绝，历史状态和日志仍可查看，不转换旧文件。
+当前模板schema 10、研究结果版本见 RESEARCH_SCHEMA_VERSION、服务版本见 workflow::service::PROTOCOL_VERSION；公式仍为v4。解析后配置包含 `pool_version`、`benchmark` 和 `pool_exit_policy`（磁盘保存于TargetProfile）；默认 `builtin:csi500` / `SH000905`，沪深300模板使用 `builtin:csi300` / `SH000300`。自选和集合组合引用不可变pool版本，冻结成员区间、人工日期调整及输入哈希；模型manifest和缓存签名包含这些研究输入。原schema结果明确拒绝，历史状态和日志仍可查看，不转换旧文件。
 
 ```mermaid
 flowchart LR
@@ -99,7 +99,7 @@ DateOptions仅在clap层，将train/validation/test任意日期、step/step-unit
 
 第二档保持原成员，纯缺失传播null；第三档派生每日合格成员，不改原始成员或证据。不能看到后来缺价而倒删早期股票。账户仍采用原价、整数股、T+1和连续权益；未裁定冲突、损坏、基准缺项及剩余必要依赖仍阻断。默认有效因子比例0表示至少一项有效，最低有标签样本1只表示可执行，不表示样本在统计上充分。所选因子整列无有效值不会被自动删除。
 
-QualityOptions/StrictnessValue仅负责clap解析，research_template把覆盖值写入公共ResearchQualityPolicy再调用业务校验。preview/check/run和prepare-data共用同一路径，不能在CLI层把失败变成成功。stdout继续只输出JSON，帮助文本展示三个稳定枚举；查看原因通过jobs results。协议14、模板10、结果14，旧格式无回退。
+QualityOptions/StrictnessValue仅负责clap解析，research_template把覆盖值写入公共ResearchQualityPolicy再调用业务校验。preview/check/run和prepare-data共用同一路径，不能在CLI层把失败变成成功。stdout继续只输出JSON，帮助文本展示三个稳定枚举；查看原因通过jobs results。协议版本见 workflow::service::PROTOCOL_VERSION、模板10、当前结果，旧格式无回退。
 
 ```mermaid
 flowchart LR

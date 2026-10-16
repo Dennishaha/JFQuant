@@ -74,7 +74,7 @@ fn identity(request: &ResearchRequest, factors: &str, folds: &[ResolvedFold]) ->
                 "sha256:{:x}",
                 analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(&unsigned)?))
             )
-            || training["schema_version"] != 3
+            || training["schema_version"] != artifacts::TRAINING_SCHEMA_VERSION
             || training["status"] != "trained"
             || serde_json::from_slice::<serde_json::Value>(&fs::read(source.join("summary.json"))?)?
                 ["factor_signature"]
@@ -233,7 +233,12 @@ pub(super) fn publish(
         .collect::<Result<BTreeMap<_, _>>>()?;
     save(
         staging.join("manifest.json"),
-        &serde_json::json!({"schema_version":1,"signature":key,"rows":signals.len(),"files":hashes}),
+        &artifacts::PredictionCacheManifest {
+            schema_version: 1,
+            signature: key.clone(),
+            rows: signals.len(),
+            files: hashes,
+        },
     )?;
     analytics_core::task::TaskContext::current().check()?;
     fs::rename(&staging, &dest)?;
@@ -243,7 +248,14 @@ pub(super) fn publish(
     )?;
     save(
         request.output.join("prediction_manifest.json"),
-        &serde_json::json!({"schema_version":1,"signature":key,"sha256":file_hash(&dest.join("predictions.parquet"))?,"rows":signals.len(),"status":"completed","cache_hit":false}),
+        &artifacts::PredictionReceipt {
+            schema_version: 1,
+            signature: key,
+            sha256: file_hash(&dest.join("predictions.parquet"))?,
+            rows: signals.len(),
+            status: "completed".into(),
+            cache_hit: false,
+        },
     )?;
     Ok(())
 }
@@ -257,11 +269,12 @@ pub(super) fn restore(
     if !dir.join("manifest.json").is_file() {
         return Ok(None);
     }
-    let m: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("manifest.json"))?)?;
-    if m["schema_version"] != 1 || m["signature"] != key {
+    let m: artifacts::PredictionCacheManifest =
+        serde_json::from_slice(&fs::read(dir.join("manifest.json"))?)?;
+    if m.schema_version != 1 || m.signature != key {
         return Err("prediction cache identity mismatch".into());
     }
-    let hashes: BTreeMap<String, String> = serde_json::from_value(m["files"].clone())?;
+    let hashes = m.files;
     if let Some(source) = &request.reuse_predictions {
         let published: serde_json::Value =
             serde_json::from_slice(&fs::read(source.join("prediction_manifest.json"))?)?;
@@ -358,7 +371,7 @@ pub(super) fn restore(
             ));
         }
     }
-    if m["rows"] != signals.len() {
+    if m.rows != signals.len() {
         return Err("prediction cache row count mismatch".into());
     }
     let mut seen = BTreeSet::new();

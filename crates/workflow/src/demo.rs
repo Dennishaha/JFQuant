@@ -1,5 +1,10 @@
 //! Explicit synthetic demo inputs for full app acceptance without public market data.
 use crate::*;
+use analytics_storage::corporate_actions::ActionBundle;
+use serde_json::json;
+use std::{collections::BTreeSet, fs};
+use uuid::Uuid;
+
 /// Deterministic IDs belonging only to explicitly marked synthetic inputs.
 pub fn fixture_security_id(code: &str) -> String {
     code.to_owned()

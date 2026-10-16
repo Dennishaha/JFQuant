@@ -356,16 +356,15 @@ pub fn spawn_in_workspace(
             let ctx = worker_ctx;
             let outcome = catch_unwind(AssertUnwindSafe(|| {
                 Worker {
-                    root,
+                    root: root.clone(),
                     record_request: None,
                     active_record: None,
                     active_cancel: None,
                     outcome: None,
-                    engine: None,
+                    query: QuerySession::new(root.clone()),
                     events: event_tx.clone(),
                     ctx: ctx.clone(),
                     stop_reason: None,
-                    query_snapshot: None,
                     query_sessions: std::collections::HashMap::new(),
                 }
                 .run(command_rx)
@@ -391,25 +390,17 @@ pub fn spawn_in_workspace(
 }
 
 #[doc(hidden)]
-pub struct Worker {
-    pub root: Option<PathBuf>,
-    pub record_request: Option<serde_json::Value>,
-    pub active_record: Option<crate::RunRecord>,
-    pub active_cancel: Option<Cancellation>,
-    pub outcome: Option<crate::WorkflowOutcome>,
-    pub engine: Option<DuckDbEngine>,
-    pub events: Sender<WorkerEvent>,
-    pub ctx: Wake,
-    pub stop_reason: Option<String>,
-    pub query_snapshot: Option<QuerySnapshot>,
-    pub query_sessions: std::collections::HashMap<Uuid, (Box<Worker>, std::time::Instant)>,
-}
-
-#[doc(hidden)]
-pub struct QuerySnapshot {
-    request: PageRequest,
-    sql: String,
-    ordinal: String,
+pub(crate) struct Worker {
+    root: Option<PathBuf>,
+    record_request: Option<serde_json::Value>,
+    active_record: Option<crate::RunRecord>,
+    active_cancel: Option<Cancellation>,
+    outcome: Option<crate::WorkflowOutcome>,
+    query: QuerySession,
+    events: Sender<WorkerEvent>,
+    ctx: Wake,
+    stop_reason: Option<String>,
+    query_sessions: std::collections::HashMap<Uuid, (QuerySession, std::time::Instant)>,
 }
 
 fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
@@ -441,17 +432,12 @@ impl Worker {
         self.stop_reason.take()
     }
 
-    pub fn engine(&mut self) -> Result<&mut DuckDbEngine, String> {
-        if self.engine.is_none() {
-            let mut engine = DuckDbEngine::open_in_memory().map_err(|e| e.to_string())?;
-            if let Some(root) = &self.root {
-                engine.set_file_root(root).map_err(|e| e.to_string())?;
-            }
-            self.engine = Some(engine);
-        }
-        Ok(self.engine.as_mut().expect("engine initialized"))
+    fn engine(&mut self) -> Result<&mut DuckDbEngine, String> {
+        self.query.engine()
     }
-
+    fn query_page(&mut self, request: PageRequest) -> Result<QueryPage, String> {
+        self.query.query_page(request)
+    }
     fn emit_result(&self, event: WorkerEvent) -> Result<(), String> {
         if let Some(root) = &self.root {
             let task = match &event {
@@ -477,120 +463,6 @@ impl Worker {
     fn emit(&self, event: WorkerEvent) {
         let _ = self.events.send(event);
         self.ctx.request_repaint();
-    }
-
-    pub fn query_page(&mut self, request: PageRequest) -> Result<QueryPage, String> {
-        // Desktop cursors contain a hidden ordinal, not the selected column's
-        // value. Sort all remaining columns to make ties deterministic; identical
-        // rows remain distinct and NULLs are placed last in either direction.
-        if request.after.is_none() {
-            self.query_snapshot = None;
-            if let Some(engine) = &mut self.engine {
-                engine
-                    .clear_query_snapshot()
-                    .map_err(|error| error.to_string())?;
-            }
-        }
-        let mut validation = request.clone();
-        validation.after = None;
-        validation.validate().map_err(|error| error.to_string())?;
-        if let Some(cursor) = &request.after
-            && !matches!(cursor.0.as_slice(), [ScalarValue::Int64(value)] if *value > 0)
-        {
-            return Err("分页游标无效，请重新执行查询。".into());
-        }
-        if request.after.is_some() {
-            let snapshot = self
-                .query_snapshot
-                .as_ref()
-                .ok_or("分页结果已失效，请重新执行查询。")?;
-            if !same_query(&request, &snapshot.request) {
-                return Err("查询条件已改变，请重新执行查询。".into());
-            }
-            let sql = snapshot.sql.clone();
-            let ordinal = snapshot.ordinal.clone();
-            return self.snapshot_page(sql, ordinal, request.limit, request.after);
-        }
-        let engine = self.engine()?;
-        let columns = engine
-            .describe(&request.sql)
-            .map_err(|error| error.to_string())?;
-        let mut sort = request.sort.clone();
-        for key in &mut sort {
-            key.column = columns
-                .iter()
-                .find(|column| column.name.eq_ignore_ascii_case(&key.column))
-                .ok_or_else(|| format!("排序列不存在：{}。请选择默认排序后重新执行。", key.column))?
-                .name
-                .clone();
-        }
-        for column in &columns {
-            if !sort.iter().any(|key| key.column == column.name) {
-                sort.push(SortKey {
-                    column: column.name.clone(),
-                    descending: false,
-                });
-            }
-        }
-        let quote = |name: &str| format!("\"{}\"", name.replace('"', "\"\""));
-        let order = sort
-            .iter()
-            .map(|key| {
-                format!(
-                    "q.{} {} NULLS LAST",
-                    quote(&key.column),
-                    if key.descending { "DESC" } else { "ASC" }
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        let mut ordinal = "__jfquant_page_row".to_string();
-        while columns
-            .iter()
-            .any(|column| column.name.eq_ignore_ascii_case(&ordinal))
-        {
-            ordinal.push('_');
-        }
-        let sql = format!(
-            "SELECT row_number() OVER (ORDER BY {order}) AS {}, q.* FROM ({}) AS q",
-            quote(&ordinal),
-            request.sql
-        );
-        let sql = engine
-            .replace_query_snapshot(&sql)
-            .map_err(|error| error.to_string())?;
-        self.query_snapshot = Some(QuerySnapshot {
-            request: request.clone(),
-            sql: sql.clone(),
-            ordinal: ordinal.clone(),
-        });
-        self.snapshot_page(sql, ordinal, request.limit, request.after)
-    }
-
-    fn snapshot_page(
-        &mut self,
-        sql: String,
-        ordinal: String,
-        limit: u32,
-        after: Option<analytics_core::KeysetCursor>,
-    ) -> Result<QueryPage, String> {
-        let mut page = self
-            .engine()?
-            .query_page(PageRequest {
-                sql,
-                limit,
-                sort: vec![SortKey {
-                    column: ordinal,
-                    descending: false,
-                }],
-                after,
-            })
-            .map_err(|error| error.to_string())?;
-        page.columns.remove(0);
-        for row in &mut page.rows {
-            row.remove(0);
-        }
-        Ok(page)
     }
 
     fn path(&self, path: PathBuf) -> PathBuf {
@@ -733,14 +605,7 @@ impl Worker {
                         .get_mut(&session)
                         .ok_or("query_expired: 查询会话已过期，请重新执行查询。")?;
                     *used = std::time::Instant::now();
-                    let mut request = query
-                        .query_snapshot
-                        .as_ref()
-                        .ok_or("query_expired: 查询已失效")?
-                        .request
-                        .clone();
-                    request.after = Some(after);
-                    let page = query.query_page(request)?;
+                    let page = query.next(after)?;
                     worker.emit_result(WorkerEvent::QueryPaged { task, page })?;
                     Ok(())
                 });
@@ -755,19 +620,7 @@ impl Worker {
                         worker.query_sessions.insert(
                             session,
                             (
-                                Box::new(Worker {
-                                    root: worker.root.clone(),
-                                    record_request: None,
-                                    active_record: None,
-                                    active_cancel: None,
-                                    outcome: None,
-                                    engine: None,
-                                    events: worker.events.clone(),
-                                    ctx: worker.ctx.clone(),
-                                    stop_reason: None,
-                                    query_snapshot: None,
-                                    query_sessions: std::collections::HashMap::new(),
-                                }),
+                                QuerySession::new(worker.root.clone()),
                                 std::time::Instant::now(),
                             ),
                         );
@@ -934,125 +787,6 @@ impl Worker {
         }
     }
 
-    pub fn run_task(
-        &mut self,
-        task: Uuid,
-        kind: TaskKind,
-        label: String,
-        body: impl FnOnce(&mut Self) -> Result<(), String>,
-    ) {
-        self.emit(WorkerEvent::Started {
-            task,
-            kind,
-            label: label.clone(),
-        });
-        if let Some(root) = &self.root
-            && let Ok(bytes) = std::fs::read(root.join(format!(".jfquant/runs/{task}/run.json")))
-        {
-            self.active_record = serde_json::from_slice(&bytes).ok();
-            self.record_request = None;
-        }
-        if let (Some(root), Some(request)) = (&self.root, self.record_request.take()) {
-            match crate::Workspace::open(root).and_then(|w| w.begin(task, &label, request)) {
-                Ok(record) => self.active_record = Some(record),
-                Err(e) => {
-                    self.emit(WorkerEvent::Failed {
-                        task,
-                        kind,
-                        message: e.to_string(),
-                    });
-                    self.active_cancel = None;
-                    return;
-                }
-            }
-        }
-        let result = match catch_unwind(AssertUnwindSafe(|| body(self))) {
-            Ok(result) => result,
-            Err(payload) => {
-                // Stop after unwinding: mutable/native state may be inconsistent.
-                // Its handles are dropped here on their owning worker thread.
-                let message = format!(
-                    "后台任务发生内部错误：{}。请重启后台后重试。",
-                    panic_message(payload.as_ref())
-                );
-                self.stop_reason = Some(message.clone());
-                Err(message)
-            }
-        };
-        if let Some(mut record) = self.active_record.take() {
-            use crate::{RunStatus, WorkflowOutcome, Workspace};
-            let persisted = (|| -> crate::Result<()> {
-                let w = Workspace::open(self.root.as_ref().ok_or("workspace missing")?)?;
-                let readiness = w.resolve(&record.output).join("execution_readiness.json");
-                let blocked = std::fs::read(readiness)
-                    .ok()
-                    .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-                    .is_some_and(|v| v["ready"] == false);
-                let status = if self
-                    .active_cancel
-                    .as_ref()
-                    .is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
-                {
-                    RunStatus::Cancelled
-                } else if blocked {
-                    RunStatus::Blocked
-                } else if result.is_err() {
-                    RunStatus::Failed
-                } else {
-                    RunStatus::Succeeded
-                };
-                w.finish(
-                    &mut record,
-                    status,
-                    result
-                        .as_ref()
-                        .err()
-                        .cloned()
-                        .or_else(|| blocked.then(|| "数据未就绪，请查看缺失项".into())),
-                )?;
-                let outcome = match self.outcome.take() {
-                    Some(outcome) => outcome,
-                    None => WorkflowOutcome {
-                        data: None,
-                        details: if matches!(status, RunStatus::Succeeded | RunStatus::Blocked) {
-                            w.results(&record)?
-                        } else {
-                            serde_json::Value::Null
-                        },
-                    },
-                };
-                self.emit(WorkerEvent::WorkflowFinished {
-                    task,
-                    outcome,
-                    record,
-                    datasets: w.datasets()?,
-                    runs: w.runs()?,
-                });
-                Ok(())
-            })();
-            if let Err(e) = persisted {
-                self.emit(WorkerEvent::Failed {
-                    task,
-                    kind,
-                    message: format!("运行记录写入失败：{e}"),
-                });
-                self.active_cancel = None;
-                return;
-            }
-        }
-        self.active_cancel = None;
-        match result {
-            Ok(()) => self.emit(WorkerEvent::Finished { task }),
-            Err(message) => {
-                self.emit(WorkerEvent::Failed {
-                    task,
-                    kind,
-                    message,
-                });
-            }
-        }
-    }
-
     fn pipeline_progress(
         &self,
         task: Uuid,
@@ -1170,16 +904,6 @@ impl Worker {
             Err(_) => None,
         }
     }
-}
-
-fn same_query(a: &PageRequest, b: &PageRequest) -> bool {
-    a.sql == b.sql
-        && a.limit == b.limit
-        && a.sort.len() == b.sort.len()
-        && a.sort
-            .iter()
-            .zip(&b.sort)
-            .all(|(a, b)| a.column == b.column && a.descending == b.descending)
 }
 
 pub fn pipeline_error_message(error: PipelineError) -> String {
@@ -1323,11 +1047,10 @@ mod session_lifecycle_tests {
             active_record: None,
             active_cancel: None,
             outcome: None,
-            engine: None,
+            query: QuerySession::default(),
             events,
             ctx: Wake::default(),
             stop_reason: None,
-            query_snapshot: None,
             query_sessions: std::collections::HashMap::new(),
         };
         let session = Uuid::new_v4();
@@ -1345,5 +1068,48 @@ mod session_lifecycle_tests {
             std::time::Instant::now() - std::time::Duration::from_secs(601);
         worker.expire_queries();
         assert!(worker.query_sessions.is_empty());
+    }
+}
+
+mod query;
+use query::QuerySession;
+mod lifecycle;
+
+/// Synchronous harness for backend acceptance tests; absent from production builds.
+#[cfg(any(test, feature = "test-support"))]
+pub struct TestWorker(Worker);
+#[cfg(any(test, feature = "test-support"))]
+impl TestWorker {
+    pub fn new(events: Sender<WorkerEvent>) -> Self {
+        Self(Worker {
+            root: None,
+            record_request: None,
+            active_record: None,
+            active_cancel: None,
+            outcome: None,
+            query: QuerySession::default(),
+            events,
+            ctx: Wake::default(),
+            stop_reason: None,
+            query_sessions: Default::default(),
+        })
+    }
+    pub fn engine(&mut self) -> Result<&mut DuckDbEngine, String> {
+        self.0.engine()
+    }
+    pub fn query_page(&mut self, request: PageRequest) -> Result<QueryPage, String> {
+        self.0.query_page(request)
+    }
+    pub fn run_task(
+        &mut self,
+        task: Uuid,
+        kind: TaskKind,
+        label: String,
+        body: impl FnOnce() -> Result<(), String>,
+    ) {
+        self.0.run_task(task, kind, label, |_| body());
+    }
+    pub fn stop_reason(&self) -> Option<&str> {
+        self.0.stop_reason.as_deref()
     }
 }

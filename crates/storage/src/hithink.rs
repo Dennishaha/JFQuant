@@ -1,5 +1,5 @@
 //! Worker-local HiThink REST acquisition. Supplier OHLC is distinct from raw execution prices.
-//! Public contract: https://fuyao.aicubes.cn/llms-full.txt (checked 2026-10-15).
+//! Public contract: <https://fuyao.aicubes.cn/llms-full.txt> (checked 2026-10-15).
 use crate::{
     adjustment::{AdjustmentBasis, AdjustmentRecord, HITHINK_NORMALIZATION},
     collector::{CollectionRequest, Provider},

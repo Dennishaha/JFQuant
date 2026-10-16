@@ -1,6 +1,11 @@
 //! Independent acquisition: incomplete inputs remain candidates, never research snapshots.
 use crate::*;
-use std::collections::BTreeMap;
+use analytics_core::task::TaskContext;
+use analytics_storage::corporate_actions::ActionBundle;
+use serde_json::{Value, json};
+use std::{collections::BTreeMap, fs, path::Path};
+use uuid::Uuid;
+
 /// Run each dependency independently and persist failures without discarding validated shards.
 pub fn collect_independent<F>(
     root: &Path,

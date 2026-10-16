@@ -3,6 +3,10 @@
 set -euo pipefail
 app="${1:?App bundle path required}"
 check_root="${2:?Generated acceptance output directory required}"
+repo_root="$(cd "$(dirname "$0")/../../.." && pwd)"
+result_schema="$(sed -n 's/^pub const RESEARCH_SCHEMA_VERSION: u32 = \([0-9]*\);/\1/p' "$repo_root/crates/workflow/src/research/backtest.rs")"
+training_schema="$(sed -n 's/^pub(super) const TRAINING_SCHEMA_VERSION: u32 = \([0-9]*\);/\1/p' "$repo_root/crates/workflow/src/research/backtest/artifacts.rs")"
+[ -n "$result_schema" ] && [ -n "$training_schema" ]
 mkdir -p "$check_root/home"
 cli="$app/Contents/MacOS/jfquant"
 run_cli() { env -i HOME="$check_root/home" PATH=/usr/bin:/bin "$cli" --workspace "$check_root/workspace" "$@"; }
@@ -58,7 +62,7 @@ run_cli research run --template "$recipe" --market "$market" --actions "$actions
 research_id="$(plutil -extract task_id raw -o - "$check_root/research-submission.json")"
 run_cli jobs wait "$research_id" --timeout 60 > "$check_root/research.json"
 run_cli jobs results "$research_id" > "$check_root/online-results.json"
-[ "$(plutil -extract schema_version raw -o - "$check_root/online-results.json")" = 17 ]
+[ "$(plutil -extract schema_version raw -o - "$check_root/online-results.json")" = "$result_schema" ]
 [ "$(plutil -extract execution.mode raw -o - "$check_root/online-results.json")" = akquant_ex_date ]
 "$app/Contents/Resources/python/bin/python3" -I -B - "$check_root/online-results.json" <<'PY'
 import hashlib
@@ -141,7 +145,7 @@ run_cli jobs results "$training_id" > "$check_root/train-results.json"
 run_cli research backtest --training "$training_id" --actions "$actions" --template "$recipe" > "$check_root/backtest-submit.json"
 backtest_id="$(plutil -extract task_id raw -o - "$check_root/backtest-submit.json")"
 run_cli jobs wait "$backtest_id" --timeout 60 > "$check_root/backtest-wait.json"
-[ "$(plutil -extract results.schema_version raw -o - "$check_root/backtest-wait.json")" = 17 ]
+[ "$(plutil -extract results.schema_version raw -o - "$check_root/backtest-wait.json")" = "$result_schema" ]
 run_cli research verify --task "$backtest_id" > "$check_root/backtest-verification.json"
 [ "$(plutil -extract status raw -o - "$check_root/backtest-verification.json")" = consistent ]
 [ "$(plutil -extract fills_on_valuation_only_rows raw -o - "$check_root/backtest-verification.json")" = 0 ]
@@ -175,7 +179,7 @@ PYPROFILE
   run_cli jobs results "$provider_id" > "$check_root/$family-model.json"
   [ "$(plutil -extract price_basis raw -o - "$check_root/$family-model.json")" = provider ]
   [ "$(plutil -extract factor_set raw -o - "$check_root/$family-model.json")" = "$family" ]
-  [ "$(plutil -extract schema_version raw -o - "$check_root/$family-model.json")" = 3 ]
+  [ "$(plutil -extract schema_version raw -o - "$check_root/$family-model.json")" = "$training_schema" ]
 done
 
 # Cancel a running bundled research process, then verify partial work is not published.

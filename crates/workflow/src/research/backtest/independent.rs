@@ -797,8 +797,8 @@ pub fn train(
         segments: vec![],
         training_plan: Some(plan.clone()),
     };
-    let result =
-        context.execute(|| crate::research::worker::scoped(|| run_scoped_mode(&r, Some(&mode))));
+    let result = context
+        .execute(|| crate::research::worker::scoped(|| stages::run(&r, Some(&mode), context)));
     if r.output.is_dir() {
         let stages = json!({"schema_version":2,"training":if r.output.join("training.json").is_file(){"completed"}else if context.cancel.load(std::sync::atomic::Ordering::Relaxed){"cancelled"}else{"incomplete"},"prediction":"not_started","backtest":"not_started"});
         crate::atomic_json(&r.output.join("stages.json"), &stages)?;
@@ -936,8 +936,8 @@ pub fn backtest(
     fs::create_dir_all(&r.output)?;
     save(r.output.join("backtest_plan.json"), plan)?;
     save(r.output.join("model_selection.json"), frozen)?;
-    let result =
-        context.execute(|| crate::research::worker::scoped(|| run_scoped_mode(&r, Some(&mode))));
+    let result = context
+        .execute(|| crate::research::worker::scoped(|| stages::run(&r, Some(&mode), context)));
     save(
         r.output.join("stages.json"),
         &json!({"schema_version":2,"training":"reused","prediction":if r.output.join("prediction_manifest.json").exists(){"completed"}else{"incomplete"},"backtest":if result.is_ok(){"completed"}else if context.cancel.load(std::sync::atomic::Ordering::Relaxed){"cancelled"}else{"failed"}}),
@@ -1440,7 +1440,7 @@ pub(super) fn replay_predictions(
         source.join("backtest_plan.json"),
         output.join("backtest_plan.json"),
     )?;
-    context.execute(|| crate::research::worker::scoped(|| run_scoped_mode(&r, Some(&mode))))
+    context.execute(|| crate::research::worker::scoped(|| stages::run(&r, Some(&mode), context)))
 }
 
 /// Hash the numeric/identity inputs actually used by A or B, excluding other securities.

@@ -385,7 +385,7 @@ fn provider_training_without_events_keeps_warning_and_model_and_verified_input_s
         serde_json::from_slice(&fs::read(w.resolve(&run.output).join("training.json")).unwrap())
             .unwrap();
     crate::research::backtest::validate_training_artifact(&artifact).unwrap();
-    assert_eq!(artifact["schema_version"], 3);
+    assert_eq!(artifact["schema_version"], 4);
     assert_eq!(artifact["price_basis"], "provider");
     assert!(
         artifact["source_warnings"]

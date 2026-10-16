@@ -115,6 +115,25 @@ fn check_identity(data: &Value, code: &str) -> io::Result<()> {
 fn transient(status: u16, code: i64) -> bool {
     matches!(status, 429 | 500 | 502 | 503 | 504) || matches!(code, 4001 | 5001 | 5002 | 5003)
 }
+// Do not infer symbol absence from generic 1002: this provider also uses it
+// for invalid parameters. Match its captured message to the requested locator.
+fn business_failure(code: i64, message: Option<&str>, symbol: Option<&str>) -> String {
+    let unknown = symbol.is_some_and(|s| message == Some(format!("Unknown thscode: {s}").as_str()));
+    let kind = match code {
+        1002 if unknown => "unknown_symbol",
+        1002 => "invalid_parameters",
+        2001 => "authentication",
+        2003 => "permission",
+        3001 => "unknown_symbol",
+        4001 => "rate_limit",
+        5001..=5003 => "upstream",
+        _ => "business",
+    };
+    format!(
+        "hithink_{kind}:{code}{}",
+        symbol.map(|s| format!(":{s}")).unwrap_or_default()
+    )
+}
 struct Client<'a> {
     key: String,
     root: &'a Path,
@@ -228,7 +247,14 @@ impl Client<'_> {
                 {
                     return Ok(data);
                 }
-                return Err(invalid(format!("hithink_business_error:{code}")));
+                return Err(invalid(business_failure(
+                    code,
+                    value["message"].as_str(),
+                    params
+                        .iter()
+                        .find(|(name, _)| *name == "thscode")
+                        .map(|(_, s)| s.as_str()),
+                )));
             }
             if !value["data"].is_object() {
                 return Err(invalid("hithink_invalid_data"));
@@ -879,8 +905,23 @@ fn actions(client: &mut Client<'_>, request: &CollectionRequest) -> io::Result<P
         })();
         if let Err(e) = result {
             client.context.check()?;
-            bundle.failures.insert(id.clone(), e.to_string());
-            client.receipts.clear();
+            let failure = e.to_string();
+            let evidence = client.evidence();
+            let name = format!("{id}-actions-failure.json");
+            let receipt = json!({"instrument":id,"source_symbol":symbol,"failure":failure,
+                "request_range":{"start":request.start,"end":request.end},"evidence":evidence});
+            save(&client.root.join("raw").join(&name), &receipt)?;
+            bundle
+                .raw_sha256
+                .extend(crate::collector::verify_http_receipts(
+                    client.root,
+                    &receipt["evidence"],
+                )?);
+            bundle.raw_sha256.insert(
+                name,
+                digest(&serde_json::to_vec_pretty(&receipt).map_err(invalid)?),
+            );
+            bundle.failures.insert(id.clone(), failure);
         }
     }
     let complete = json!({"collector_signature":producer_signature(),"provider":"hithink","collector_protocol":13});
@@ -915,14 +956,34 @@ fn parse_action_events(
     range: &DateRange,
 ) -> io::Result<ParsedActionEvents> {
     let mut issues = vec![];
-    let mut dates = BTreeSet::new();
+    let mut dates: BTreeMap<Date, Vec<&Value>> = BTreeMap::new();
     let mut records = vec![];
+    // Validate every row before classifying duplicates; malformed terms or a
+    // foreign identity must never be hidden by the reviewable conflict path.
+    check_identity(data, code)?;
     for row in items(data)? {
         check_identity(row, code)?;
         let ex = day(&row["ex_date_ms"])?;
-        if !range.contains(ex) || !dates.insert(ex) {
-            return Err(invalid("hithink_event_duplicate_or_out_of_range"));
+        if !range.contains(ex) {
+            return Err(invalid("hithink_event_out_of_range"));
         }
+        numeric(&row["dividend_per_share"], false)?
+            .ok_or_else(|| invalid("hithink_event_terms_missing"))?;
+        numeric(&row["per_share_bonus"], false)?
+            .ok_or_else(|| invalid("hithink_event_terms_missing"))?;
+        dates.entry(ex).or_default().push(row);
+    }
+    for (ex, rows) in dates {
+        if rows.len() > 1 {
+            issues.push(crate::execution_data::ExecutionIssue {
+                id: format!("hithink-same-date:{id}:{ex}"), instrument: id.into(), announced: None,
+                dates: DateRange { start: ex, end: ex }, code: "source_event_conflict".into(),
+                event_category: "distribution".into(), evidence: vec![],
+                message: format!("HiThink returned {} rows on the same ex-date; original rows retained, authoritative terms review required before execution", rows.len()),
+            });
+            continue;
+        }
+        let row = rows[0];
         let cash = numeric(&row["dividend_per_share"], false)?
             .ok_or_else(|| invalid("hithink_event_terms_missing"))?;
         let shares = numeric(&row["per_share_bonus"], false)?
@@ -990,6 +1051,71 @@ mod tests {
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].event_category, "unknown");
         assert!(!issues[0].skipped_by_engine());
+    }
+    #[test]
+    fn same_date_rows_require_review_without_discarding_other_dates() {
+        let a = json!({"ticker":"600000","ex_date_ms":millis(range().start),"dividend_per_share":0.16,"per_share_bonus":0});
+        let b = json!({"ticker":"600000","ex_date_ms":millis(range().start),"dividend_per_share":0.50,"per_share_bonus":0.30});
+        let c = json!({"ticker":"600000","ex_date_ms":millis(range().end),"dividend_per_share":0.42,"per_share_bonus":0});
+        for rows in [
+            vec![a.clone(), b.clone(), c.clone()],
+            vec![c.clone(), b, a.clone()],
+            vec![a.clone(), a.clone(), c],
+        ] {
+            let data = json!({"item":rows});
+            let (records, issues) =
+                parse_action_events("SH600000", "600000.SH", &data, &range()).unwrap();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].ex_date, range().end);
+            assert_eq!(issues.len(), 1);
+            assert_eq!(issues[0].id, "hithink-same-date:SH600000:2024-01-02");
+            assert_eq!(issues[0].code, "source_event_conflict");
+            assert!(!issues[0].skipped_by_engine());
+        }
+        for (field, value) in [
+            ("dividend_per_share", Value::Null),
+            ("per_share_bonus", json!(-1)),
+            ("ticker", json!("000001")),
+            ("ex_date_ms", json!(millis(range().end) + 86400000)),
+        ] {
+            let mut broken = a.clone();
+            broken[field] = value;
+            assert!(
+                parse_action_events(
+                    "SH600000",
+                    "600000.SH",
+                    &json!({"item":[a.clone(),broken]}),
+                    &range()
+                )
+                .is_err()
+            );
+        }
+    }
+    #[test]
+    fn business_errors_distinguish_exact_unknown_symbol_from_bad_parameters() {
+        assert_eq!(
+            business_failure(1002, Some("Unknown thscode: 300114.SZ"), Some("300114.SZ")),
+            "hithink_unknown_symbol:1002:300114.SZ"
+        );
+        for message in [
+            None,
+            Some("Invalid thscode"),
+            Some("Unknown thscode: 000001.SZ"),
+        ] {
+            assert_eq!(
+                business_failure(1002, message, Some("300114.SZ")),
+                "hithink_invalid_parameters:1002:300114.SZ"
+            );
+        }
+        for (code, kind) in [
+            (2001, "authentication"),
+            (2003, "permission"),
+            (3001, "unknown_symbol"),
+            (4001, "rate_limit"),
+            (5002, "upstream"),
+        ] {
+            assert!(business_failure(code, None, None).starts_with(&format!("hithink_{kind}:")));
+        }
     }
     #[test]
     fn codes_exchange_dates_units_null_and_duplicates_are_strict() {
@@ -1263,6 +1389,31 @@ mod tests {
         };
         assert!(actions(&mut client, &request).is_err());
         assert_eq!(first_server.join().unwrap().len(), 2);
+        let failed =
+            crate::corporate_actions::ActionBundle::read(&temp.path().join("actions.json"))
+                .unwrap();
+        assert_eq!(
+            failed.failures["SZ000001"],
+            "hithink_permission:2003:000001.SZ"
+        );
+        assert!(!failed.queried_symbols.contains("SZ000001"));
+        assert!(!failed.structured_coverage.contains_key("SZ000001"));
+        let receipt: Value = serde_json::from_slice(
+            &fs::read(temp.path().join("raw/SZ000001-actions-failure.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt["evidence"]["http_receipts"][0]["status"], 200);
+        assert_eq!(
+            crate::collector::verify_http_receipts(temp.path(), &receipt["evidence"])
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            failed
+                .raw_sha256
+                .contains_key("SZ000001-actions-failure.json")
+        );
         assert!(
             temp.path()
                 .join("SH600000-action-checkpoint.json")

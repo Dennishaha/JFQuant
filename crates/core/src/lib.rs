@@ -18,6 +18,8 @@ pub mod execution;
 pub mod market_rules;
 pub mod pool;
 pub mod research_quality;
+pub mod rights;
+pub mod rights_account;
 mod scalar_float;
 pub mod schedule;
 pub mod source_map;

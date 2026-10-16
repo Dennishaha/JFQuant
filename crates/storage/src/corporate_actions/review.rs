@@ -1,6 +1,37 @@
 //! Immutable, evidence-backed event corrections; never delete a failure marker alone.
 use super::*;
 use std::path::PathBuf;
+fn inherit_acquisition(source: &Path, output: &Path) -> io::Result<()> {
+    fn copy(source: &Path, output: &Path) -> io::Result<()> {
+        fs::create_dir(output)?;
+        for entry in fs::read_dir(source)? {
+            task_context_check()?;
+            let entry = entry?;
+            let ty = entry.file_type()?;
+            if ty.is_dir() {
+                copy(&entry.path(), &output.join(entry.file_name()))?;
+            } else if ty.is_file() {
+                fs::copy(entry.path(), output.join(entry.file_name()))?;
+            } else {
+                return Err(invalid("acquisition evidence cannot contain links"));
+            }
+        }
+        Ok(())
+    }
+    let bytes = fs::read(source.join("raw/source-evidence-sha256.json"))?;
+    let expected: String = serde_json::from_slice(&bytes).map_err(invalid)?;
+    if crate::market_view::tree_hash(&source.join("source-evidence"))? != expected {
+        return Err(invalid("source acquisition evidence changed"));
+    }
+    copy(
+        &source.join("source-evidence"),
+        &output.join("source-evidence"),
+    )?;
+    if crate::market_view::tree_hash(&output.join("source-evidence"))? != expected {
+        return Err(invalid("inherited acquisition evidence changed"));
+    }
+    Ok(())
+}
 /// A concrete field quote from a captured implementation document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -49,8 +80,8 @@ fn verify_structured(
     let expected = match path {
         "record_date" => "record_date",
         "ex_date" => "ex_date",
-        "terms.price" => "subscription_price",
-        "terms.ratio" => "rights_ratio",
+        "terms.price" | "terms.facts.price.value" => "subscription_price",
+        "terms.ratio" | "terms.facts.ratio.value" => "rights_ratio",
         _ => return Err(invalid("structured fact cannot prove this event field")),
     };
     if expected != reference.field || reference.event_id != event.id {
@@ -85,7 +116,7 @@ pub(super) fn verify_structured_revisions(bundle: &ActionBundle, root: &Path) ->
         if let Some(events) = receipt["request"]["events"].as_array() {
             outputs.extend(events.iter().map(|r| r["replacement"].clone()));
         }
-        if receipt["request"]["schema_version"] != 2 {
+        if !matches!(receipt["request"]["schema_version"].as_u64(), Some(2 | 3)) {
             continue;
         }
         let request: RevisionRequest =
@@ -134,6 +165,43 @@ fn changed_leaves(prefix: &str, old: &Value, new: &Value, out: &mut Vec<(String,
         out.push((prefix.into(), new.clone()));
     }
 }
+fn verify_leaf_document(
+    documents: &BTreeMap<String, (Value, String)>,
+    proof: &FieldEvidence,
+    event: &CorporateAction,
+    path: &str,
+) -> io::Result<()> {
+    let (document, text) = documents
+        .get(&proof.document_id)
+        .ok_or_else(|| invalid("unknown implementation document"))?;
+    let announced: Date = document["announced"]
+        .as_str()
+        .ok_or_else(|| invalid("missing disclosure date"))?
+        .parse()
+        .map_err(invalid)?;
+    let settlement = [
+        "terms.facts.allotment_date",
+        "terms.facts.allotment_ratio",
+        "terms.facts.refund_date",
+        "terms.facts.listing_date",
+        "terms.facts.conditional_refund",
+    ]
+    .iter()
+    .any(|p| path == *p || path.starts_with(&format!("{p}.")));
+    if document["instrument"] != event.instrument
+        || document["candidates"]["stage"] != "implementation"
+        || proof.quote.trim().is_empty()
+        || !text.contains(&proof.quote)
+        || proof.unit.trim().is_empty()
+        || document["url"]
+            .as_str()
+            .is_none_or(|u| !event.source.contains(u))
+        || (!settlement && event.record_date.is_some_and(|d| announced > d))
+    {
+        return Err(invalid("leaf evidence identity/disclosure/quote mismatch"));
+    }
+    Ok(())
+}
 /// Explicit resolution of a recorded source failure, requiring an actual event correction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -160,6 +228,9 @@ pub struct IssueResolution {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RevisionRequest {
+    /// Version-3 separately captured, replay-verified structured action facts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_manifest: Option<PathBuf>,
     /// Version 1 for announcement quotes, or 2 for structured field references.
     pub schema_version: u32,
     /// Captured announcements.json, or the current actions.json for a structured-only revision.
@@ -298,7 +369,7 @@ pub fn apply(
         &serde_json::to_value(request).map_err(invalid)?,
     )
     .map_err(invalid)?;
-    if !matches!(request.schema_version, 1 | 2)
+    if !matches!(request.schema_version, 1..=3)
         || (request.events.is_empty() && request.coverage_reviews.is_empty())
     {
         return Err(invalid("invalid/empty action revision"));
@@ -308,7 +379,7 @@ pub fn apply(
         .iter()
         .any(|r| !r.structured_fields.is_empty());
     if structured
-        && (request.schema_version != 2
+        && (request.schema_version < 2
             || !request.resolve_failures.is_empty()
             || !request.resolve_issues.is_empty())
     {
@@ -317,14 +388,17 @@ pub fn apply(
         ));
     }
     if structured {
-        let authenticated = ActionBundle::read(&source_root.join("actions.json"))?;
+        let authenticated = ActionBundle::read(&source_root.join("actions.json"))
+            .map_err(|e| invalid(format!("source snapshot: {e}")))?;
         if digest(&authenticated)? != digest(source)? {
             return Err(invalid("structured revision source snapshot mismatch"));
         }
     }
     let manifest_value: Value =
         serde_json::from_slice(&fs::read(&request.evidence_manifest)?).map_err(invalid)?;
-    let documents = if request.schema_version == 2 && manifest_value["schema_version"] == 7 {
+    let documents = if request.schema_version >= 2
+        && matches!(manifest_value["schema_version"].as_u64(), Some(7 | 8))
+    {
         let authenticated = ActionBundle::read(&request.evidence_manifest)?;
         if digest(&authenticated)? != digest(source)?
             || !request.coverage_reviews.is_empty()
@@ -336,9 +410,54 @@ pub fn apply(
         }
         BTreeMap::new()
     } else {
-        verified_documents(&request.evidence_manifest)?
+        verified_documents(&request.evidence_manifest)
+            .map_err(|e| invalid(format!("announcement evidence: {e}")))?
     };
     let mut bundle = source.clone();
+    let mut attached = BTreeMap::new();
+    if let Some(path) = &request.structured_manifest {
+        if request.schema_version != 3 {
+            return Err(invalid("external structured facts require revision 3"));
+        }
+        let evidence =
+            ActionBundle::read(path).map_err(|e| invalid(format!("structured attachment: {e}")))?;
+        let prefix = format!("rights-v3-{}-", &digest(&evidence)?[7..23]);
+        let root = path
+            .parent()
+            .ok_or_else(|| invalid("structured evidence root missing"))?;
+        for (id, report) in &evidence.field_facts {
+            if !source.coverage.contains_key(id) && !source.queried_symbols.contains(id)
+                || source.source_symbol(id)? != evidence.source_symbol(id)?
+                || bundle.field_facts.contains_key(id)
+            {
+                return Err(invalid(
+                    "structured attachment identity or duplicate facts conflict",
+                ));
+            }
+            let mut report = report.clone();
+            report.evidence_name = format!("{prefix}{}", report.evidence_name);
+            bundle.field_facts.insert(id.clone(), report);
+        }
+        for (name, hash) in &evidence.raw_sha256 {
+            let bytes = fs::read(root.join("raw").join(name))?;
+            if format!("sha256:{:x}", Sha256::digest(&bytes)) != *hash {
+                return Err(invalid("structured attachment changed"));
+            }
+            let name = if name.ends_with("-actions-structured.json")
+                || name == "complete-sources-structured.json"
+            {
+                format!("{prefix}{name}")
+            } else {
+                name.clone()
+            };
+            if bundle.raw_sha256.get(&name).is_some_and(|h| h != hash) {
+                return Err(invalid("structured attachment filename conflict"));
+            }
+            bundle.raw_sha256.insert(name.clone(), hash.clone());
+            attached.insert(name, bytes);
+        }
+    }
+    let evidence_source = bundle.clone();
     let mut changed = BTreeSet::new();
     let mut used = BTreeSet::new();
     let manifest: Value =
@@ -453,6 +572,15 @@ pub fn apply(
             .map_err(invalid)?
             .unwrap_or(serde_json::json!({}));
         let replacement = serde_json::to_value(a).map_err(invalid)?;
+        if matches!(
+            a.terms,
+            analytics_core::actions::EventTerms::RightsIssueFacts { .. }
+        ) && (request.schema_version != 3 || revision.fields.contains_key("terms"))
+        {
+            return Err(invalid(
+                "partial rights require revision 3 with field-level evidence",
+            ));
+        }
         if original == replacement {
             return Err(invalid("no-op revision cannot resolve a source failure"));
         }
@@ -464,11 +592,38 @@ pub fn apply(
                 let mut leaves = vec![];
                 changed_leaves(field, &original[field], value, &mut leaves);
                 for (path, value) in leaves {
+                    if request.schema_version == 3 {
+                        let pointer = format!("/{}", path.replace('.', "/"));
+                        let old = original.pointer(&pointer);
+                        if old.is_none()
+                            && (value.is_null() || (path.ends_with(".state") && value == "unknown"))
+                        {
+                            continue;
+                        }
+                        if path.ends_with(".state") && value == "confirmed" && old.is_none() {
+                            let sibling = format!("{}.value", path.trim_end_matches(".state"));
+                            if revision.structured_fields.contains_key(&sibling) {
+                                continue;
+                            }
+                        }
+                        if let Some((_, proof)) = revision
+                            .fields
+                            .iter()
+                            .filter(|(prefix, _)| {
+                                path == ***prefix || path.starts_with(&format!("{prefix}."))
+                            })
+                            .max_by_key(|(prefix, _)| prefix.len())
+                        {
+                            verify_leaf_document(&documents, proof, a, &path)?;
+                            used.insert(proof.document_id.clone());
+                            continue;
+                        }
+                    }
                     let reference = revision
                         .structured_fields
                         .get(&path)
                         .ok_or_else(|| invalid(format!("changed field lacks evidence: {path}")))?;
-                    verify_structured(source, a, &path, &value, reference)?;
+                    verify_structured(&evidence_source, a, &path, &value, reference)?;
                 }
                 continue;
             }
@@ -557,13 +712,22 @@ pub fn apply(
         bundle.execution_issues.retain(|i| i.id != resolution.id);
     }
     // Copy and hash all source evidence before publishing the corrected bundle.
-    fs::create_dir(output)?;
+    fs::create_dir(output).map_err(|e| invalid(format!("revision staging directory: {e}")))?;
     fs::create_dir(output.join("raw"))?;
+    if source
+        .raw_sha256
+        .contains_key("source-evidence-sha256.json")
+    {
+        inherit_acquisition(source_root, output)?;
+    }
     for (name, expected) in &source.raw_sha256 {
         let bytes = fs::read(source_root.join("raw").join(name))?;
         if format!("sha256:{:x}", Sha256::digest(&bytes)) != *expected {
             return Err(invalid("source action evidence hash mismatch"));
         }
+        fs::write(output.join("raw").join(name), bytes)?;
+    }
+    for (name, bytes) in attached {
         fs::write(output.join("raw").join(name), bytes)?;
     }
     // Archive the preceding normalization receipt: this publication is superseded
@@ -576,7 +740,7 @@ pub fn apply(
         )?;
         bundle.raw_sha256.insert(archive, hash);
     }
-    bundle.schema_version = 7;
+    super::facts::refresh(&mut bundle, output)?;
     let selected_documents: Vec<_> = used.iter().map(|id| documents[id].0.clone()).collect();
     let evidence_root = request.evidence_manifest.parent().unwrap();
     let mut collection_receipts = BTreeMap::new();
@@ -675,6 +839,29 @@ mod tests {
         format!("sha256:{:x}", Sha256::digest(bytes))
     }
     #[test]
+    fn acquisition_tree_is_inherited_and_tampering_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        let out = tmp.path().join("out");
+        fs::create_dir_all(source.join("raw")).unwrap();
+        fs::create_dir_all(source.join("source-evidence/nested")).unwrap();
+        fs::create_dir(&out).unwrap();
+        fs::write(source.join("source-evidence/nested/body"), b"evidence").unwrap();
+        let hash = crate::market_view::tree_hash(&source.join("source-evidence")).unwrap();
+        fs::write(
+            source.join("raw/source-evidence-sha256.json"),
+            serde_json::to_vec(&hash).unwrap(),
+        )
+        .unwrap();
+        inherit_acquisition(&source, &out).unwrap();
+        assert_eq!(
+            crate::market_view::tree_hash(&out.join("source-evidence")).unwrap(),
+            hash
+        );
+        fs::write(source.join("source-evidence/nested/body"), b"changed").unwrap();
+        assert!(inherit_acquisition(&source, &tmp.path().join("bad")).is_err());
+    }
+    #[test]
     fn revision_requires_stale_hash_matching_implementation_quotes_and_new_files() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -746,6 +933,7 @@ mod tests {
         let original = digest(&a).unwrap();
         a.pay_date = Some("2024-06-06".parse().unwrap());
         let mut request = RevisionRequest {
+            structured_manifest: None,
             coverage_reviews: Vec::new(),
             schema_version: 1,
             evidence_manifest: root.join("announcements.json"),
@@ -863,6 +1051,7 @@ mod coverage_tests {
         };
         write(&shard);
         let mut request = RevisionRequest {
+            structured_manifest: None,
             schema_version: 1,
             evidence_manifest: evidence.join("announcements.json"),
             events: vec![],

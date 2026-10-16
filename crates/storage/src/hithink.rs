@@ -756,7 +756,7 @@ pub(crate) fn action_payload(value: &Value, code: &str) -> io::Result<Value> {
 fn actions(client: &mut Client<'_>, request: &CollectionRequest) -> io::Result<PathBuf> {
     let mut bundle = crate::corporate_actions::ActionBundle {
         field_facts: Default::default(),
-        schema_version: 7,
+        schema_version: 8,
         source_bindings: Default::default(),
         structured_coverage: Default::default(),
         execution_issues: vec![],

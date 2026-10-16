@@ -1,6 +1,10 @@
-当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议20、采集协议13、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
+当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议21、采集协议13、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
 
 # analytics-core
+
+配股新增 `rights::{Fact,Terms,Policy}` 与 `rights_account::Ledger`：未知、确认和有证据的不适用分别序列化；条件退款不当作实际退款。`RightsIssueFacts` 可保存部分资料，旧 `RightsIssue` 仍可读取。资料合法性、参与所需字段及原生引擎支持分别检查。默认放弃认购；主动选择参与时，默认首日一次、现金内部分认购；显式参与和其他资金策略由调用者冻结。
+
+状态机使用十进制数量与资金，登记日最终成交后记录权益；日初扣除订单预占后认购，股份上市前保持不可卖。待上市权益不构成购买力。验收：`cargo test -p analytics-core rights`，包括登记后卖出、缺费用、部分认购、全额或放弃、资金不足停止、截止日和零碎配额。
 
 无DuckDB、Python、Arrow或UI依赖的领域契约：行情行、日期切分、查询分页、模型manifest、
 任务上下文、历史股票池、来源映射、因子样本策略及原始公司行动记录。
@@ -51,3 +55,5 @@ RUSTDOCFLAGS="-D warnings" cargo doc -p analytics-core --no-deps
 来源拒绝只检查来源标识、来源文件名和URL等出处字段，允许巨潮证券目录中的发行人名称及实施公告引用出现同名上市公司；原始业务数据不能被误判成采集来源。fixture覆盖该边界和混合来源拒绝。
 
 供应商事件策略保留完整结构化历史要求；未解决事件由工作流按实际期初持仓核验后决定收益是否可发布，全类别审计策略保持事前严格核验。
+
+配股在普通调仓前处理既有交收，再执行一次认购，随后更新当天生效的获配、退款与上市状态；同日认购与获配不会延迟到下一交易日。验收：`cargo test -p analytics-core rights`。

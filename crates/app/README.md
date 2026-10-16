@@ -1,4 +1,4 @@
-当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议20、采集协议13、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
+当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议21、采集协议13、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
 
 # analytics-desktop
 
@@ -42,7 +42,7 @@ DUCKDB_DOWNLOAD_LIB=1 cargo nextest run -p analytics-desktop
 结果16对未模拟特殊事件显示“回测完成，含未模拟事件”，并保留未解决普通问题的阻断状态。
 核对规则、格式6与复现命令见storage/workflow组件README。验收包含公共任务、结果警告与旧格式隔离。
 
-原生刷新现在以3个证券工作线程获取行情和公司行动，沿用监督进程、检查点、取消及完整发布校验。后端`RefreshRequest`允许1—8线程及显式跨任务分片复用；公共`RefreshCoverage`只读RPC可读取进度、历史成员覆盖及候选可用池，报告不自动授权训练或改变股票池。CLI命令及完整验收见[工作流README](../workflow/README.md)。服务协议20。
+原生刷新现在以3个证券工作线程获取行情和公司行动，沿用监督进程、检查点、取消及完整发布校验。后端`RefreshRequest`允许1—8线程及显式跨任务分片复用；公共`RefreshCoverage`只读RPC可读取进度、历史成员覆盖及候选可用池，报告不自动授权训练或改变股票池。CLI命令及完整验收见[工作流README](../workflow/README.md)。服务协议21。
 
 “更新行动”按钮使用同一Rust动作分片流程，保持当前登记行情，重新获取事件；不读废弃动作版本作为补采输入。
 
@@ -50,3 +50,5 @@ DUCKDB_DOWNLOAD_LIB=1 cargo nextest run -p analytics-desktop
 Packaged CLI acceptance also invokes `research verify --task <UUID>` after the train/backtest fixture: the Rust closing ledger must replay consistently and valuation-only rows must have zero fills. Python supplies upstream fills and terminal account observations; Rust owns closing valuation, event exposure and result verification. See the workflow research README for the accounting contract.
 
 公司行动详情复用`InspectActions`，按钮“加载事件、结构化字段与公告证据”无需公告manifest即可查询结构化字段。审计JSON支持版本2结构化引用和旧版本1公告引用；不提供配股认购控件，也不将字段补齐显示为已模拟配股。验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-desktop structured_action_inspection`。
+
+研究页“配股与预测复用”使用已发布预测任务ID，提供参与/放弃、首日/截止日及部分认购/全额或放弃/停止三种资金策略；默认放弃认购；主动选择参与时，默认首日一次、部分认购。调用共享 BacktestPredictions，不重训模型。

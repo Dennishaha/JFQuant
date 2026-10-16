@@ -55,6 +55,12 @@ datasets, wheel files, models or temporary outputs.
 
 ### Rust closing ledger
 
+配股账户使用 `rust-filled-trade-ledger-rights-v2`，旧 v1 结果继续只读核验。原生补丁在日切完成全部上日成交后记录登记权益，日初按冻结策略处理认购、退款和上市；待上市资产计净值但不计购买力。Python仅配置输入和导出 `rights_state.json`，Rust重放并比较全部状态、现金、股份和最终权益。认购本金与配股费用单列，不伪装成市场成交。
+
+`research replay-predictions --source UUID --actions VERSION` 消费成功回测已发布的预测和完整样本回执，无模型加载或重训；原生产环境只记录为来源，独立核验预测哈希、训练描述签名、日期、特征和市场身份。App“配股与预测复用”提供同一策略：`--participation participate|abandon`、`--attempt first_day|last_day`、`--insufficient-cash partial|all_or_abandon|stop`。默认依次为participate、first_day、partial。实际持仓必要资料不足时输出 `rights_gap_report.json`，不发布收益。
+
+原生 fixture：先运行 `PYTHONPATH=crates/workflow/research target/collector-build/python/bin/python3 -B -m unittest discover -s crates/workflow/research/tests`；跨语言账本检查使用合成fixture目录设置 `JFQUANT_RIGHTS_FIXTURE_DIR`，执行 `DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow native_rights_fixture -- --ignored`。`backtest_timing.json`记录撮合墙钟和进程峰值内存；性能结论必须比较同一输入，不能由Rust/Python标签推断。
+
 AKQuant 0.3.66的跨证券延后成交可能发生在其当日曲线已记录之后，盘后回调也可能延迟到下一交易日。因此回调持仓与上游逐日曲线不能直接作为最终研究账户。
 
 Python只导出带日期的真实成交、拒单、原始曲线及`on_stop`最终账户（`native_account_daily.json`）。Rust `backtest/account.rs`从初始现金，按日先应用已支持的除权日Dividend/Split投影，再回放全部成交与费用，以原价及有证据的停牌标记估值。`portfolio_snapshots.json`包含持仓、现金、权益和`valuation_prices`；`daily.json`的收益、换手率、费用及持仓数由该账本生成。最终股份、现金和权益必须与引擎最终账户一致，真实持仓缺价拒绝发布。前日账本持仓用于事件暴露核验。

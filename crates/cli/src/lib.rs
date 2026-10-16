@@ -476,6 +476,19 @@ impl QualityOptions {
 
 #[derive(Debug, Subcommand)]
 pub enum ResearchCommand {
+    /// Replay a completed task's published scores without loading or training models.
+    ReplayPredictions {
+        #[arg(long)]
+        source: Uuid,
+        #[arg(long)]
+        actions: String,
+        #[arg(long, default_value = "abandon", value_parser = ["participate", "abandon"])]
+        participation: String,
+        #[arg(long, default_value = "first_day", value_parser = ["first_day", "last_day"])]
+        attempt: String,
+        #[arg(long, default_value = "partial", value_parser = ["partial", "all_or_abandon", "stop"])]
+        insufficient_cash: String,
+    },
     /// Verify completed result artifacts without rerunning training or simulation.
     Verify {
         #[arg(long)]
@@ -1121,6 +1134,9 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
                 )?),
                 market,
                 actions,
+            }),
+            ResearchCommand::ReplayPredictions { source, actions, participation, attempt, insufficient_cash } => workflow(WorkflowRequest::BacktestPredictions {
+                source, actions, rights_policy: serde_json::from_value(serde_json::json!({"participation":participation,"attempt":attempt,"insufficient_cash":insufficient_cash})).map_err(invalid)?,
             }),
             ResearchCommand::Backtest {
                 template,

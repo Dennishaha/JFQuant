@@ -81,6 +81,10 @@ pub(super) fn simulate(
         return Err("data_not_ready: execution inputs changed or are incomplete".into());
     }
     let book = book.ok_or("execution event version missing")?;
+    let rights = super::rights::input(request, book, &dataset.calendar, range)?;
+    if let Some(input) = &rights {
+        save(request.output.join("rights_input.json"), input)?;
+    }
     let scope = super::execution::scope(pool, range);
     let symbols: BTreeSet<_> = scope
         .keys()
@@ -183,6 +187,19 @@ pub(super) fn simulate(
     )?;
     let mut warnings=scope.iter().filter(|(id, dates)| !super::execution::audited_coverage(book,id,dates)).map(|(id,_)|serde_json::json!({"instrument":id,"code":"special_event_coverage_unknown","message":"AKQuant event-date simulation; complete special-event coverage not verified"})).collect::<Vec<_>>();
     warnings.extend(super::execution::skipped_events(book, &scope));
+    if let Some(input) = &rights {
+        warnings.retain(|w| {
+            !input.events.iter().any(|event| {
+                w["id"] == event.id
+                    || (w["instrument"] == event.instrument
+                        && w["date"] == event.ex_date.to_string()
+                        && matches!(
+                            w["category"].as_str(),
+                            Some("rights_issue" | "rights_issue_facts")
+                        ))
+            })
+        });
+    }
     fs::write(
         request.output.join("execution_warnings.json"),
         serde_json::to_vec_pretty(&warnings)?,
@@ -256,11 +273,25 @@ pub(super) fn simulate(
         rules.exchanges.first().unwrap().transfer_rate
     };
     let result = crate::research::worker::call(
-        serde_json::json!({"operation":"backtest","bars":bars,"signals":score_path,"output":output,"initial_cash":request.initial_cash_cny,"top_n":request.config.top_n,"rebalance_days":request.config.rebalance_days,"commission_rate":rules.commission.rate,"minimum_commission":rules.commission.minimum_cny,"stamp_tax":stamp,"transfer_fee":transfer,"lot_sizes":lots,"actions":actions,"benchmark_returns":benchmark_returns,"pool":pool,"pool_exit_policy":request.pool_exit_policy,"signal_dates":signal_dates}),
+        serde_json::json!({"operation":"backtest","rights":rights,"bars":bars,"signals":score_path,"output":output,"initial_cash":request.initial_cash_cny,"top_n":request.config.top_n,"rebalance_days":request.config.rebalance_days,"commission_rate":rules.commission.rate,"minimum_commission":rules.commission.minimum_cny,"stamp_tax":stamp,"transfer_fee":transfer,"lot_sizes":lots,"actions":actions,"benchmark_returns":benchmark_returns,"pool":pool,"pool_exit_policy":request.pool_exit_policy,"signal_dates":signal_dates}),
         analytics_core::task::TaskContext::current().cancel,
     );
     let _ = fs::remove_file(bars);
-    result?;
+    if let Err(error) = result {
+        if output.join("rights_failed_state.json").is_file() {
+            let failed: analytics_core::rights_account::Ledger =
+                serde_json::from_slice(&fs::read(output.join("rights_failed_state.json"))?)?;
+            let gaps=failed.events.iter().filter_map(|event| {
+                let state=failed.states.get(&event.id)?;
+                (state.registered>rust_decimal::Decimal::ZERO && !state.attempted).then(||serde_json::json!({"event":event.id,"instrument":event.instrument,"registered_shares":state.registered.to_string(),"missing_fields":event.terms.participation_gaps()}))
+            }).collect::<Vec<_>>();
+            save(
+                output.join("rights_gap_report.json"),
+                &serde_json::json!({"schema_version":1,"published_return":false,"policy":failed.policy,"reason":error.to_string(),"actual_exposed_events":gaps}),
+            )?;
+        }
+        return Err(error.into());
+    }
     save(
         output.join("execution_actions.json"),
         &serde_json::json!({"schema_version":1,"actions":actions}),
@@ -279,6 +310,25 @@ pub(super) fn simulate(
         &reconciled.differences,
     )?;
     let snapshots = reconciled.snapshots;
+    if request
+        .rights_policy
+        .as_ref()
+        .is_some_and(|p| p.participation == analytics_core::rights::Participation::Participate)
+    {
+        let unresolved=book.execution_issues.iter().filter(|i|i.event_category=="rights_issue" && i.dates.start<=range.end && i.dates.end>=range.start)
+            .filter(|i|!rights.as_ref().is_some_and(|l|l.events.iter().any(|e|e.instrument==i.instrument && i.dates.contains(e.ex_date))))
+            .filter_map(|i| {
+                let held=snapshots.range(..i.dates.start).next_back().and_then(|(_,s)|s["positions"][&i.instrument].as_f64()).unwrap_or(0.);
+                (held>0.).then(||serde_json::json!({"event":i.id,"instrument":i.instrument,"opening_quantity":held,"missing_fields":["reviewed_rights_event","record_date","subscription_terms"],"evidence":i.evidence}))
+            }).collect::<Vec<_>>();
+        if !unresolved.is_empty() {
+            save(
+                output.join("rights_gap_report.json"),
+                &serde_json::json!({"schema_version":1,"published_return":false,"actual_exposed_events":unresolved}),
+            )?;
+            return Err("rights_unprojected_event_exposure: changed account holds an unsupported rights event".into());
+        }
+    }
     save(output.join("portfolio_snapshots.json"), &snapshots)?;
     for date in dataset.calendar.iter().filter(|d| range.contains(**d)) {
         let positions = snapshots

@@ -67,11 +67,37 @@ pub(super) fn reconcile(
     let mut results = Vec::new();
     let mut differences = Vec::new();
     let mut previous = initial;
+    let mut rights: Option<analytics_core::rights_account::Ledger> =
+        if root.join("rights_input.json").is_file() {
+            Some(serde_json::from_slice(&fs::read(
+                root.join("rights_input.json"),
+            )?)?)
+        } else {
+            None
+        };
+    let native_rights: Option<analytics_core::rights_account::Ledger> = rights
+        .as_ref()
+        .map(|_| fs::read(root.join("rights_state.json")))
+        .transpose()?
+        .map(|v| serde_json::from_slice(&v))
+        .transpose()?;
+    let mut previous_date = None;
     for (index, date) in calendar
         .iter()
         .enumerate()
         .filter(|(_, d)| range.contains(**d))
     {
+        if let Some(ledger) = rights.as_mut().filter(|l| !l.events.is_empty())
+            && let Some(previous_date) = previous_date
+        {
+            ledger.close(
+                previous_date,
+                &positions
+                    .iter()
+                    .map(|(k, v)| Ok((k.clone(), v.to_string().parse()?)))
+                    .collect::<Result<_>>()?,
+            )?;
+        }
         for action in actions.iter().filter(|a| a["date"] == date.to_string()) {
             let id = action["symbol"]
                 .as_str()
@@ -83,6 +109,17 @@ pub(super) fn reconcile(
                 Some("Split") if value > 0. => *qty *= value,
                 _ => return Err("execution_action_projection_unsupported".into()),
             }
+        }
+        if let Some(ledger) = rights.as_mut().filter(|l| !l.events.is_empty()) {
+            super::rights::advance(
+                ledger,
+                native_rights.as_ref().unwrap(),
+                *date,
+                index.checked_sub(1),
+                &mut cash,
+                &mut positions,
+                closes,
+            )?;
         }
         let mut fees = 0.;
         let mut notional = 0.;
@@ -131,10 +168,41 @@ pub(super) fn reconcile(
                 return Err("execution_valuation_price_invalid".into());
             }
             equity += qty * price;
-            prices.insert(id, price);
+            prices.insert(id.clone(), price);
         }
         if !cash.is_finite() || !equity.is_finite() || previous <= 0. {
             return Err("execution_account_equity_invalid".into());
+        }
+        let pending = if let Some(ledger) = &rights {
+            use rust_decimal::prelude::ToPrimitive;
+            let marks = closes
+                .iter()
+                .filter_map(|(id, p)| p.get(index).copied().flatten().map(|v| (id, v)))
+                .map(|(id, p)| Ok((id.clone(), p.to_string().parse()?)))
+                .collect::<Result<_>>()?;
+            ledger
+                .value(&marks)?
+                .to_f64()
+                .ok_or("rights_valuation_invalid")?
+        } else {
+            0.
+        };
+        equity += pending;
+        if let Some(ledger) = &rights {
+            for event in &ledger.events {
+                if ledger
+                    .states
+                    .get(&event.id)
+                    .is_some_and(|s| s.subscribed > rust_decimal::Decimal::ZERO && !s.listed)
+                    && let Some(mark) = closes
+                        .get(&event.instrument)
+                        .and_then(|v| v.get(index))
+                        .copied()
+                        .flatten()
+                {
+                    prices.insert(event.instrument.clone(), mark);
+                }
+            }
         }
         let native_cash = number(&days[date]["cash"])?;
         let native_equity = number(&days[date]["equity"])?;
@@ -142,6 +210,11 @@ pub(super) fn reconcile(
             differences.push(json!({"date":date,"native_curve_cash":native_cash,"native_curve_equity":native_equity,"ledger_cash":cash,"ledger_equity":equity,"reason":"native daily curve may precede final deferred fills; closing ledger uses all dated fills"}));
         }
         snapshots.insert(*date,json!({"positions":positions,"holdings":positions.len(),"cash":cash,"equity":equity,"valuation_prices":prices}));
+        if let Some(ledger) = &rights {
+            let snapshot = snapshots.get_mut(date).unwrap();
+            snapshot["rights"] = serde_json::to_value(&ledger.states)?;
+            snapshot["pending_rights_value"] = pending.into();
+        }
         results.push(portfolio::DayResult {
             date: date.to_string(),
             net_return: equity / previous - 1.,
@@ -153,6 +226,7 @@ pub(super) fn reconcile(
             blocked_orders: *rejected.get(date).unwrap_or(&0),
         });
         previous = equity;
+        previous_date = Some(*date);
     }
     let terminal: BTreeMap<String, f64> =
         serde_json::from_value(native["terminal"]["positions"].clone())?;
@@ -168,6 +242,12 @@ pub(super) fn reconcile(
     }
     same(cash, number(&native["terminal"]["cash"])?)?;
     same(previous, number(&native["terminal"]["equity"])?)?;
+    if let Some(ledger) = &rights {
+        let native = native_rights.as_ref().unwrap();
+        if serde_json::to_value(ledger)? != serde_json::to_value(native)? {
+            return Err("rights_native_replay_state_mismatch".into());
+        }
+    }
     Ok(Reconciled {
         snapshots,
         days: results,
@@ -178,6 +258,37 @@ pub(super) fn reconcile(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "requires native synthetic rights fixture; see research README"]
+    fn native_rights_fixture_replays_exact_account() {
+        let root = PathBuf::from(
+            std::env::var_os("JFQUANT_RIGHTS_FIXTURE_DIR")
+                .expect("synthetic fixture directory required"),
+        );
+        let input: analytics_core::rights_account::Ledger =
+            serde_json::from_slice(&fs::read(root.join("rights_input.json")).unwrap()).unwrap();
+        let calendar = input.events[0].sessions.clone();
+        let range = DateRange {
+            start: calendar[0],
+            end: *calendar.last().unwrap(),
+        };
+        let closes = BTreeMap::from([
+            ("SH600000".into(), vec![Some(10.); calendar.len()]),
+            ("SZ000001".into(), vec![Some(10.); calendar.len()]),
+        ]);
+        let r = reconcile(
+            &root,
+            &calendar,
+            &range,
+            100000.,
+            &closes,
+            &[],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(r.snapshots[&range.end]["positions"]["SH600000"], 10780.);
+        assert_eq!(r.snapshots[&range.end]["pending_rights_value"], 0.);
+    }
     #[test]
     fn replay_uses_all_dated_fills_and_ex_date_old_share_base_and_checks_terminal_account() {
         let root = tempfile::tempdir().unwrap();

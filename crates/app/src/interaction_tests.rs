@@ -1488,6 +1488,25 @@ fn structured_action_inspection_uses_existing_workflow_without_announcement_mani
 }
 
 #[test]
+fn prediction_replay_exposes_rights_defaults_and_shared_task() {
+    let (mut h, _tmp) = platform_harness(Panel::Research);
+    let w = h.app.state.platform.workspace.as_ref().unwrap().clone();
+    let (m, a, t) = analytics_workflow::testing::synthetic(&w);
+    h.app.state.platform.template = t;
+    h.app.state.platform.market = m.id;
+    h.app.state.platform.actions = a.id.clone();
+    let source = uuid::Uuid::new_v4();
+    h.app.state.platform.prediction_job = source.to_string();
+    h.ctx.all_styles_mut(|s| s.animation_time = 0.0);
+    h.click("配股与预测复用");
+    h.click("复用已发布预测回测");
+    let command = h.commands.try_recv().unwrap();
+    assert!(
+        matches!(command,WorkerCommand::ExecuteWorkflow{request,..} if matches!(&*request,analytics_workflow::WorkflowRequest::BacktestPredictions{source:id,actions,rights_policy} if *id==source && actions==&a.id && rights_policy==&analytics_core::rights::Policy::default()))
+    );
+}
+
+#[test]
 fn research_stage_buttons_submit_shared_tasks_without_identity_controls() {
     let (mut h, _tmp) = platform_harness(Panel::Research);
     let w = h.app.state.platform.workspace.as_ref().unwrap().clone();

@@ -86,8 +86,29 @@ pub fn report(workspace: &Workspace, task_id: Uuid) -> Result<Value> {
         return Err("verification_publication_mismatch".into());
     }
     json_equal(&read(&root, "outcome.json")?["details"], &summary)?;
-    if summary["execution"]["accounting_version"] != "rust-filled-trade-ledger-v1" {
+    if summary["execution"]["accounting_version"] == "rust-filled-trade-ledger-v1"
+        && root.join("rights_input.json").exists()
+    {
+        return Err("unexpected_rights_input_for_legacy_account".into());
+    }
+    if !matches!(
+        summary["execution"]["accounting_version"].as_str(),
+        Some("rust-filled-trade-ledger-v1" | "rust-filled-trade-ledger-rights-v2")
+    ) {
         return Err("verification_requires_rust_closing_ledger: rerun backtest; historical files are unchanged".into());
+    }
+    if summary["execution"]["accounting_version"] == "rust-filled-trade-ledger-rights-v2" {
+        if summary["execution"]["rights_input_sha256"]
+            != super::file_hash(&root.join("rights_input.json"))?
+        {
+            return Err("rights_projection_hash_mismatch".into());
+        }
+        let input: analytics_core::rights_account::Ledger =
+            serde_json::from_slice(&fs::read(root.join("rights_input.json"))?)?;
+        input.validate()?;
+        if serde_json::to_value(&input.policy)? != summary["execution"]["rights_policy"] {
+            return Err("rights_policy_mismatch".into());
+        }
     }
     let snapshots: BTreeMap<Date, Value> =
         serde_json::from_value(read(&root, "portfolio_snapshots.json")?)?;
@@ -181,6 +202,19 @@ fn artifacts(root: &Path, summary: &Value) -> Result<Value> {
         .iter()
         .map(|d| d.date.parse::<Date>())
         .collect::<std::result::Result<BTreeSet<_>, _>>()?;
+    if summary["execution"]["accounting_version"] == "rust-filled-trade-ledger-rights-v2" {
+        if summary["execution"]["rights_input_sha256"]
+            != super::file_hash(&root.join("rights_input.json"))?
+        {
+            return Err("rights_projection_hash_mismatch".into());
+        }
+        let input: analytics_core::rights_account::Ledger =
+            serde_json::from_slice(&fs::read(root.join("rights_input.json"))?)?;
+        input.validate()?;
+        if serde_json::to_value(&input.policy)? != summary["execution"]["rights_policy"] {
+            return Err("rights_policy_mismatch".into());
+        }
+    }
     let snapshots: BTreeMap<Date, Value> =
         serde_json::from_value(read(root, "portfolio_snapshots.json")?)?;
     if snapshots.keys().copied().collect::<BTreeSet<_>>() != dates {

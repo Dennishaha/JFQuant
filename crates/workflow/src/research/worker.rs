@@ -15,7 +15,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 thread_local! {static SESSION:RefCell<Option<Session>>=const {RefCell::new(None)};}
 /// Fingerprint of worker code and the exact bundled dependency lock.
 pub fn runtime_signature() -> String {
@@ -47,12 +47,14 @@ pub fn runtime_signature() -> String {
 }
 /// Dependency receipt for cache and model isolation.
 pub fn dependency_signature() -> String {
-    format!(
-        "sha256:{:x}",
-        Sha256::digest(include_bytes!(
-            "../../../storage/collectors/requirements.lock"
-        ))
-    )
+    let mut digest = Sha256::new();
+    digest.update(include_bytes!(
+        "../../../storage/collectors/requirements.lock"
+    ));
+    digest.update(include_bytes!(
+        "../../../app/packaging/akquant-source.lock.json"
+    ));
+    format!("sha256:{:x}", digest.finalize())
 }
 /// Reuse one worker for all folds and final backtest; always retire it at scope exit.
 pub fn scoped<T>(body: impl FnOnce() -> T) -> T {

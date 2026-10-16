@@ -867,6 +867,15 @@ pub enum WorkflowRequest {
         /// Selected execution event version.
         actions: String,
     },
+    /// Replay hash-verified published predictions without loading trained models.
+    BacktestPredictions {
+        /// Successful native backtest containing published predictions.
+        source: Uuid,
+        /// Immutable event snapshot for the new experiment.
+        actions: String,
+        /// Explicit rights participation, timing and funding policy.
+        rights_policy: analytics_core::rights::Policy,
+    },
     /// Readiness-only or full annual research.
     Research {
         /// Frozen recipe.
@@ -896,6 +905,7 @@ impl WorkflowRequest {
             .into(),
             Self::TrainResearch { .. } => "训练研究模型".into(),
             Self::BacktestResearch { .. } => "使用已有模型回测".into(),
+            Self::BacktestPredictions { .. } => "使用已发布预测进行配股对照回测".into(),
             Self::PreviewResearch { .. } => "预览研究日期和数据需求".into(),
             Self::PrepareResearchData { .. } => "补采研究所需公司行动/公告".into(),
             Self::InspectActions { .. } => "查看公司行动原值与实施证据".into(),
@@ -1239,6 +1249,13 @@ fn execute_scoped(
             {
                 return Err("announcement evidence must belong to this workspace".into());
             }
+            if let Some(path) = &request.structured_manifest {
+                let path = w.resolve(path).canonicalize()?;
+                if !path.starts_with(w.root.canonicalize()?) {
+                    return Err("structured evidence must belong to this workspace".into());
+                }
+                request.structured_manifest = Some(path);
+            }
             let staging = w.resolve(format!(".jfquant/staging/action-review-{}", run.id));
             analytics_storage::corporate_actions::review::apply(
                 &book,
@@ -1463,6 +1480,41 @@ fn execute_scoped(
             crate::research::backtest::run_with_context(&r, context)?;
             details = w.results(run)?;
         }
+        WorkflowRequest::BacktestPredictions {
+            source,
+            actions,
+            rights_policy,
+        } => {
+            let source_root = w.resolve(format!(".jfquant/runs/{source}"));
+            for name in [
+                "run.json",
+                "summary.json",
+                "prediction_manifest.json",
+                "predictions.parquet",
+            ] {
+                if run.request["prediction_source_hashes"][name]
+                    != format!(
+                        "sha256:{:x}",
+                        Sha256::digest(fs::read(source_root.join(name))?)
+                    )
+                {
+                    return Err("prediction source changed after task submission".into());
+                }
+            }
+            let verified = research::backtest::verification::report(w, *source)?;
+            if verified["status"] != "consistent" {
+                return Err("prediction source failed native verification".into());
+            }
+            let a = version(w, actions, "actions")?;
+            research::backtest::backtest_from_predictions(
+                &w.resolve(format!(".jfquant/runs/{source}")),
+                &w.resolve(&run.output),
+                &w.resolve(a.path),
+                rights_policy.clone(),
+                context,
+            )?;
+            details = w.results(run)?;
+        }
         WorkflowRequest::BacktestResearch {
             execution,
             training,
@@ -1599,7 +1651,8 @@ pub fn snapshot(workspace: &Workspace, request: &WorkflowRequest) -> Result<Valu
             }
             v
         }
-        WorkflowRequest::BacktestResearch { actions, .. }
+        WorkflowRequest::BacktestPredictions { actions, .. }
+        | WorkflowRequest::BacktestResearch { actions, .. }
         | WorkflowRequest::ReviseActions { actions, .. }
         | WorkflowRequest::InspectActions { actions, .. } => {
             vec![version_metadata(workspace, actions, "actions")?]
@@ -1616,6 +1669,22 @@ pub fn snapshot(workspace: &Workspace, request: &WorkflowRequest) -> Result<Valu
         _ => analytics_factor::FORMULA_VERSION,
     };
     let mut frozen = json!({"request":request,"inputs":versions,"app_version":env!("CARGO_PKG_VERSION"),"formula_version":formula_version,"pool_definition": match request { WorkflowRequest::Research{template,..}|WorkflowRequest::TrainResearch{template,..} if !template.pool_version.starts_with("builtin:") => Some(workspace.pool(&template.pool_version)?), _ => None }});
+    if let WorkflowRequest::BacktestPredictions { source, .. } = request {
+        let root = workspace.resolve(format!(".jfquant/runs/{source}"));
+        let mut hashes = serde_json::Map::new();
+        for name in [
+            "run.json",
+            "summary.json",
+            "prediction_manifest.json",
+            "predictions.parquet",
+        ] {
+            hashes.insert(
+                name.into(),
+                format!("sha256:{:x}", Sha256::digest(fs::read(root.join(name))?)).into(),
+            );
+        }
+        frozen["prediction_source_hashes"] = hashes.into();
+    }
     if let WorkflowRequest::ReconcileActions { evidence_tasks, .. } = request {
         let mut evidence = serde_json::Map::new();
         for task in evidence_tasks {

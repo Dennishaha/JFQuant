@@ -25,6 +25,8 @@ pub struct PlatformState {
     pub action_review_editor: String,
     /// Previously completed training task ID.
     pub training_job: String,
+    pub prediction_job: String,
+    pub rights_policy: analytics_core::rights::Policy,
     pub action_review_instrument: String,
     pub action_evidence_manifest: String,
     pub action_evidence_tasks: String,
@@ -84,6 +86,8 @@ impl Default for PlatformState {
             schedule_editor: String::new(),
             date_editor_valid: true,
             training_job: String::new(),
+            prediction_job: String::new(),
+            rights_policy: Default::default(),
             action_review_editor: String::new(),
             action_review_instrument: "SH600000".into(),
             action_evidence_manifest: String::new(),
@@ -1087,6 +1091,75 @@ pub fn research_panel(
                     },
                 ),
                 Err(_) => state.platform.error = Some("请填写已完成训练的任务ID".into()),
+            }
+        }
+    });
+    ui.separator();
+    egui::CollapsingHeader::new("配股与预测复用").show(ui, |ui| {
+        ui.label("已发布预测的回测任务ID");
+        ui.text_edit_singleline(&mut state.platform.prediction_job);
+        use analytics_core::rights::{Attempt, InsufficientCash, Participation};
+        ui.horizontal_wrapped(|ui| {
+            ui.label("配股处理");
+            ui.selectable_value(
+                &mut state.platform.rights_policy.participation,
+                Participation::Participate,
+                "参与认购",
+            );
+            ui.selectable_value(
+                &mut state.platform.rights_policy.participation,
+                Participation::Abandon,
+                "放弃认购",
+            );
+            ui.label("认购时点");
+            ui.selectable_value(
+                &mut state.platform.rights_policy.attempt,
+                Attempt::FirstDay,
+                "首日尝试一次",
+            );
+            ui.selectable_value(
+                &mut state.platform.rights_policy.attempt,
+                Attempt::LastDay,
+                "截止日尝试一次",
+            );
+            ui.label("资金不足");
+            ui.selectable_value(
+                &mut state.platform.rights_policy.insufficient_cash,
+                InsufficientCash::Partial,
+                "部分认购",
+            );
+            ui.selectable_value(
+                &mut state.platform.rights_policy.insufficient_cash,
+                InsufficientCash::AllOrAbandon,
+                "全额或放弃",
+            );
+            ui.selectable_value(
+                &mut state.platform.rights_policy.insufficient_cash,
+                InsufficientCash::Stop,
+                "停止并报告",
+            );
+        });
+        if ui
+            .add_enabled(
+                enabled && !state.platform.actions.is_empty(),
+                egui::Button::new("复用已发布预测回测"),
+            )
+            .clicked()
+        {
+            match state.platform.prediction_job.parse() {
+                Ok(source) => submit(
+                    state,
+                    worker,
+                    cancel_slot,
+                    WorkflowRequest::BacktestPredictions {
+                        source,
+                        actions: state.platform.actions.clone(),
+                        rights_policy: state.platform.rights_policy.clone(),
+                    },
+                ),
+                Err(_) => {
+                    state.platform.error = Some("请填写含有已发布预测的成功回测任务ID".into())
+                }
             }
         }
     });

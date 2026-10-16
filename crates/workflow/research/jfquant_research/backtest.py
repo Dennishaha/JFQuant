@@ -1,10 +1,11 @@
 """AKQuant owns matching, fees and the continuous portfolio; JFQuant supplies signals."""
 import datetime as dt
 import json
+import resource
+import time
 from pathlib import Path
 
 import akquant as aq
-import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
@@ -31,8 +32,13 @@ def backtest(request, cancelled, emit):
         loaded = False
 
         def on_start(self, context):
+            self.engine = context["engine"]
             for action in native_actions:
                 context["engine"].add_corporate_action(action)
+            if request.get("rights") is not None:
+                if not hasattr(self.engine, "configure_jfquant_rights"):
+                    raise ValueError("patched AKQuant rights capability unavailable")
+                self.engine.configure_jfquant_rights(json.dumps(request["rights"], allow_nan=False))
             self.loaded = True
 
     action_input = ActionInput()
@@ -86,12 +92,21 @@ def backtest(request, cancelled, emit):
 
     configs = [aq.InstrumentConfig(symbol=symbol, lot_size=int(lot), sellable_after_days=1, tick_size=0.01) for symbol, lot in request["lot_sizes"].items()]
     config = aq.BacktestConfig(strategy_config=aq.StrategyConfig(initial_cash=initial, commission_rate=request["commission_rate"], min_commission=request["minimum_commission"], stamp_tax_rate=request["stamp_tax"], transfer_fee_rate=request["transfer_fee"], exit_on_last_bar=False, enable_fractional_shares=False, volume_limit_pct=0.1), instruments_config=configs, show_progress=False, timezone="Asia/Shanghai", bootstrap_samples=0)
-    result = aq.run_backtest(data=bars, strategy=ResearchStrategy, config=config, t_plus_one=True, fill_policy=aq.NextOpen(), show_progress=False, analyzer_plugins=[action_input])
+    engine_started = time.perf_counter()
+    try:
+        result = aq.run_backtest(data=bars, strategy=ResearchStrategy, config=config, t_plus_one=True, fill_policy=aq.NextOpen(), show_progress=False, analyzer_plugins=[action_input])
+    except Exception:
+        if request.get("rights") is not None and hasattr(action_input, "engine"):
+            (Path(request["output"]) / "rights_failed_state.json").write_text(action_input.engine.jfquant_rights_state())
+        raise
     if not action_input.loaded:
         raise ValueError("AKQuant corporate-action input hook failed")
     if cancelled.is_set():
         raise InterruptedError("backtest cancelled")
     output = Path(request["output"])
+    (output / "backtest_timing.json").write_text(json.dumps({"engine_seconds": time.perf_counter() - engine_started, "peak_rss_bytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}))
+    if request.get("rights") is not None:
+        (output / "rights_state.json").write_text(action_input.engine.jfquant_rights_state())
     (output / "order_events.jsonl").write_text("".join(json.dumps(event, allow_nan=False) + "\n" for event in events))
     curve = result.equity_curve_daily
     cash = {str(pd.Timestamp(t).date()): float(v) for t, v in result.cash_curve_daily.items()}

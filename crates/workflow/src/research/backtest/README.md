@@ -1,5 +1,9 @@
 # Dated research
 
+`rights`将格式8部分配股事实投影到固定原生AKQuant状态机；`account`独立重放登记、认购、退款、上市及锁定资产估值。App/CLI共用BacktestPredictions，默认放弃认购；主动选择参与时，默认首日一次、现金内部分认购；实际持仓缺必要字段停止。原生账户使用共享配股快照，避免订单预算反复深拷贝增长中的审计记录；估值只查有配股资产的证券，锁定价值不增加购买力。
+
+结果17保留读取16；账本rights-v2与旧v1分别核验。预测复用验证冻结来源、原预测及样本缓存哈希，不读取模型，不绕过原模型的运行时校验。普通成交、费用、T+1、成交量限制沿用上游固定版。配股费用与本金单独记录，不能伪装成普通市场成交。
+
 `data` prepares the unchanged Rust factor families and dated sample masks;
 `quality` qualifies the universe without future-dependent exclusions; `adjustment`
 verifies training coefficients independently of account settlement dates.

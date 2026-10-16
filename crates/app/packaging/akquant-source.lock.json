@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "upstream_version": "0.3.66",
+  "source_url": "https://files.pythonhosted.org/packages/1e/a3/5e1f71e4f0571ae42c3381217ca06aa44af62feab924d077f718feba8e87/akquant-0.3.66.tar.gz",
+  "source_sha256": "5c1f024478547ee131bb7f2e2d6ebb9072fabd4ae6fd9a5083b76f02e7709e82",
+  "upstream_tag_commit": "9bb8c9279526126c113c50d690c076396abd0e93",
+  "cargo_lock_sha256": "c7042ac4a5aac036501e971a9dd08e550ef13aefadf970676f65706d34fa745d",
+  "inputs": {
+    "crates/app/packaging/akquant-rights.patch": "362ed2c7eec3dc4fb126b338163eeef367184c6a2f2d1a8c6cbec9d0f1fc9404",
+    "crates/core/src/rights.rs": "b47c676c504699f3e37f3593b9a5e8435b79702e6259a85db5de0fb42fb4078a",
+    "crates/core/src/rights_account.rs": "633699c6250e2d0c47b0962f2de64b38c6d0d079f01f391e96ee60b36c9e96d4",
+    "crates/app/packaging/akquant-build-tools.lock": "3afdd52db55563154b1984453856cb07bb8fedf4d68951ec790227f58f161eab"
+  }
+}

@@ -135,6 +135,11 @@ impl CorporateAction {
     pub fn validate_adjustment_terms(&self) -> Result<()> {
         crate::pool::validate_instrument(&self.instrument).map_err(|e| invalid(&e))?;
         self.terms.validate(self.ex_date).map_err(|e| invalid(&e))?;
+        if let crate::actions::EventTerms::RightsIssueFacts { facts, .. } = &self.terms {
+            facts
+                .validate(self.record_date, self.ex_date)
+                .map_err(|e| invalid(&e))?;
+        }
         if !matches!(
             self.terms,
             crate::actions::EventTerms::Distribution { .. }
@@ -176,6 +181,15 @@ impl CorporateAction {
     /// Validate actual account rights, including verified payment/listing dates.
     pub fn validate(&self) -> Result<()> {
         self.validate_adjustment_terms()?;
+        if let crate::actions::EventTerms::RightsIssueFacts { facts, .. } = &self.terms {
+            let gaps = facts.participation_gaps();
+            if self.record_date.is_none() || !gaps.is_empty() {
+                return Err(invalid(&format!(
+                    "rights account terms incomplete: {}",
+                    gaps.join(",")
+                )));
+            }
+        }
         if matches!(self.terms, crate::actions::EventTerms::Historical { .. }) {
             return Err(invalid(
                 "historical reference lacks actual account settlement terms",

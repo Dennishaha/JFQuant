@@ -10,6 +10,7 @@ mod predictions;
 /// Shared dated input qualification and audit artifacts.
 pub mod quality;
 mod report;
+mod rights;
 /// Read-only verification of completed native research artifacts.
 pub mod verification;
 use crate::research::{
@@ -51,7 +52,7 @@ const SUPPORTED_RESEARCH_INPUTS: [&str; 15] = [
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// Current strict integer-share research result format.
-pub const RESEARCH_SCHEMA_VERSION: u32 = 16;
+pub const RESEARCH_SCHEMA_VERSION: u32 = 17;
 
 /// A result cannot be interpreted using the current research contract.
 #[derive(Debug, thiserror::Error)]
@@ -155,14 +156,14 @@ pub fn validate_result(
     value: &serde_json::Value,
 ) -> std::result::Result<(), UnsupportedResultFormat> {
     let validate = || -> Result<()> {
-        if value["schema_version"] != RESEARCH_SCHEMA_VERSION
+        if !matches!(value["schema_version"].as_u64(), Some(16 | 17))
             || value["execution"]["mode"] != "akquant_ex_date"
             || !matches!(
                 value["backtest_status"].as_str(),
                 Some("completed" | "no_valid_trades" | "execution_data_not_ready")
             )
         {
-            return Err("requires research schema 16 and akquant_ex_date execution".into());
+            return Err("requires research schema 16/17 and akquant_ex_date execution".into());
         }
         let hash = |value: &serde_json::Value| {
             value.as_str().is_some_and(|s| {
@@ -581,6 +582,12 @@ impl ResearchConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResearchRequest {
+    /// Explicit published predictions; this path never loads a model or runs a trainer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reuse_predictions: Option<PathBuf>,
+    /// Explicit rights experiment; None preserves the historical skip contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rights_policy: Option<analytics_core::rights::Policy>,
     /// Frozen feature family.
     pub factor_set: analytics_core::research_quality::FactorSet,
     /// Explicit training source trust policy.
@@ -644,6 +651,8 @@ impl ResearchRequest {
     /// Defaults to five training years, one validation year and tests from 2013.
     pub fn new(data_root: PathBuf, output: PathBuf) -> Self {
         Self {
+            reuse_predictions: None,
+            rights_policy: None,
             quality_policy: ResearchQualityPolicy::default(),
             factor_set: Default::default(),
             price_basis: Default::default(),
@@ -896,6 +905,39 @@ pub fn backtest_from_training_with_policy(
     request.train_only = false;
     run_with_context(&request, context)
 }
+/// Execute only a completed task's published predictions; no model is loaded.
+pub fn backtest_from_predictions(
+    source: &Path,
+    output: &Path,
+    actions: &Path,
+    rights_policy: analytics_core::rights::Policy,
+    context: &analytics_core::task::TaskContext,
+) -> Result<()> {
+    let (training_root, _) = predictions::training_source(source)?;
+    let training: serde_json::Value =
+        serde_json::from_slice(&fs::read(training_root.join("training.json"))?)?;
+    let mut request: ResearchRequest = serde_json::from_value(training["request"].clone())?;
+    let execution: serde_json::Value =
+        serde_json::from_slice(&fs::read(source.join("execution.json"))?)?;
+    if execution["market_content_sha256"] != crate::market_content_hash(&request.data_root)? {
+        return Err("prediction market identity mismatch".into());
+    }
+    request.config = serde_json::from_value(execution["research_config"].clone())?;
+    request.market_rules = serde_json::from_value(execution["market_rules"].clone())?;
+    request.initial_cash_cny = execution["initial_cash_cny"]
+        .as_f64()
+        .ok_or("prediction cash missing")?;
+    request.pool_exit_policy = serde_json::from_value(execution["pool_exit_policy"].clone())?;
+    request.event_check_policy = serde_json::from_value(execution["event_check_policy"].clone())?;
+    request.reuse_training = None;
+    request.reuse_predictions = Some(source.to_owned());
+    request.rights_policy = Some(rights_policy);
+    request.output = output.to_owned();
+    request.corporate_actions = Some(actions.to_owned());
+    request.train_only = false;
+    run_with_context(&request, context)
+}
+
 fn run_scoped(request: &ResearchRequest) -> Result<()> {
     let context = analytics_core::task::TaskContext::current();
     let training_source_request = request.clone();
@@ -1542,6 +1584,37 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         validate_training_artifact(&artifact)?;
         execution["training_provenance"] = serde_json::json!({"training_signature":artifact["training_signature"],"models":artifact["models"].as_array().ok_or("missing model receipts")?.iter().map(|m|serde_json::json!({"fold":m["fold"],"model_sha256":m["model_sha256"]})).collect::<Vec<_>>(),"feature_order":artifact["feature_order"]});
     }
+    if let Some(source) = &request.reuse_predictions {
+        let original: serde_json::Value =
+            serde_json::from_slice(&fs::read(source.join("execution.json"))?)?;
+        execution["prediction_provenance"] = serde_json::json!({"source":source,"manifest_sha256":file_hash(&source.join("prediction_manifest.json"))?,"producer_runtime":original["runtime_signature"],"producer_dependencies":original["dependency_signature"],"training":original["training_provenance"]});
+    }
+    if let Some(policy) = &request.rights_policy {
+        execution["rights_policy"] = serde_json::to_value(policy)?;
+        let projection = rights::input(
+            request,
+            action_book.as_ref().ok_or("rights snapshot missing")?,
+            &dataset.calendar,
+            &DateRange {
+                start: folds.first().unwrap().actual.test.start,
+                end: folds.last().unwrap().actual.test.end,
+            },
+        )?
+        .ok_or("rights projection missing")?;
+        save(request.output.join("rights_input.json"), &projection)?;
+        execution["rights_input_sha256"] =
+            file_hash(&request.output.join("rights_input.json"))?.into();
+        execution["rights_source_lock_sha256"] = format!(
+            "sha256:{:x}",
+            Sha256::digest(include_bytes!(
+                "../../../app/packaging/akquant-source.lock.json"
+            ))
+        )
+        .into();
+        execution["accounting_version"] = "rust-filled-trade-ledger-rights-v2".into();
+        execution["rights_valuation_policy"] =
+            "cost-before-ex-or-allocation;parent-raw-after-ex-and-allocation;nontradable".into();
+    }
     let mut run_signature = format!(
         "sha256:{:x}",
         Sha256::digest(serde_json::to_vec(&(
@@ -1581,7 +1654,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         dataset.calendar[first_member],
         ids.len()
     );
-    if request.reuse_training.is_some()
+    if (request.reuse_training.is_some() || request.reuse_predictions.is_some())
         && let Some((signals, reports, selection)) =
             predictions::restore(request, &signature, &folds)?
     {
@@ -1622,6 +1695,12 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
             reports,
             &run_signature,
             &signature,
+        );
+    }
+    if request.reuse_predictions.is_some() {
+        return Err(
+            "published_predictions_missing: prediction-only execution cannot train or predict"
+                .into(),
         );
     }
     let cache = request.output.join(".factor-staging");

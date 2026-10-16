@@ -1,0 +1,607 @@
+--- a/src/account.rs
++++ b/src/account.rs
+@@ -78,7 +78,7 @@
+     let used_margin =
+         portfolio.calculate_used_margin_with_stock_ratio(prices, instruments, stock_ratio_override);
+     let mut metrics = AccountMetrics {
+-        equity: portfolio.cash,
++        equity: portfolio.cash + portfolio.jfquant_locked_value(prices),
+         used_margin,
+         ..AccountMetrics::default()
+     };
+--- a/src/context.rs
++++ b/src/context.rs
+@@ -933,6 +933,7 @@
+     #[getter]
+     fn get_buying_power(&self) -> f64 {
+         let portfolio = crate::portfolio::Portfolio {
++            rights: Default::default(),
+             cash: self.cash,
+             positions: self.positions.clone(),
+             available_positions: self.available_positions.clone(),
+--- a/src/engine/core.rs
++++ b/src/engine/core.rs
+@@ -218,7 +218,7 @@
+     /// margin they would consume beyond the current portfolio. Reported as the
+     /// account's `frozen_cash`, computed in Rust so it cannot drift from the
+     /// engine's own margin accounting (the Python re-implementation was removed).
+-    fn current_frozen_cash(&self, active_orders: &[Order]) -> Decimal {
++    pub(crate) fn current_frozen_cash(&self, active_orders: &[Order]) -> Decimal {
+         let stock_ratio_override = if self.risk_manager.config.is_margin_account() {
+             Some(self.risk_manager.config.stock_initial_margin_ratio())
+         } else {
+--- a/src/engine/mod.rs
++++ b/src/engine/mod.rs
+@@ -177,6 +177,7 @@
+         use std::sync::Arc;
+ 
+         let portfolio = Portfolio {
++            rights: Default::default(),
+             cash: Decimal::from(50000),
+             positions: Arc::new(HashMap::new()),
+             available_positions: Arc::new(HashMap::new()),
+--- a/src/engine/python.rs
++++ b/src/engine/python.rs
+@@ -1000,6 +1000,25 @@
+     /// 添加公司行为 (除权除息)
+     ///
+     /// :param action: 公司行为对象
++    fn jfquant_rights_build(&self) -> String {
++        include_str!("../../jfquant-build-id").trim().to_string()
++    }
++
++    fn configure_jfquant_rights(&mut self, payload: &str) -> PyResult<()> {
++        if self.current_date.is_some() { return Err(pyo3::exceptions::PyValueError::new_err("rights configuration after start")); }
++        let ledger: crate::rights_account::Ledger = serde_json::from_str(payload).map_err(|e|pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
++        if !ledger.states.is_empty() || ledger.date.is_some() || !ledger.closes.is_empty() || !ledger.audit.is_empty() {
++            return Err(pyo3::exceptions::PyValueError::new_err("rights initial state must be empty"));
++        }
++        ledger.validate().map_err(pyo3::exceptions::PyValueError::new_err)?;
++        self.state.portfolio.rights = std::sync::Arc::new(ledger);
++        Ok(())
++    }
++
++    fn jfquant_rights_state(&self) -> PyResult<String> {
++        serde_json::to_string(&self.state.portfolio.rights).map_err(|e|pyo3::exceptions::PyValueError::new_err(e.to_string()))
++    }
++
+     fn add_corporate_action(&mut self, action: CorporateAction) {
+         self.corporate_action_manager.add(action);
+     }
+--- a/src/engine/state.rs
++++ b/src/engine/state.rs
+@@ -21,6 +21,7 @@
+     pub fn new(initial_cash: Decimal) -> Self {
+         Self {
+             portfolio: Portfolio {
++                rights: Default::default(),
+                 cash: initial_cash,
+                 positions: Arc::new(HashMap::new()),
+                 available_positions: Arc::new(HashMap::new()),
+--- a/src/execution/simulated.rs
++++ b/src/execution/simulated.rs
+@@ -1016,6 +1016,7 @@
+         let event = Event::Bar(bar);
+ 
+         let portfolio = crate::portfolio::Portfolio {
++            rights: Default::default(),
+             cash: Decimal::from(100000),
+             positions: HashMap::new().into(),
+             available_positions: HashMap::new().into(),
+@@ -1101,6 +1102,7 @@
+         let event = Event::Bar(bar);
+ 
+         let portfolio = crate::portfolio::Portfolio {
++            rights: Default::default(),
+             cash: Decimal::from(100000),
+             positions: HashMap::new().into(),
+             available_positions: HashMap::new().into(),
+@@ -1177,6 +1179,7 @@
+         let event = Event::Bar(bar);
+ 
+         let portfolio = crate::portfolio::Portfolio {
++            rights: Default::default(),
+             cash: Decimal::from(100000),
+             positions: HashMap::new().into(),
+             available_positions: HashMap::new().into(),
+@@ -1251,6 +1254,7 @@
+         let event = Event::Bar(bar);
+ 
+         let portfolio = crate::portfolio::Portfolio {
++            rights: Default::default(),
+             cash: Decimal::from(100000),
+             positions: HashMap::new().into(),
+             available_positions: HashMap::new().into(),
+@@ -1326,6 +1330,7 @@
+         let event = Event::Bar(bar);
+ 
+         let portfolio = crate::portfolio::Portfolio {
++            rights: Default::default(),
+             cash: Decimal::from(50000), // Only 50k
+             positions: HashMap::new().into(),
+             available_positions: HashMap::new().into(),
+@@ -1440,6 +1445,7 @@
+         let event = Event::Bar(bar);
+ 
+         let portfolio = crate::portfolio::Portfolio {
++            rights: Default::default(),
+             cash: Decimal::from(6000),
+             positions: HashMap::new().into(),
+             available_positions: HashMap::new().into(),
+@@ -1552,6 +1558,7 @@
+         let event = Event::Bar(bar);
+ 
+         let portfolio = crate::portfolio::Portfolio {
++            rights: Default::default(),
+             cash: Decimal::from(6000),
+             positions: HashMap::new().into(),
+             available_positions: HashMap::new().into(),
+@@ -1674,6 +1681,7 @@
+         let event = Event::Bar(bar);
+ 
+         let portfolio = crate::portfolio::Portfolio {
++            rights: Default::default(),
+             cash: Decimal::from(6000),
+             positions: HashMap::new().into(),
+             available_positions: HashMap::new().into(),
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -102,3 +102,6 @@
+ }
+ 
+ define_stub_info_gatherer!(stub_info);
++
++pub mod rights;
++pub mod rights_account;
+--- a/src/market/corporate_action.rs
++++ b/src/market/corporate_action.rs
+@@ -120,6 +120,7 @@
+         });
+ 
+         let mut portfolio = Portfolio {
++            rights: Default::default(),
+             cash: Decimal::ZERO,
+             positions: Arc::new(HashMap::from([("AAPL".to_string(), Decimal::MAX)])),
+             available_positions: Arc::new(HashMap::from([("AAPL".to_string(), Decimal::MAX)])),
+@@ -150,6 +151,7 @@
+         });
+ 
+         let mut portfolio = Portfolio {
++            rights: Default::default(),
+             cash: Decimal::MAX,
+             positions: Arc::new(HashMap::from([("AAPL".to_string(), Decimal::MAX)])),
+             available_positions: Arc::new(HashMap::new()),
+@@ -176,6 +178,7 @@
+         });
+ 
+         let mut portfolio = Portfolio {
++            rights: Default::default(),
+             cash: Decimal::ZERO,
+             positions: Arc::new(HashMap::from([("AAPL".to_string(), Decimal::from(100))])),
+             available_positions: Arc::new(HashMap::from([("AAPL".to_string(), Decimal::from(80))])),
+--- a/src/pipeline/stages/data.rs
++++ b/src/pipeline/stages/data.rs
+@@ -338,6 +338,10 @@
+                             &engine.state.order_manager.trade_tracker,
+                             &engine.risk_manager.config,
+                         );
++                    }
++                    if let Some(previous) = previous_trading_date.filter(|_| !engine.state.portfolio.rights.events.is_empty()) {
++                        let positions = engine.state.portfolio.positions.iter().map(|(k,v)|(k.clone(),*v)).collect();
++                        std::sync::Arc::make_mut(&mut engine.state.portfolio.rights).close(previous, &positions).map_err(pyo3::exceptions::PyValueError::new_err)?;
+                     }
+                     engine.current_date = Some(local_date);
+ 
+@@ -417,6 +421,19 @@
+                     );
+                     drop(settlement_ctx);
+                     drop(settlement_prices);
++                    if !engine.state.portfolio.rights.events.is_empty() {
++                        let frozen = engine.current_frozen_cash(&engine.state.order_manager.active_orders);
++                        let orders = serde_json::to_value(&engine.state.order_manager.active_orders).map_err(|e|pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
++                        let prices = engine.last_prices.read().expect("prices").iter().map(|(k,v)|(k.clone(),v.to_string())).collect::<std::collections::BTreeMap<_,_>>();
++                        let portfolio = &mut engine.state.portfolio;
++                        std::sync::Arc::make_mut(&mut portfolio.rights).audit.push(serde_json::json!({"date":local_date,"kind":"open_orders","orders":orders,"prices":prices,"reserved":frozen.to_string()}));
++                        let mut positions = portfolio.positions.iter().map(|(k,v)|(k.clone(),*v)).collect();
++                        let mut available = portfolio.available_positions.iter().map(|(k,v)|(k.clone(),*v)).collect();
++                        std::sync::Arc::make_mut(&mut portfolio.rights).open(local_date, &mut portfolio.cash, frozen, &mut positions, &mut available).map_err(pyo3::exceptions::PyValueError::new_err)?;
++                        portfolio.positions = std::sync::Arc::new(positions.into_iter().collect());
++                        portfolio.available_positions = std::sync::Arc::new(available.into_iter().collect());
++                    }
++
+                     engine.recent_expiry_events = expiry_settlement
+                         .events
+                         .iter()
+--- a/src/portfolio.rs
++++ b/src/portfolio.rs
+@@ -28,6 +28,8 @@
+ /// :ivar available_positions: 可用持仓 (symbol -> quantity)
+ /// :ivar total_equity: 总权益 (动态计算)
+ pub struct Portfolio {
++    #[serde(default)]
++    pub rights: Arc<crate::rights_account::Ledger>,
+     pub cash: Decimal,
+     pub positions: Arc<HashMap<String, Decimal>>,
+     pub available_positions: Arc<HashMap<String, Decimal>>,
+@@ -47,6 +49,7 @@
+     positions.insert("OPT_SHORT".to_string(), Decimal::from(-2)); // 2 Short Option
+ 
+     let portfolio = Portfolio {
++        rights: Default::default(),
+         cash: Decimal::from(100000),
+         positions: Arc::new(positions),
+         available_positions: Arc::new(HashMap::new()),
+@@ -134,6 +137,7 @@
+     #[new]
+     pub fn new(cash: &Bound<'_, PyAny>) -> PyResult<Self> {
+         Ok(Portfolio {
++            rights: Default::default(),
+             cash: extract_decimal(cash)?,
+             positions: Arc::new(HashMap::new()),
+             available_positions: Arc::new(HashMap::new()),
+@@ -213,12 +217,17 @@
+         *entry += quantity;
+     }
+ 
++    pub fn jfquant_locked_value(&self, prices: &HashMap<String, Decimal>) -> Decimal {
++        if self.rights.states.values().all(|s|s.subscribed==Decimal::ZERO) { return Decimal::ZERO; }
++        self.rights.value(&self.rights.events.iter().filter_map(|e|prices.get(&e.instrument).map(|v|(e.instrument.clone(),*v))).collect()).expect("JFQuant rights valuation missing")
++    }
++
+     pub fn calculate_equity(
+         &self,
+         prices: &HashMap<String, Decimal>,
+         instruments: &HashMap<String, Instrument>,
+     ) -> Decimal {
+-        let mut equity = self.cash;
++        let mut equity = self.cash + self.jfquant_locked_value(prices);
+         for (symbol, quantity) in self.positions.iter() {
+             if !quantity.is_zero()
+                 && let Some(price) = prices.get(symbol)
+@@ -242,7 +251,7 @@
+         prices: &HashMap<String, Decimal>,
+         instruments: &HashMap<String, Instrument>,
+     ) -> Decimal {
+-        MarginEngine::used_margin(&self.positions, prices, instruments, None)
++        MarginEngine::used_margin(&self.positions, prices, instruments, None) + self.jfquant_locked_value(prices)
+     }
+ 
+     pub fn calculate_used_margin_with_stock_ratio(
+@@ -293,6 +302,7 @@
+     #[test]
+     fn test_portfolio_adjust_cash() {
+         let mut portfolio = Portfolio {
++            rights: Default::default(),
+             cash: Decimal::from(10000),
+             positions: Arc::new(HashMap::new()),
+             available_positions: Arc::new(HashMap::new()),
+@@ -308,6 +318,7 @@
+     #[test]
+     fn test_portfolio_adjust_position() {
+         let mut portfolio = Portfolio {
++            rights: Default::default(),
+             cash: Decimal::from(10000),
+             positions: Arc::new(HashMap::new()),
+             available_positions: Arc::new(HashMap::new()),
+@@ -336,6 +347,7 @@
+         available.insert("AAPL".to_string(), Decimal::from(100));
+ 
+         let portfolio = Portfolio {
++            rights: Default::default(),
+             cash: Decimal::from(10000),
+             positions: Arc::new(positions),
+             available_positions: Arc::new(available),
+@@ -358,6 +370,7 @@
+         positions.insert("AAPL".to_string(), Decimal::from(100));
+ 
+         let portfolio = Portfolio {
++            rights: Default::default(),
+             cash: Decimal::from(10000),
+             positions: Arc::new(positions),
+             available_positions: Arc::new(HashMap::new()),
+@@ -395,6 +408,7 @@
+         positions.insert("FUT".to_string(), Decimal::from(10)); // 10 contracts
+ 
+         let portfolio = Portfolio {
++            rights: Default::default(),
+             cash: Decimal::from(100000),
+             positions: Arc::new(positions),
+             available_positions: Arc::new(HashMap::new()),
+--- a/src/risk/common.rs
++++ b/src/risk/common.rs
+@@ -611,6 +611,7 @@
+         prices.insert("510050.SH".to_string(), dec!(110));
+ 
+         let portfolio = Portfolio {
++            rights: Default::default(),
+             cash: dec!(100000),
+             positions: Arc::new(HashMap::new()),
+             available_positions: Arc::new(HashMap::new()),
+@@ -653,6 +654,7 @@
+         prices.insert("AAPL".to_string(), dec!(100));
+ 
+         let portfolio = Portfolio {
++            rights: Default::default(),
+             cash: dec!(50000),
+             positions: Arc::new(HashMap::new()),
+             available_positions: Arc::new(HashMap::new()),
+@@ -708,6 +710,7 @@
+         let mut positions = HashMap::new();
+         positions.insert("AAA".to_string(), dec!(980000));
+         let portfolio = Portfolio {
++            rights: Default::default(),
+             cash: dec!(20000),
+             positions: Arc::new(positions),
+             available_positions: Arc::new(HashMap::new()),
+@@ -775,6 +778,7 @@
+         let mut positions = HashMap::new();
+         positions.insert("600000".to_string(), dec!(10000));
+         let portfolio = Portfolio {
++            rights: Default::default(),
+             cash: dec!(68),
+             positions: Arc::new(positions),
+             available_positions: Arc::new(HashMap::new()),
+@@ -814,6 +818,7 @@
+         let mut positions = HashMap::new();
+         positions.insert("600000".to_string(), dec!(20000));
+         let portfolio = Portfolio {
++            rights: Default::default(),
+             cash: dec!(-99900),
+             positions: Arc::new(positions),
+             available_positions: Arc::new(HashMap::new()),
+@@ -855,6 +860,7 @@
+         let mut positions = HashMap::new();
+         positions.insert("600000".to_string(), dec!(100));
+         let portfolio = Portfolio {
++            rights: Default::default(),
+             cash: Decimal::ZERO,
+             positions: Arc::new(positions),
+             available_positions: Arc::new(HashMap::new()),
+--- a/src/risk/futures.rs
++++ b/src/risk/futures.rs
+@@ -206,6 +206,7 @@
+         let mut current_prices = HashMap::new();
+         current_prices.insert(symbol.clone(), Decimal::from(100));
+         let portfolio = Portfolio {
++            rights: Default::default(),
+             cash: Decimal::from(100_000),
+             positions: Arc::new(HashMap::new()),
+             available_positions: Arc::new(HashMap::new()),
+@@ -240,6 +241,7 @@
+         let mut positions = HashMap::new();
+         positions.insert(symbol.clone(), Decimal::from(500));
+         let portfolio = Portfolio {
++            rights: Default::default(),
+             cash: Decimal::from(-400_000),
+             positions: Arc::new(positions.clone()),
+             available_positions: Arc::new(positions),
+--- a/src/risk/manager.rs
++++ b/src/risk/manager.rs
+@@ -427,6 +427,7 @@
+         let instruments = HashMap::from([(symbol.clone(), instrument)]);
+         // Held but fully T+1 locked: positions has it, available_positions does not.
+         let portfolio = Portfolio {
++            rights: Default::default(),
+             cash: Decimal::from(100_000),
+             positions: Arc::new(HashMap::from([(symbol.clone(), Decimal::from(100))])),
+             available_positions: Arc::new(HashMap::new()),
+--- a/src/risk/mod.rs
++++ b/src/risk/mod.rs
+@@ -74,6 +74,7 @@
+         manager.config.restricted_list = vec!["BAD_STOCK".to_string()];
+ 
+         let portfolio = Portfolio {
++            rights: Default::default(),
+             cash: Decimal::from(100000),
+             positions: std::sync::Arc::new(HashMap::new()),
+             available_positions: std::sync::Arc::new(HashMap::new()),
+@@ -123,6 +124,7 @@
+         positions.insert("AAPL".to_string(), Decimal::from(100));
+ 
+         let portfolio = Portfolio {
++            rights: Default::default(),
+             cash: Decimal::from(0),
+             positions: Arc::new(positions.clone()),
+             available_positions: Arc::new(positions),
+@@ -190,6 +192,7 @@
+         positions.insert("AAPL".to_string(), Decimal::from(100));
+ 
+         let portfolio = Portfolio {
++            rights: Default::default(),
+             cash: Decimal::from(0),
+             positions: Arc::new(positions.clone()),
+             available_positions: Arc::new(positions),
+@@ -277,6 +280,7 @@
+         positions.insert("AAPL".to_string(), Decimal::from(100));
+ 
+         let portfolio = Portfolio {
++            rights: Default::default(),
+             cash: Decimal::from(0),
+             positions: Arc::new(positions.clone()),
+             available_positions: Arc::new(positions),
+@@ -354,6 +358,7 @@
+         positions.insert("AAPL".to_string(), Decimal::from(100));
+ 
+         let portfolio = Portfolio {
++            rights: Default::default(),
+             cash: Decimal::from(0),
+             positions: Arc::new(positions.clone()),
+             available_positions: Arc::new(positions),
+@@ -418,6 +423,7 @@
+         manager.config.check_cash = true;
+ 
+         let portfolio = Portfolio {
++            rights: Default::default(),
+             cash: Decimal::from(1_000_000),
+             positions: Arc::new(HashMap::new()),
+             available_positions: Arc::new(HashMap::new()),
+--- a/src/risk/portfolio.rs
++++ b/src/risk/portfolio.rs
+@@ -138,6 +138,7 @@
+         positions.insert("AAPL".to_string(), Decimal::from(100)); // 100 * 100 = 10,000
+ 
+         let portfolio = Portfolio {
++            rights: Default::default(),
+             cash: Decimal::from(90000), // Total Equity = 100,000
+             positions: Arc::new(positions),
+             available_positions: Arc::new(HashMap::new()),
+--- a/src/risk/stock.rs
++++ b/src/risk/stock.rs
+@@ -119,6 +119,7 @@
+         available_positions.insert(symbol.clone(), Decimal::from(68900));
+ 
+         let portfolio = Portfolio {
++            rights: Default::default(),
+             cash: Decimal::from(1_000_000),
+             positions: Arc::new(HashMap::new()),
+             available_positions: Arc::new(available_positions),
+@@ -178,6 +179,7 @@
+         available_positions.insert(symbol.clone(), Decimal::from(68900));
+ 
+         let portfolio = Portfolio {
++            rights: Default::default(),
+             cash: Decimal::from(1_000_000),
+             positions: Arc::new(HashMap::new()),
+             available_positions: Arc::new(available_positions),
+@@ -234,6 +236,7 @@
+     fn test_margin_account_can_short_sell_without_available_position() {
+         let symbol = "sz300274".to_string();
+         let portfolio = Portfolio {
++            rights: Default::default(),
+             cash: Decimal::from(1_000_000),
+             positions: Arc::new(HashMap::new()),
+             available_positions: Arc::new(HashMap::new()),
+--- a/src/settlement/expiry.rs
++++ b/src/settlement/expiry.rs
+@@ -106,6 +106,7 @@
+         let mut positions = HashMap::new();
+         positions.insert("STK_EXP".to_string(), dec!(100));
+         let portfolio = Portfolio {
++            rights: Default::default(),
+             cash: dec!(1000),
+             positions: Arc::new(positions),
+             available_positions: Arc::new(HashMap::new()),
+@@ -142,6 +143,7 @@
+         let mut positions = HashMap::new();
+         positions.insert("FUT_EXP".to_string(), dec!(2));
+         let portfolio = Portfolio {
++            rights: Default::default(),
+             cash: dec!(1000),
+             positions: Arc::new(positions),
+             available_positions: Arc::new(HashMap::new()),
+@@ -180,6 +182,7 @@
+         let mut positions = HashMap::new();
+         positions.insert("FUT_SETTLE".to_string(), dec!(1));
+         let portfolio = Portfolio {
++            rights: Default::default(),
+             cash: dec!(1000),
+             positions: Arc::new(positions),
+             available_positions: Arc::new(HashMap::new()),
+@@ -218,6 +221,7 @@
+         let mut positions = HashMap::new();
+         positions.insert("FUT_EXP".to_string(), dec!(2));
+         let portfolio = Portfolio {
++            rights: Default::default(),
+             cash: dec!(1000),
+             positions: Arc::new(positions),
+             available_positions: Arc::new(HashMap::new()),
+--- a/src/settlement/manager.rs
++++ b/src/settlement/manager.rs
+@@ -664,6 +664,7 @@
+     #[test]
+     fn test_margin_interest_is_deducted_daily() {
+         let mut portfolio = Portfolio {
++            rights: Default::default(),
+             cash: Decimal::from(-5000),
+             positions: Arc::new(HashMap::new()),
+             available_positions: Arc::new(HashMap::new()),
+@@ -711,6 +712,7 @@
+             Decimal::from_str("150").expect("decimal"),
+         );
+         let mut portfolio = Portfolio {
++            rights: Default::default(),
+             cash: Decimal::from(-5000),
+             positions: Arc::new(pos),
+             available_positions: Arc::new(HashMap::new()),
+@@ -782,6 +784,7 @@
+         let tracker_long = TradeTracker::new();
+ 
+         let mut portfolio_short_first = Portfolio {
++            rights: Default::default(),
+             cash: Decimal::from(-1000),
+             positions: Arc::new(positions.clone()),
+             available_positions: Arc::new(HashMap::new()),
+@@ -811,6 +814,7 @@
+         );
+ 
+         let mut portfolio_long_first = Portfolio {
++            rights: Default::default(),
+             cash: Decimal::from(-1000),
+             positions: Arc::new(positions),
+             available_positions: Arc::new(HashMap::new()),
+@@ -887,6 +891,7 @@
+         positions.insert("ITM_SHORT".to_string(), dec!(-2));
+         positions.insert("OTM_LONG".to_string(), dec!(4));
+         let mut portfolio = Portfolio {
++            rights: Default::default(),
+             cash: dec!(0),
+             positions: Arc::new(positions),
+             available_positions: Arc::new(HashMap::new()),
+@@ -959,6 +964,7 @@
+         let mut positions = HashMap::new();
+         positions.insert("F".to_string(), dec!(1));
+         let mut portfolio = Portfolio {
++            rights: Default::default(),
+             cash: dec!(100000),
+             positions: Arc::new(positions),
+             available_positions: Arc::new(HashMap::new()),
+@@ -1008,6 +1014,7 @@
+         let mut available = HashMap::new();
+         available.insert("STK".to_string(), dec!(0));
+         let mut portfolio = Portfolio {
++            rights: Default::default(),
+             cash: dec!(0),
+             positions: Arc::new(positions),
+             available_positions: Arc::new(available),
+--- a/src/settlement/option.rs
++++ b/src/settlement/option.rs
+@@ -148,6 +148,7 @@
+         positions.insert("OPT_CALL".to_string(), dec!(10)); // 10 Long Calls
+ 
+         let portfolio = Portfolio {
++            rights: Default::default(),
+             cash: dec!(100000),
+             positions: Arc::new(positions),
+             available_positions: Arc::new(HashMap::new()),
+@@ -183,6 +184,7 @@
+         positions.insert("OPT_PUT".to_string(), dec!(1));
+ 
+         let portfolio = Portfolio {
++            rights: Default::default(),
+             cash: dec!(10000),
+             positions: Arc::new(positions),
+             available_positions: Arc::new(HashMap::new()),
+@@ -211,6 +213,7 @@
+         let mut positions = HashMap::new();
+         positions.insert("OPT_CALL".to_string(), dec!(10));
+         let portfolio = Portfolio {
++            rights: Default::default(),
+             cash: dec!(100000),
+             positions: Arc::new(positions),
+             available_positions: Arc::new(HashMap::new()),
+@@ -236,6 +239,7 @@
+         let mut positions = HashMap::new();
+         positions.insert("OPT_CALL".to_string(), dec!(1));
+         Portfolio {
++            rights: Default::default(),
+             cash: dec!(0),
+             positions: Arc::new(positions),
+             available_positions: Arc::new(HashMap::new()),
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -50,3 +50,5 @@
+ strip = "symbols"
+ # 跨 crate 消除死代码。也是"声明但未调用的依赖不进产物"的机制来源。
+ lto = "thin"
++
++[workspace]

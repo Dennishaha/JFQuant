@@ -4,11 +4,11 @@ import hashlib
 import importlib.metadata
 import json
 import os
-from pathlib import Path
 import queue
 import sys
 import threading
 import traceback
+from pathlib import Path
 
 from . import PROTOCOL_VERSION
 
@@ -45,8 +45,8 @@ def main():
         wire.flush()
 
     with contextlib.redirect_stdout(sys.stderr):
-        from .training import train, predict
         from .backtest import backtest
+        from .training import predict, train
         lock = Path(sys.prefix) / "requirements.lock"
         expected = {}
         for line in lock.read_text().splitlines():
@@ -58,7 +58,12 @@ def main():
                 raise RuntimeError(f"dependency version mismatch: {name}; rebuild runtime")
         versions = {name: importlib.metadata.version(name) for name in ("akquant", "lightgbm", "numpy", "pyarrow", "polars")}
         versions["worker_signature"] = signature()
-        versions["dependencies_sha256"] = "sha256:" + hashlib.sha256(lock.read_bytes()).hexdigest()
+        source_lock = Path(sys.prefix) / "akquant-source.lock.json"
+        versions["dependencies_sha256"] = "sha256:" + hashlib.sha256(lock.read_bytes() + source_lock.read_bytes()).hexdigest()
+        import akquant
+        expected_build = "sha256:" + hashlib.sha256(source_lock.read_bytes()).hexdigest()
+        if akquant.Engine().jfquant_rights_build() != expected_build:
+            raise RuntimeError("AKQuant native build receipt mismatch; rebuild runtime")
         versions["python"] = __import__("platform").python_version()
         emit("ready", versions=versions)
         models = {}
@@ -80,7 +85,7 @@ def main():
                 else:
                     raise ValueError("unsupported research operation")
                 emit("complete", result=result, versions=versions)
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 - supervised process boundary reports every task failure
                 traceback.print_exc(file=sys.stderr)
                 emit("error", message=str(error), cancelled=cancelled.is_set())
 

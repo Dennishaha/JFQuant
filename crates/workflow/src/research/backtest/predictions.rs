@@ -3,7 +3,94 @@ use super::*;
 use analytics_core::schedule::ResolvedFold;
 use arrow_array::{Array, Float64Array, StringArray};
 type Restored = (Vec<(Date, String, f64)>, Vec<FoldReport>, serde_json::Value);
+pub(super) fn training_source(source: &Path) -> Result<(PathBuf, Option<String>)> {
+    let mut current = source.to_owned();
+    for _ in 0..32 {
+        if current.join("training.json").is_file() {
+            return Ok((current, None));
+        }
+        let run: serde_json::Value = serde_json::from_slice(&fs::read(current.join("run.json"))?)?;
+        let frozen = run["request"]
+            .get("workflow_snapshot")
+            .unwrap_or(&run["request"]);
+        if let Some(training) = frozen["request"].get("training") {
+            let id: uuid::Uuid = serde_json::from_value(training.clone())?;
+            return Ok((
+                current
+                    .parent()
+                    .ok_or("prediction task parent missing")?
+                    .join(id.to_string()),
+                Some(
+                    frozen["training_artifact_sha256"]
+                        .as_str()
+                        .ok_or("training receipt missing")?
+                        .into(),
+                ),
+            ));
+        }
+        let id: uuid::Uuid = serde_json::from_value(frozen["request"]["source"].clone())?;
+        current = current
+            .parent()
+            .ok_or("prediction source parent missing")?
+            .join(id.to_string());
+    }
+    Err("prediction provenance cycle or excessive depth".into())
+}
 fn identity(request: &ResearchRequest, factors: &str, folds: &[ResolvedFold]) -> Result<String> {
+    if let Some(source) = &request.reuse_predictions {
+        let (training_root, expected) = training_source(source)?;
+        let bytes = fs::read(training_root.join("training.json"))?;
+        if expected.is_some_and(|hash| hash != format!("sha256:{:x}", Sha256::digest(&bytes))) {
+            return Err("prediction training provenance damaged".into());
+        }
+        let training: serde_json::Value = serde_json::from_slice(&bytes)?;
+        let mut unsigned = training.clone();
+        let receipt = unsigned
+            .as_object_mut()
+            .ok_or("training descriptor invalid")?
+            .remove("artifact_signature")
+            .ok_or("training receipt missing")?;
+        if receipt
+            != format!(
+                "sha256:{:x}",
+                Sha256::digest(serde_json::to_vec(&unsigned)?)
+            )
+            || training["schema_version"] != 3
+            || training["status"] != "trained"
+            || serde_json::from_slice::<serde_json::Value>(&fs::read(source.join("summary.json"))?)?
+                ["factor_signature"]
+                != factors
+            || training["resolved_folds"] != serde_json::to_value(folds)?
+            || training["feature_order"] != serde_json::to_value(&request.config.factor_ids)?
+            || training["request"]["quality_policy"]
+                != serde_json::to_value(&request.quality_policy)?
+        {
+            return Err("prediction feature/date/training identity mismatch".into());
+        }
+        let key = format!(
+            "sha256:{:x}",
+            Sha256::digest(serde_json::to_vec(&(
+                "prediction-v1",
+                factors,
+                folds,
+                &training["models"],
+                &training["feature_order"],
+                &request.quality_policy,
+                training["runtime_signature"]
+                    .as_str()
+                    .ok_or("prediction producer missing")?
+            ))?)
+        );
+        let published: serde_json::Value =
+            serde_json::from_slice(&fs::read(source.join("prediction_manifest.json"))?)?;
+        if published["signature"] != key
+            || published["status"] != "completed"
+            || published["sha256"] != file_hash(&source.join("predictions.parquet"))?
+        {
+            return Err("published prediction damaged".into());
+        }
+        return Ok(key);
+    }
     let source = request.reuse_training.as_ref().unwrap_or(&request.output);
     let training: serde_json::Value =
         serde_json::from_slice(&fs::read(source.join("training.json"))?)?;
@@ -36,7 +123,9 @@ fn identity(request: &ResearchRequest, factors: &str, folds: &[ResolvedFold]) ->
 }
 fn root(request: &ResearchRequest, key: &str) -> PathBuf {
     request
-        .output
+        .reuse_predictions
+        .as_ref()
+        .unwrap_or(&request.output)
         .parent()
         .unwrap_or(&request.output)
         .join(".predictions-v1")
@@ -143,6 +232,18 @@ pub(super) fn restore(
         return Err("prediction cache identity mismatch".into());
     }
     let hashes: BTreeMap<String, String> = serde_json::from_value(m["files"].clone())?;
+    if let Some(source) = &request.reuse_predictions {
+        let published: serde_json::Value =
+            serde_json::from_slice(&fs::read(source.join("prediction_manifest.json"))?)?;
+        if published["sha256"]
+            != hashes
+                .get("predictions.parquet")
+                .map(String::as_str)
+                .unwrap_or("")
+        {
+            return Err("published prediction differs from immutable cache".into());
+        }
+    }
     for required in [
         "predictions.parquet",
         "sample_selection.json",
@@ -174,7 +275,7 @@ pub(super) fn restore(
             }
         }
     }
-    let mut signals = vec![];
+    let mut signals = Vec::<(Date, String, f64)>::new();
     let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
         fs::File::open(dir.join("predictions.parquet"))?,
     )?;
@@ -221,6 +322,13 @@ pub(super) fn restore(
     }
     if m["rows"] != signals.len() {
         return Err("prediction cache row count mismatch".into());
+    }
+    let mut seen = BTreeSet::new();
+    for (day, id, _) in &signals {
+        analytics_core::pool::validate_instrument(id)?;
+        if !folds.iter().any(|f| f.actual.test.contains(*day)) || !seen.insert((*day, id)) {
+            return Err("prediction date/security/duplicate identity invalid".into());
+        }
     }
     let reports: Vec<FoldReport> =
         serde_json::from_slice(&fs::read(dir.join("fold_reports.json"))?)?;

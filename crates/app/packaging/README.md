@@ -1,5 +1,9 @@
 # macOS packaging
 
+AKQuant 0.3.66 使用 PyPI 原始 sdist 和其 Cargo.lock，SHA-256 记录在 `akquant-source.lock.json`；最小原生改动在 `akquant-rights.patch`，领域状态机从 core 源码复制到忽略的构建目录。`build-akquant.sh` 核验所有输入、使用哈希锁定的 maturin 工具构建 macOS14/arm64 wheel，再由 build-collector 安装。运行时自报源码锁哈希，研究 worker 拒绝未打补丁或哈希不符的引擎。保留 MIT 上游许可证；不提交源码展开树、wheel 或动态库。
+
+复现：`bash crates/app/packaging/build-collector.sh`；产物与构建回执位于 `target/akquant-rights-build`。修改状态机或补丁须更新源码锁输入哈希并重建，研究依赖签名同时包含 Python 依赖锁和原生源码锁。
+
 构建自包含Apple Silicon/macOS14的App、独立jfquant及DMG。运行时不调用Cargo、pip、
 uv或系统Python。所有依赖、原生对象、签名及安装包生成到忽略的target目录。
 
@@ -22,7 +26,7 @@ codesign --verify --deep --strict target/distribution/JFQuant.app
 ```
 
 `build-native.sh`只构建LLVM OpenMP 20.1.8，`JFQUANT_NATIVE_BUILD_ROOT`可覆盖构建目录。
-LightGBM 4.7.0与AKQuant 0.3.66来自哈希锁定wheel，不编译或携带旧Rust LightGBM依赖。
+LightGBM 4.7.0来自哈希锁定wheel，AKQuant 0.3.66按源码锁构建配股补丁；不携带旧Rust LightGBM依赖。
 `build-collector.sh`同步采集与研究Python包，将OpenMP放入包内，修正LightGBM引用。
 `rewrite-python.py`移除构建机搜索路径、重定位包内依赖并签名；`verify-python.py`审核
 每个Mach-O的arm64切片、macOS最低版本、实际依赖目标及包内路径。
@@ -34,9 +38,9 @@ LightGBM 4.7.0与AKQuant 0.3.66来自哈希锁定wheel，不编译或携带旧Ru
 本机审核不能替代另一台干净Apple Silicon/macOS14机器的安装、运行、取消及离线读取。
 开发签名不等同Developer ID或Apple公证；安装方式见INSTALL.txt。
 
-研究结果格式16／服务协议18：打包CLI验收覆盖静态准入、模型复用和完整结果格式；研究worker与依赖锁保持不变；采集模块改动后必须同步重建共享Python中的采集包。打包必须等待使用开发Python目录的采集任务结束，避免重建运行时影响请求。
+研究结果格式17／服务协议21／研究worker协议2：打包CLI验收覆盖静态准入、模型复用、已发布预测复用和完整结果格式；采集模块改动后必须同步重建共享Python中的采集包。打包必须等待使用开发Python目录的采集任务结束，避免重建运行时影响请求。
 
-打包验收核对服务18／采集12、来源策略2的HiThink默认角色和空执行资料来源，并验证两种私有Key入口、废弃命令拒绝、包内Python及原生研究流程。
+打包验收核对服务21／采集13、来源策略2的HiThink默认角色和空执行资料来源，并验证两种私有Key入口、废弃命令拒绝、包内Python及原生研究流程。
 
 
 Packaged CLI acceptance also invokes `research verify --task <UUID>` after the train/backtest fixture: the Rust closing ledger must replay consistently and valuation-only rows must have zero fills. Python supplies upstream fills and terminal account observations; Rust owns closing valuation, event exposure and result verification. See the workflow research README for the accounting contract.

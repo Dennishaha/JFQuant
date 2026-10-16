@@ -22,6 +22,9 @@ if [ ! -x "$python_root/bin/python3" ] || [ "$(cat "$identity_file" 2>/dev/null 
   printf '%s\n' "$sha" > "$identity_file"
 fi
 uv pip sync --python "$python_root/bin/python3" --require-hashes "$collector_root/requirements.lock"
+bash "$repo_root/crates/app/packaging/build-akquant.sh"
+uv pip install --python "$python_root/bin/python3" --no-deps --reinstall "$repo_root/target/akquant-rights-build/patched-wheels/akquant-0.3.66-cp310-abi3-macosx_14_0_arm64.whl"
+cp "$repo_root/crates/app/packaging/akquant-source.lock.json" "$python_root/"
 site_root="$python_root/lib/python3.12/site-packages"
 mkdir -p "$site_root"
 rm -rf "$site_root/jfquant_collectors"

@@ -1,4 +1,4 @@
-当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议20、采集协议13、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
+当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议21、采集协议13、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
 
 # analytics-workflow
 
@@ -209,3 +209,5 @@ flowchart LR
 验收覆盖多次换股及延后成交、旧股基数先现金后送股、最终账户篡改、持仓缺价、费用不一致、估值行成交和未模拟事件披露。
 
 结构化行动：采集、动作刷新汇总及离线对账发布格式7，读取时重放字段证据；`InspectActions`返回`details.structured_fields`，`ReviseActions`接受版本2字段引用并保留版本1公告请求。字段补齐不清除配股执行告警，不重训模型；规则及案例见[公司行动组件](../storage/src/corporate_actions/README.md)。
+
+BacktestPredictions 接收成功原生回测任务、行动版本和 rights::Policy；冻结原任务及预测文件哈希，核验特征/市场身份后只执行账户。研究执行协议2、结果格式17及配股账本v2；旧结果16和账本v1保持只读核验。参见研究worker README。

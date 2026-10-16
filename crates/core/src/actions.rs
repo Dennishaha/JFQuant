@@ -193,6 +193,15 @@ pub enum EventTerms {
         allocation: Allocation,
     },
     /// Entitlement to subscribe new shares for cash.
+    RightsIssueFacts {
+        /// Partial reviewed facts; absence does not imply inapplicability.
+        facts: Box<crate::rights::Terms>,
+        /// Independently evidenced exchange reference, when available.
+        reference: Option<Reference>,
+        /// Allocation rule remains unknown until explicitly reviewed.
+        allocation: Option<Allocation>,
+    },
+    /// Complete legacy rights terms, retained for historical readers.
     RightsIssue {
         /// First subscription date, inclusive.
         subscription_start: Date,
@@ -266,7 +275,9 @@ impl EventTerms {
     /// Registrar policy for ordinary distributions and explicitly referenced special events.
     pub fn allocation(&self) -> Option<&Allocation> {
         match self {
-            Self::Distribution { allocation } => allocation.as_ref(),
+            Self::Distribution { allocation } | Self::RightsIssueFacts { allocation, .. } => {
+                allocation.as_ref()
+            }
             Self::Differential { allocation, .. }
             | Self::RightsIssue { allocation, .. }
             | Self::Conversion { allocation, .. } => Some(allocation),
@@ -285,6 +296,7 @@ impl EventTerms {
     pub fn reference(&self) -> Option<&Reference> {
         match self {
             Self::Distribution { .. } => None,
+            Self::RightsIssueFacts { reference, .. } => reference.as_ref(),
             Self::Historical { reference, .. } => Some(reference),
             Self::Differential { reference, .. }
             | Self::RightsIssue { reference, .. }
@@ -303,6 +315,7 @@ impl EventTerms {
             r.price(1e6)?;
         }
         match self {
+            Self::RightsIssueFacts { facts, .. } => facts.validate(None, ex)?,
             Self::Distribution { allocation } => {
                 if let Some(a) = allocation {
                     a.allocate(1, 1.)?;

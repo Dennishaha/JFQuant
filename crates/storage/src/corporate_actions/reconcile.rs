@@ -627,7 +627,7 @@ mod tests {
         let context = analytics_core::task::TaskContext::current();
         let output = tmp.path().join("reconciled");
         let normalized = apply(&path, &[], &[], &output, &context).unwrap();
-        assert_eq!(normalized.schema_version, 7);
+        assert_eq!(normalized.schema_version, 8);
         assert_eq!(normalized.failures, book.failures);
         assert_eq!(normalized.actions.len(), 1);
         assert_eq!(normalized.actions[0].cash_per_share, "4.30");

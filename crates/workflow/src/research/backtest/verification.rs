@@ -181,7 +181,10 @@ pub fn report(workspace: &Workspace, task_id: Uuid) -> Result<Value> {
         .map(|name| {
             Ok((
                 name,
-                format!("sha256:{:x}", Sha256::digest(fs::read(root.join(name))?)),
+                format!(
+                    "sha256:{:x}",
+                    analytics_core::hash::Hex(Sha256::digest(fs::read(root.join(name))?))
+                ),
             ))
         })
         .collect::<Result<BTreeMap<_, _>>>()?;

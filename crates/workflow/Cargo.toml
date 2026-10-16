@@ -23,6 +23,6 @@ arrow-array.workspace = true
 arrow-schema.workspace = true
 parquet.workspace = true
 thiserror.workspace = true
-rust_decimal = { version = "=1.42.1", default-features = false, features = ["std", "serde-with-str"] }
+rust_decimal = { version = "=1.43.0", default-features = false, features = ["std", "serde-with-str"] }
 
 tempfile = "3.23"

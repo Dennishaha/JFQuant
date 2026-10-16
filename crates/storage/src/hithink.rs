@@ -21,7 +21,10 @@ fn invalid(s: impl std::fmt::Display) -> io::Error {
     io::Error::other(s.to_string())
 }
 fn digest(bytes: &[u8]) -> String {
-    format!("sha256:{:x}", Sha256::digest(bytes))
+    format!(
+        "sha256:{:x}",
+        analytics_core::hash::Hex(Sha256::digest(bytes))
+    )
 }
 fn save(path: &Path, value: &impl serde::Serialize) -> io::Result<()> {
     let part = path.with_extension("part");
@@ -40,7 +43,7 @@ pub fn producer_signature() -> String {
         hash.update(bytes);
         hash.update([0]);
     }
-    format!("sha256:{:x}", hash.finalize())
+    format!("sha256:{:x}", analytics_core::hash::Hex(hash.finalize()))
 }
 /// Exchange symbols are unambiguous and retain their exchange through conversion.
 pub fn thscode(symbol: &str) -> io::Result<String> {

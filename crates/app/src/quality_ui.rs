@@ -145,7 +145,7 @@ pub(crate) fn reasons(ui: &mut egui::Ui, value: &Value) {
     ui.collapsing(
         format!("数据检查原因列表（{}项）", rows.len()),
         |ui| {
-            let key = ui.id().with("admission_filters");
+            let key = ui.scope_id().with("admission_filters");
             let (mut filter, mut handling) =
                 ui.data_mut(|d| d.get_temp::<(String, String)>(key).unwrap_or_default());
             ui.horizontal(|ui| {

@@ -57,3 +57,5 @@ RUSTDOCFLAGS="-D warnings" cargo doc -p analytics-core --no-deps
 供应商事件策略保留完整结构化历史要求；未解决事件由工作流按实际期初持仓核验后决定收益是否可发布，全类别审计策略保持事前严格核验。
 
 配股在普通调仓前处理既有交收，再执行一次认购，随后更新当天生效的获配、退款与上市状态；同日认购与获配不会延迟到下一交易日。验收：`cargo test -p analytics-core rights`。
+
+依赖升级：账户 Decimal 固定为 1.43.0，与原生 AKQuant 补丁一致；`hash::Hex` 固定小写双位十六进制输出，保留旧 SHA-256 字符串（包括前导零）。验收：`cargo test -p analytics-core`。

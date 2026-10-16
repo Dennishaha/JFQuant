@@ -7,7 +7,11 @@ use std::path::PathBuf;
 
 fn verify_bytes(path: &Path, expected: &str) -> io::Result<Vec<u8>> {
     let bytes = fs::read(path)?;
-    if format!("sha256:{:x}", Sha256::digest(&bytes)) != expected {
+    if format!(
+        "sha256:{:x}",
+        analytics_core::hash::Hex(Sha256::digest(&bytes))
+    ) != expected
+    {
         return Err(invalid("reconciliation evidence hash mismatch"));
     }
     Ok(bytes)
@@ -25,7 +29,10 @@ fn capture(
     hashes: &mut BTreeMap<String, String>,
 ) -> io::Result<()> {
     safe_name(name)?;
-    let hash = format!("sha256:{:x}", Sha256::digest(bytes));
+    let hash = format!(
+        "sha256:{:x}",
+        analytics_core::hash::Hex(Sha256::digest(bytes))
+    );
     if hashes.get(name).is_some_and(|h| *h != hash) {
         return Err(invalid("reconciliation evidence collision"));
     }
@@ -167,7 +174,10 @@ fn native_evidence(
             }
         }
     }
-    let digest = format!("{:x}", Sha256::digest(&receipt_bytes));
+    let digest = format!(
+        "{:x}",
+        analytics_core::hash::Hex(Sha256::digest(&receipt_bytes))
+    );
     capture(
         output,
         &format!("native-journal-{digest}.jsonl"),
@@ -176,7 +186,10 @@ fn native_evidence(
     )?;
     capture(
         output,
-        &format!("native-owner-{:x}.json", Sha256::digest(&owner_bytes)),
+        &format!(
+            "native-owner-{:x}.json",
+            analytics_core::hash::Hex(Sha256::digest(&owner_bytes))
+        ),
         &owner_bytes,
         hashes,
     )?;
@@ -250,7 +263,10 @@ pub(super) fn announcement_evidence(
             );
         }
     }
-    let identity = format!("{:x}", Sha256::digest(&owner_bytes));
+    let identity = format!(
+        "{:x}",
+        analytics_core::hash::Hex(Sha256::digest(&owner_bytes))
+    );
     let mut files = BTreeMap::new();
     for (name, expected) in wanted {
         task_context_check()?;
@@ -263,7 +279,10 @@ pub(super) fn announcement_evidence(
     let owner_file = format!("announcement-owner-{identity}.json");
     capture(output, &owner_file, &owner_bytes, hashes)?;
     let bytes=serde_json::to_vec_pretty(&json!({"schema_version":1,"owner":owner,"owner_file":owner_file,"owner_sha256":format!("sha256:{identity}"),"manifest":manifest,"files":files,"candidate_only":true,"resolution":"use existing ReviseActions field evidence; no automatic coverage assertion"})).map_err(invalid)?;
-    let name = format!("announcement-evidence-{:x}.json", Sha256::digest(&bytes));
+    let name = format!(
+        "announcement-evidence-{:x}.json",
+        analytics_core::hash::Hex(Sha256::digest(&bytes))
+    );
     capture(output, &name, &bytes, hashes)?;
     Ok(name)
 }
@@ -461,7 +480,9 @@ pub fn apply(
             i["instrument"] = json!(id);
             i["id"] = json!(format!(
                 "sha256:{:x}",
-                Sha256::digest(serde_json::to_vec(&json!([id, i["id"]])).map_err(invalid)?)
+                analytics_core::hash::Hex(Sha256::digest(
+                    serde_json::to_vec(&json!([id, i["id"]])).map_err(invalid)?
+                ))
             ));
         }
         for decision in r["decisions"]
@@ -552,19 +573,27 @@ pub fn apply(
         receipt_results.insert(id, r);
     }
     let input_bytes = fs::read(staging.join("reconciliation-inputs.json"))?;
-    let input_hash = format!("sha256:{:x}", Sha256::digest(&input_bytes));
+    let input_hash = format!(
+        "sha256:{:x}",
+        analytics_core::hash::Hex(Sha256::digest(&input_bytes))
+    );
     capture(
         output,
         &format!("reconciliation-inputs-{}.json", &input_hash[7..]),
         &input_bytes,
         &mut bundle.raw_sha256,
     )?;
-    let base_hash = format!("sha256:{:x}", Sha256::digest(fs::read(source_path)?));
+    let base_hash = format!(
+        "sha256:{:x}",
+        analytics_core::hash::Hex(Sha256::digest(fs::read(source_path)?))
+    );
     for issue in &mut bundle.execution_issues {
         if issue.id.is_empty() {
             issue.id = format!(
                 "sha256:{:x}",
-                Sha256::digest(serde_json::to_vec(issue).map_err(invalid)?)
+                analytics_core::hash::Hex(Sha256::digest(
+                    serde_json::to_vec(issue).map_err(invalid)?
+                ))
             );
         }
         if issue.event_category.is_empty() {
@@ -587,7 +616,7 @@ pub fn apply(
         .execution_issues
         .sort_by_key(|i| (i.instrument.clone(), i.id.clone(), i.code.clone()));
     super::facts::refresh(&mut bundle, output)?;
-    let receipt = json!({"schema_version":1,"rule_version":"jfquant-actions-v2","base_actions_sha256":format!("sha256:{:x}",Sha256::digest(fs::read(source_path)?)),
+    let receipt = json!({"schema_version":1,"rule_version":"jfquant-actions-v2","base_actions_sha256":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(fs::read(source_path)?))),
         "collector_signature":result["collector_signature"],"announcement_evidence":announcements,"inputs_sha256":input_hash,"evidence_sha256":bundle.raw_sha256,"timings_seconds":{"evidence":evidence_seconds,"replay":replay_seconds,"before_publication":started.elapsed().as_secs_f64()},"results":receipt_results,"reconciled_securities":resolved,"unresolved_count":bundle.execution_issues.iter().filter(|i| !i.skipped_by_engine()).count(),"warnings_count":bundle.execution_issues.iter().filter(|i| i.skipped_by_engine()).count()});
     // The supervised replay directory is temporary; immutable proof is the hashed receipt.
     fs::remove_dir_all(&staging)?;
@@ -621,7 +650,7 @@ mod tests {
         let book:ActionBundle=serde_json::from_value(json!({"schema_version":5,"downloader":"JFQuant analytics-workflow synthetic-demo-v1","downloaded_at":"fixture",
             "source_bindings":{},"coverage":{},"queried_symbols":["SH600188"],"actions":[],"failures":{"SH600188":"history coverage failure outside repaired date"},
             "structured_coverage":{"SH600188":{"dates":{"start":"2012-01-01","end":"2026-10-12"},"source":"hithink.events/per-share-v1","evidence":["primary.json"]}},
-            "raw_sha256":{"primary.json":format!("sha256:{:x}",Sha256::digest(&bytes))}})).unwrap();
+            "raw_sha256":{"primary.json":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(&bytes)))}})).unwrap();
         let path = source.join("actions.json");
         fs::write(&path, serde_json::to_vec(&book).unwrap()).unwrap();
         let context = analytics_core::task::TaskContext::current();
@@ -669,18 +698,18 @@ mod tests {
         fs::create_dir_all(root.join("raw")).unwrap();
         fs::create_dir_all(output.join("raw")).unwrap();
         let owner = json!({"operation":"actions","collector_protocol":13,"collector_signature":crate::collector::collector_signature(),"normalization":crate::adjustment::NORMALIZATION,
-            "dependencies_sha256":format!("sha256:{:x}",Sha256::digest(include_bytes!("../../collectors/requirements.lock"))),
-            "python_runtime_sha256":format!("sha256:{:x}",Sha256::digest(include_bytes!("../../collectors/python-runtime.lock.json"))),
+            "dependencies_sha256":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(include_bytes!("../../collectors/requirements.lock")))),
+            "python_runtime_sha256":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(include_bytes!("../../collectors/python-runtime.lock.json")))),
             "request":{"provider":"tdxaidata","adjustment_source":"tdx_forward","start":"2024-01-01","end":"2024-12-31","instruments":["SH600188"],"source_bindings":{},"benchmarks":[],"universes":[]}});
         fs::write(root.join("owner.json"), serde_json::to_vec(&owner).unwrap()).unwrap();
         let bytes = br#"{"Date":[20240604],"Type":["1"],"Value":[[43,0,5,0]]}"#;
         fs::write(root.join("raw/sdk-body.body"), bytes).unwrap();
-        let receipt = json!({"function":"GetCWDATAInStr","sdk":"tdxaidata","version":"1.2.2","arguments":["600188.SH","2024-01-01 00:00:00","2024-12-31 00:00:00"],"filename":"sdk-body.body","sha256":format!("sha256:{:x}",Sha256::digest(bytes))});
+        let receipt = json!({"function":"GetCWDATAInStr","sdk":"tdxaidata","version":"1.2.2","arguments":["600188.SH","2024-01-01 00:00:00","2024-12-31 00:00:00"],"filename":"sdk-body.body","sha256":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(bytes)))});
         let shard=serde_json::to_vec(&json!({"instrument":"SH600188","evidence":{"provider":"tdxaidata","sdk_receipts":[receipt.clone()]}})).unwrap();
         fs::write(root.join("raw/SH600188-actions-structured.json"), &shard).unwrap();
         fs::write(
             root.join("receipts.json"),
-            serde_json::to_vec(&json!({"SH600188":format!("sha256:{:x}",Sha256::digest(&shard))}))
+            serde_json::to_vec(&json!({"SH600188":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(&shard)))}))
                 .unwrap(),
         )
         .unwrap();
@@ -711,7 +740,7 @@ mod tests {
         fs::write(
             root.join("receipts.json"),
             serde_json::to_vec(
-                &json!({"historical_issuer":format!("sha256:{:x}",Sha256::digest(&alias_shard))}),
+                &json!({"historical_issuer":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(&alias_shard)))}),
             )
             .unwrap(),
         )
@@ -722,7 +751,7 @@ mod tests {
         fs::write(root.join("owner.json"), serde_json::to_vec(&owner).unwrap()).unwrap();
         fs::write(
             root.join("receipts.json"),
-            serde_json::to_vec(&json!({"SH600188":format!("sha256:{:x}",Sha256::digest(&shard))}))
+            serde_json::to_vec(&json!({"SH600188":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(&shard)))}))
                 .unwrap(),
         )
         .unwrap();

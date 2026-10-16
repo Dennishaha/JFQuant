@@ -200,7 +200,9 @@ fn minimum_samples_and_feature_thresholds_are_frozen_and_tampering_is_rejected()
     incomplete["execution"]["sample_selection"] = incomplete["sample_selection"].clone();
     incomplete["execution"]["sample_selection_sha256"] = json!(format!(
         "sha256:{:x}",
-        Sha256::digest(serde_json::to_vec(&incomplete["sample_selection"]).unwrap())
+        analytics_core::hash::Hex(Sha256::digest(
+            serde_json::to_vec(&incomplete["sample_selection"]).unwrap()
+        ))
     ));
     assert!(crate::research::backtest::validate_result(&incomplete).is_err());
     let mut old = high;

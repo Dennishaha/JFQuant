@@ -40,7 +40,12 @@ fn identity(request: &ResearchRequest, factors: &str, folds: &[ResolvedFold]) ->
     if let Some(source) = &request.reuse_predictions {
         let (training_root, expected) = training_source(source)?;
         let bytes = fs::read(training_root.join("training.json"))?;
-        if expected.is_some_and(|hash| hash != format!("sha256:{:x}", Sha256::digest(&bytes))) {
+        if expected.is_some_and(|hash| {
+            hash != format!(
+                "sha256:{:x}",
+                analytics_core::hash::Hex(Sha256::digest(&bytes))
+            )
+        }) {
             return Err("prediction training provenance damaged".into());
         }
         let training: serde_json::Value = serde_json::from_slice(&bytes)?;
@@ -53,7 +58,7 @@ fn identity(request: &ResearchRequest, factors: &str, folds: &[ResolvedFold]) ->
         if receipt
             != format!(
                 "sha256:{:x}",
-                Sha256::digest(serde_json::to_vec(&unsigned)?)
+                analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(&unsigned)?))
             )
             || training["schema_version"] != 3
             || training["status"] != "trained"
@@ -69,7 +74,7 @@ fn identity(request: &ResearchRequest, factors: &str, folds: &[ResolvedFold]) ->
         }
         let key = format!(
             "sha256:{:x}",
-            Sha256::digest(serde_json::to_vec(&(
+            analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(&(
                 "prediction-v1",
                 factors,
                 folds,
@@ -79,7 +84,7 @@ fn identity(request: &ResearchRequest, factors: &str, folds: &[ResolvedFold]) ->
                 training["runtime_signature"]
                     .as_str()
                     .ok_or("prediction producer missing")?
-            ))?)
+            ))?))
         );
         let published: serde_json::Value =
             serde_json::from_slice(&fs::read(source.join("prediction_manifest.json"))?)?;
@@ -110,7 +115,7 @@ fn identity(request: &ResearchRequest, factors: &str, folds: &[ResolvedFold]) ->
     }
     Ok(format!(
         "sha256:{:x}",
-        Sha256::digest(serde_json::to_vec(&(
+        analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(&(
             "prediction-v1",
             factors,
             folds,
@@ -118,7 +123,7 @@ fn identity(request: &ResearchRequest, factors: &str, folds: &[ResolvedFold]) ->
             &training["feature_order"],
             &request.quality_policy,
             crate::research::worker::runtime_signature()
-        ))?)
+        ))?))
     ))
 }
 fn root(request: &ResearchRequest, key: &str) -> PathBuf {

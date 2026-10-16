@@ -308,7 +308,7 @@ impl Trainer for LightGbmTrainer {
             model_id: uuid::Uuid::new_v4(),
             features,
             objective: format!("{:?}", request.objective),
-            training_schema_hash: format!("sha256:{:x}", h.finalize()),
+            training_schema_hash: format!("sha256:{:x}", analytics_core::hash::Hex(h.finalize())),
             formula_version: None,
             universe_id: Some(request.universe_id.clone()),
             date_range: Some(request.date_range.clone()),

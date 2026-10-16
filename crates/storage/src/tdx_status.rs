@@ -317,7 +317,7 @@ mod tests {
             let bytes = serde_json::to_vec(&body).unwrap();
             let name = format!("sdk-{function}.body");
             fs::write(root.path().join("raw").join(&name), &bytes).unwrap();
-            receipts.push(json!({"kind":"sdk_native_response","sdk":"tdxaidata","version":"1.2.2","function":function,"arguments":arguments,"filename":name,"sha256":format!("sha256:{:x}",Sha256::digest(&bytes))}));
+            receipts.push(json!({"kind":"sdk_native_response","sdk":"tdxaidata","version":"1.2.2","function":function,"arguments":arguments,"filename":name,"sha256":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(&bytes)))}));
         }
         let evidence = json!({"stock_status":{"status":"captured","rule":CAPTURE_RULE,"calendar_start":"2010-12-25","current_snapshot":"captured"},"sdk_receipts":receipts});
         assert_eq!(

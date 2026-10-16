@@ -5,6 +5,7 @@ import hashlib
 import io
 import re
 from functools import lru_cache
+from importlib.metadata import version
 from itertools import pairwise
 from urllib.parse import urlsplit
 
@@ -267,7 +268,8 @@ def collect(request, report):
                         "pdf_sha256": "sha256:" + hashlib.sha256(pdf.content).hexdigest(),
                         "text": name + ".txt",
                         "text_sha256": "sha256:" + hashlib.sha256(text.encode()).hexdigest(),
-                        "parser_version": "cninfo-candidates-v4",
+                        "parser_version": "cninfo-candidates-v5",
+                        "pypdf_version": version("pypdf"),
                         "candidates": extract_candidates(text, title),
                     }
                 )

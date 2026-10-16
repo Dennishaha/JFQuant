@@ -7,7 +7,7 @@ build = "build.rs"
 
 [dependencies]
 analytics-workflow = { path = "../workflow" }
-rfd = "0.15"
+rfd = "0.17.2"
 serde.workspace = true
 analytics-core = { path = "../core" }
 analytics-engine = { path = "../engine", features = ["duckdb-native"] }

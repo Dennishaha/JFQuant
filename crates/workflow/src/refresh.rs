@@ -1398,7 +1398,12 @@ fn refresh_actions(
     for (b, root) in selected {
         for (name, hash) in &b.raw_sha256 {
             let path = dest.join("raw").join(name);
-            if path.exists() && format!("sha256:{:x}", Sha256::digest(fs::read(&path)?)) != *hash {
+            if path.exists()
+                && format!(
+                    "sha256:{:x}",
+                    analytics_core::hash::Hex(Sha256::digest(fs::read(&path)?))
+                ) != *hash
+            {
                 // Per-collector completion receipts share a name; the action bundle's
                 // structured shards already reference and authenticate native/HTTP bodies.
                 if name == "complete-sources-structured.json" {
@@ -1446,7 +1451,10 @@ fn refresh_actions(
     atomic_json(&proof, &market_content_hash(&all_evidence)?)?;
     book.raw_sha256.insert(
         "source-evidence-sha256.json".into(),
-        format!("sha256:{:x}", Sha256::digest(fs::read(&proof)?)),
+        format!(
+            "sha256:{:x}",
+            analytics_core::hash::Hex(Sha256::digest(fs::read(&proof)?))
+        ),
     );
     analytics_storage::corporate_actions::facts::refresh(&mut book, &dest)?;
     atomic_json(&dest.join("actions.json"), &book)?;

@@ -48,7 +48,7 @@ fn now() -> String {
 pub fn signature(value: &impl Serialize) -> Result<String> {
     Ok(format!(
         "sha256:{:x}",
-        Sha256::digest(serde_json::to_vec(value)?)
+        analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(value)?))
     ))
 }
 // Hash actual extracted bytes as well as provenance. Paths and lengths frame
@@ -80,7 +80,11 @@ fn verify_action_evidence(path: &Path, book: &ActionBundle) -> Result<()> {
                 .join("raw")
                 .join(name),
         )?;
-        if format!("sha256:{:x}", Sha256::digest(bytes)) != *expected {
+        if format!(
+            "sha256:{:x}",
+            analytics_core::hash::Hex(Sha256::digest(bytes))
+        ) != *expected
+        {
             return Err("action evidence hash mismatch".into());
         }
     }
@@ -1032,7 +1036,10 @@ fn version(workspace: &Workspace, id: &str, kind: &str) -> Result<DataVersion> {
                     .ok_or("missing parent")?
                     .join("raw")
                     .join(name);
-                let actual = format!("sha256:{:x}", Sha256::digest(fs::read(raw)?));
+                let actual = format!(
+                    "sha256:{:x}",
+                    analytics_core::hash::Hex(Sha256::digest(fs::read(raw)?))
+                );
                 if expected.as_str() != Some(actual.as_str()) {
                     return Err("market evidence changed".into());
                 }
@@ -1495,7 +1502,9 @@ fn execute_scoped(
                 if run.request["prediction_source_hashes"][name]
                     != format!(
                         "sha256:{:x}",
-                        Sha256::digest(fs::read(source_root.join(name))?)
+                        analytics_core::hash::Hex(Sha256::digest(fs::read(
+                            source_root.join(name)
+                        )?))
                     )
                 {
                     return Err("prediction source changed after task submission".into());
@@ -1545,7 +1554,9 @@ fn execute_scoped(
             if let Some(expected) = run.request.get("training_artifact_sha256") {
                 let actual = format!(
                     "sha256:{:x}",
-                    Sha256::digest(fs::read(source.join("training.json"))?)
+                    analytics_core::hash::Hex(Sha256::digest(fs::read(
+                        source.join("training.json")
+                    )?))
                 );
                 if expected != &json!(actual) {
                     return Err("training_artifact_damaged".into());
@@ -1680,7 +1691,11 @@ pub fn snapshot(workspace: &Workspace, request: &WorkflowRequest) -> Result<Valu
         ] {
             hashes.insert(
                 name.into(),
-                format!("sha256:{:x}", Sha256::digest(fs::read(root.join(name))?)).into(),
+                format!(
+                    "sha256:{:x}",
+                    analytics_core::hash::Hex(Sha256::digest(fs::read(root.join(name))?))
+                )
+                .into(),
             );
         }
         frozen["prediction_source_hashes"] = hashes.into();
@@ -1717,7 +1732,7 @@ pub fn snapshot(workspace: &Workspace, request: &WorkflowRequest) -> Result<Valu
         }
         frozen["training_artifact_sha256"] = json!(format!(
             "sha256:{:x}",
-            Sha256::digest(fs::read(artifact_path)?)
+            analytics_core::hash::Hex(Sha256::digest(fs::read(artifact_path)?))
         ));
     }
     Ok(frozen)

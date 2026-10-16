@@ -239,12 +239,14 @@ pub fn validate_result(
             || execution["quality_sha256"]
                 != format!(
                     "sha256:{:x}",
-                    Sha256::digest(serde_json::to_vec(&qualification)?)
+                    analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(&qualification)?))
                 )
             || execution["sample_selection_sha256"]
                 != format!(
                     "sha256:{:x}",
-                    Sha256::digest(serde_json::to_vec(&execution["sample_selection"])?)
+                    analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(
+                        &execution["sample_selection"]
+                    )?))
                 )
             || value["sample_selection"] != execution["sample_selection"]
             || serde_json::to_value(&qualification.effective_pool)? != execution["pool"]
@@ -298,7 +300,7 @@ pub fn validate_result(
         if execution["source_map_signature"]
             != format!(
                 "sha256:{:x}",
-                Sha256::digest(serde_json::to_vec(&source_map)?)
+                analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(&source_map)?))
             )
         {
             return Err("source-map signature mismatch".into());
@@ -307,7 +309,9 @@ pub fn validate_result(
             || execution["price_input_sha256"]
                 != format!(
                     "sha256:{:x}",
-                    Sha256::digest(serde_json::to_vec(&execution["price_inputs"])?)
+                    analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(
+                        &execution["price_inputs"]
+                    )?))
                 )
             || !matches!(
                 execution["price_inputs"]["normalization"].as_str(),
@@ -337,7 +341,10 @@ pub fn validate_result(
                     serde_json::from_value(input["source_mapping"].clone())?;
                 let receipt = serde_json::json!({"source_mapping":input["source_mapping"],"bindings":input["bindings"],"source":input["source"]});
                 if input["sha256"]
-                    != format!("sha256:{:x}", Sha256::digest(serde_json::to_vec(&receipt)?))
+                    != format!(
+                        "sha256:{:x}",
+                        analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(&receipt)?))
+                    )
                 {
                     return Err("source-map receipt mismatch".into());
                 }
@@ -385,7 +392,10 @@ pub fn validate_result(
             serde_json::from_value(execution["pool"].clone())?;
         pool.validate()?;
         if execution["pool_signature"]
-            != format!("sha256:{:x}", Sha256::digest(serde_json::to_vec(&pool)?))
+            != format!(
+                "sha256:{:x}",
+                analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(&pool)?))
+            )
         {
             return Err("pool signature mismatch".into());
         }
@@ -750,7 +760,10 @@ pub fn run_with_context(
 }
 
 fn file_hash(path: &Path) -> Result<String> {
-    Ok(format!("sha256:{:x}", Sha256::digest(fs::read(path)?)))
+    Ok(format!(
+        "sha256:{:x}",
+        analytics_core::hash::Hex(Sha256::digest(fs::read(path)?))
+    ))
 }
 fn adjustment_basis_signature(
     book: Option<&analytics_storage::corporate_actions::ActionBundle>,
@@ -760,7 +773,7 @@ fn adjustment_basis_signature(
     let events:Vec<_>=book.into_iter().flat_map(|b|&b.actions).filter(|a|a.ex_date>=start&&a.ex_date<=end).map(|a|serde_json::json!({"instrument":a.instrument,"ex_date":a.ex_date,"cash":a.cash(),"shares":a.shares(),"reference":a.terms.reference()})).collect();
     Ok(format!(
         "sha256:{:x}",
-        Sha256::digest(serde_json::to_vec(&events)?)
+        analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(&events)?))
     ))
 }
 /// Validate current training descriptor on every read; unsupported files are never converted.
@@ -781,7 +794,7 @@ pub fn validate_training_artifact(artifact: &serde_json::Value) -> Result<()> {
     if receipt
         != format!(
             "sha256:{:x}",
-            Sha256::digest(serde_json::to_vec(&unsigned)?)
+            analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(&unsigned)?))
         )
     {
         return Err("training_artifact_damaged".into());
@@ -966,7 +979,14 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
     let action_hash = request
         .corporate_actions
         .as_ref()
-        .map(|path| fs::read(path).map(|bytes| format!("sha256:{:x}", Sha256::digest(bytes))))
+        .map(|path| {
+            fs::read(path).map(|bytes| {
+                format!(
+                    "sha256:{:x}",
+                    analytics_core::hash::Hex(Sha256::digest(bytes))
+                )
+            })
+        })
         .transpose()?;
     if !request.initial_cash_cny.is_finite()
         || request.initial_cash_cny <= 0.0
@@ -1081,7 +1101,10 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
     let request = &effective_request;
     let pool_problem = pool.validate().err();
     let members = dataset.align_membership(&pool);
-    let pool_signature = format!("sha256:{:x}", Sha256::digest(serde_json::to_vec(&pool)?));
+    let pool_signature = format!(
+        "sha256:{:x}",
+        analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(&pool)?))
+    );
     analytics_core::pool::validate_instrument(&request.benchmark)?;
     let first_member = dataset
         .calendar
@@ -1504,7 +1527,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
     let price_inputs = dataset.price_inputs(&price_symbols)?;
     let price_input_sha256 = format!(
         "sha256:{:x}",
-        Sha256::digest(serde_json::to_vec(&price_inputs)?)
+        analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(&price_inputs)?))
     );
     let supported_inputs = SUPPORTED_RESEARCH_INPUTS;
     let mut excluded = BTreeMap::new();
@@ -1549,7 +1572,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         .clone();
     let signature = format!(
         "sha256:{:x}",
-        Sha256::digest(serde_json::to_vec(&(
+        analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(&(
             source.clone(),
             &market_content_sha256,
             &ids,
@@ -1563,7 +1586,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
             &quality_snapshot,
             request.factor_set.warmup_sessions(),
             "open-next-2,pit-mask,explicit-or-provider-price-input-v3"
-        ))?)
+        ))?))
     );
     let historical_basis_signature =
         if request.price_basis == analytics_core::research_quality::PriceBasis::Verified {
@@ -1572,10 +1595,10 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
             "provider-quotations;events-not-training-input".into()
         };
     let mut execution = serde_json::json!({"accounting_version":"rust-filled-trade-ledger-v1","event_validation_version":"actual-opening-exposure-v1","reference_precision_policy":"two-decimal-per-ten-compatible-primary-terms-retained","suspension_valuation_policy":"gp29-status-days-v2+dated-current-episode-v1;retain-traded-bars;zero-volume-valuation-only-v2","unsupported_event_policy":"warn_and_skip","market_content_sha256":market_content_sha256,"runtime_signature":crate::research::worker::runtime_signature(),"dependency_signature":crate::research::worker::dependency_signature(),"engine":"akquant","engine_version":"0.3.66","target_exposure":0.98,"volume_limit_pct":0.1,"trade_unit_policy":"AKQuant lot_size uses board increment; distinct minimum quantity and price-limit rules are not modeled","corporate_action_policy":"ex_date","mode":"akquant_ex_date","factor_set":request.factor_set,"price_basis":request.price_basis,
-        "quality_policy":request.quality_policy,"quality":quality_snapshot,"quality_sha256":format!("sha256:{:x}",Sha256::digest(serde_json::to_vec(&quality_snapshot)?)),
+        "quality_policy":request.quality_policy,"quality":quality_snapshot,"quality_sha256":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(&quality_snapshot)?))),
         "fee_application":"latest_only_for_all_dates", "market_rules":request.market_rules, "initial_cash_cny":request.initial_cash_cny,
 
-        "source_map":dataset.source_map(),"source_map_signature":format!("sha256:{:x}",Sha256::digest(serde_json::to_vec(dataset.source_map())?)),"corporate_action_sha256":action_hash,"dividend_withholding_rate":request.dividend_withholding_rate,
+        "source_map":dataset.source_map(),"source_map_signature":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(dataset.source_map())?))),"corporate_action_sha256":action_hash,"dividend_withholding_rate":request.dividend_withholding_rate,
         "price_inputs":price_inputs,"price_input_sha256":price_input_sha256,"pool":pool,"pool_signature":pool_signature,"benchmark":request.benchmark,"pool_exit_policy":request.pool_exit_policy,
         "research_config":request.config,"schedule":request.schedule,"action_policy":request.action_policy,"event_check_policy":request.event_check_policy,"resolved_folds":folds,"dividend_tax_convention":"gross dividend at ex-date; no withholding model"});
     if let Some(source) = &request.reuse_training {
@@ -1606,9 +1629,9 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
             file_hash(&request.output.join("rights_input.json"))?.into();
         execution["rights_source_lock_sha256"] = format!(
             "sha256:{:x}",
-            Sha256::digest(include_bytes!(
+            analytics_core::hash::Hex(Sha256::digest(include_bytes!(
                 "../../../app/packaging/akquant-source.lock.json"
-            ))
+            )))
         )
         .into();
         execution["accounting_version"] = "rust-filled-trade-ledger-rights-v2".into();
@@ -1617,13 +1640,13 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
     }
     let mut run_signature = format!(
         "sha256:{:x}",
-        Sha256::digest(serde_json::to_vec(&(
+        analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(&(
             &signature,
             &execution,
             &request.schedule,
             &folds,
             "akquant-ex-date-v1"
-        ))?)
+        ))?))
     );
     if request.output.join("summary.json").exists() {
         let old: serde_json::Value =
@@ -1670,13 +1693,15 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         execution["unsupported_event_policy"] = "warn_and_skip".into();
         execution["sample_selection_sha256"] = format!(
             "sha256:{:x}",
-            Sha256::digest(serde_json::to_vec(&selection)?)
+            analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(&selection)?))
         )
         .into();
         execution["sample_selection"] = selection;
         run_signature = format!(
             "sha256:{:x}",
-            Sha256::digest(serde_json::to_vec(&(&signature, &execution))?)
+            analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(&(
+                &signature, &execution
+            ))?))
         );
         save(request.output.join("execution.json"), &execution)?;
         let mut audit: serde_json::Value =
@@ -1817,13 +1842,13 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
     )?;
     execution["sample_selection_sha256"] = format!(
         "sha256:{:x}",
-        Sha256::digest(serde_json::to_vec(&sample_selection)?)
+        analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(&sample_selection)?))
     )
     .into();
     execution["sample_selection"] = sample_selection;
     let training_signature = format!(
         "sha256:{:x}",
-        Sha256::digest(serde_json::to_vec(&(
+        analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(&(
             &signature,
             &request.config.training,
             &request.quality_policy,
@@ -1840,11 +1865,13 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
             &ids,
             crate::research::worker::runtime_signature(),
             crate::research::worker::dependency_signature()
-        ))?)
+        ))?))
     );
     run_signature = format!(
         "sha256:{:x}",
-        Sha256::digest(serde_json::to_vec(&(&signature, &execution))?)
+        analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(&(
+            &signature, &execution
+        ))?))
     );
     save(request.output.join("execution.json"), &execution)?;
     let mut audit: serde_json::Value =
@@ -2112,7 +2139,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         training["sample_selection"] = execution["sample_selection"].clone();
         training["artifact_signature"] = serde_json::json!(format!(
             "sha256:{:x}",
-            Sha256::digest(serde_json::to_vec(&training)?)
+            analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(&training)?))
         ));
         save(request.output.join("training.json"), &training)?;
         if request.train_only {
@@ -2221,7 +2248,7 @@ fn save_selection(
     save(request.output.join(&relative), &mask)?;
     admission.decisions.extend(selection.excluded.clone());
     Ok(
-        serde_json::json!({"fold":fold,"split":split,"range":range,"path":relative,"sha256":format!("sha256:{:x}",Sha256::digest(serde_json::to_vec(&mask)?)),"candidate_rows":selection.row_mask.len(),"retained_rows":selection.retained_rows,"excluded_rows":selection.row_mask.len()-selection.retained_rows}),
+        serde_json::json!({"fold":fold,"split":split,"range":range,"path":relative,"sha256":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(&mask)?))),"candidate_rows":selection.row_mask.len(),"retained_rows":selection.retained_rows,"excluded_rows":selection.row_mask.len()-selection.retained_rows}),
     )
 }
 

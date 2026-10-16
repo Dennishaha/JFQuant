@@ -462,8 +462,11 @@ pub fn train_from_factor_cache(
         let source_path = cache_path.with_file_name("factor_run_manifest.json");
         let mut manifest: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&artifact.training.manifest_path)?)?;
-        manifest["factor_cache_sha256"] =
-            format!("sha256:{:x}", Sha256::digest(std::fs::read(cache_path)?)).into();
+        manifest["factor_cache_sha256"] = format!(
+            "sha256:{:x}",
+            analytics_core::hash::Hex(Sha256::digest(std::fs::read(cache_path)?))
+        )
+        .into();
         if source_path.is_file() {
             let source: serde_json::Value = serde_json::from_slice(&std::fs::read(&source_path)?)?;
             let family: analytics_core::research_quality::FactorSet =
@@ -774,7 +777,10 @@ pub fn snapshot_hash(market: &Path, universe: &Path) -> Result<String> {
         let mut input = File::open(file)?;
         std::io::copy(&mut input, &mut HashWriter(&mut hasher))?;
     }
-    Ok(format!("sha256:{:x}", hasher.finalize()))
+    Ok(format!(
+        "sha256:{:x}",
+        analytics_core::hash::Hex(hasher.finalize())
+    ))
 }
 
 struct HashWriter<'a>(&'a mut Sha256);

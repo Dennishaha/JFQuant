@@ -30,7 +30,7 @@ fn date(ui: &mut egui::Ui, label: &str, value: &mut Date) {
             edit.value = day;
         }
         Err(_) => {
-            ui.data_mut(|d| d.insert_temp(egui::Id::new("research-invalid-date"), true));
+            ui.data_mut(|d| d.insert_temp(egui::Id::unique("research-invalid-date"), true));
             ui.colored_label(egui::Color32::RED, "YYYY-MM-DD");
         }
     }
@@ -60,7 +60,7 @@ fn fold(ui: &mut egui::Ui, f: &mut Fold) {
     range(ui, "回测", &mut f.test);
 }
 pub(crate) fn draw(ui: &mut egui::Ui, schedule: &mut Schedule) -> bool {
-    ui.data_mut(|d| d.insert_temp(egui::Id::new("research-invalid-date"), false));
+    ui.data_mut(|d| d.insert_temp(egui::Id::unique("research-invalid-date"), false));
     let mut mode = match schedule {
         Schedule::Single { .. } => 0,
         Schedule::Rolling { .. } => 1,
@@ -156,7 +156,7 @@ pub(crate) fn draw(ui: &mut egui::Ui, schedule: &mut Schedule) -> bool {
     if let Err(e) = schedule.validate() {
         ui.colored_label(egui::Color32::RED, e);
     }
-    !ui.data_mut(|d| d.get_temp::<bool>(egui::Id::new("research-invalid-date")))
+    !ui.data_mut(|d| d.get_temp::<bool>(egui::Id::unique("research-invalid-date")))
         .unwrap_or(false)
         && schedule.validate().is_ok()
 }

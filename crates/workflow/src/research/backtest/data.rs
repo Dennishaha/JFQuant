@@ -134,14 +134,14 @@ fn selection_mask(
 ) -> Result<SelectionMask> {
     let row_order_sha256 = format!(
         "sha256:{:x}",
-        Sha256::digest(serde_json::to_vec(
+        analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(
             &data
                 .meta
                 .rows
                 .iter()
                 .map(|r| (r.day, &r.instrument))
                 .collect::<Vec<_>>()
-        )?)
+        )?))
     );
     let mut row_mask = Vec::new();
     let mut excluded = Vec::new();
@@ -503,7 +503,10 @@ pub(super) fn prepare_year(
             fingerprint.update(value.unwrap_or(0.).to_le_bytes());
         }
     }
-    let shard_signature = format!("sha256:{:x}", fingerprint.finalize());
+    let shard_signature = format!(
+        "sha256:{:x}",
+        analytics_core::hash::Hex(fingerprint.finalize())
+    );
     let shared = cache
         .parent()
         .and_then(Path::parent)

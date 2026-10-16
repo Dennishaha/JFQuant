@@ -524,7 +524,7 @@ fn owned_archive(w: &Workspace, provider: &std::path::Path, owner: Uuid) -> std:
     .unwrap();
     tar.into_inner().unwrap().finish().unwrap().flush().unwrap();
     let bytes = fs::read(&archive).unwrap();
-    fs::write(stage.join("qlib_bin.manifest.json"),json!({"release_tag":"2010-01-12","target_trade_date":"2010-01-12","archive_size_bytes":bytes.len(),"archive_sha256":format!("sha256:{:x}",Sha256::digest(bytes))}).to_string()).unwrap();
+    fs::write(stage.join("qlib_bin.manifest.json"),json!({"release_tag":"2010-01-12","target_trade_date":"2010-01-12","archive_size_bytes":bytes.len(),"archive_sha256":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(bytes)))}).to_string()).unwrap();
     fs::write(
         stage.join("owner.json"),
         json!({"schema_version":1,"downloader":"JFQuant analytics-storage","tag":"2010-01-12"})

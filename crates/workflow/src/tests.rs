@@ -154,7 +154,10 @@ fn market_bytes_and_action_evidence_are_verified_before_execution() {
     let mut book = ActionBundle::read(&path).unwrap();
     book.raw_sha256.insert(
         "proof.txt".into(),
-        format!("sha256:{:x}", Sha256::digest(b"original")),
+        format!(
+            "sha256:{:x}",
+            analytics_core::hash::Hex(Sha256::digest(b"original"))
+        ),
     );
     fs::write(&path, serde_json::to_vec(&book).unwrap()).unwrap();
     let a = w.register(&path).unwrap();
@@ -517,7 +520,9 @@ fn source_adjusted_quotes_are_audit_only_and_report_provenance_is_required() {
             .remove(field);
         bad["execution"]["price_input_sha256"] = json!(format!(
             "sha256:{:x}",
-            Sha256::digest(serde_json::to_vec(&bad["execution"]["price_inputs"]).unwrap())
+            analytics_core::hash::Hex(Sha256::digest(
+                serde_json::to_vec(&bad["execution"]["price_inputs"]).unwrap()
+            ))
         ));
         assert!(
             crate::research::backtest::validate_result(&bad).is_err(),

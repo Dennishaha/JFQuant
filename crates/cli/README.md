@@ -89,3 +89,5 @@ DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli
 `data inspect-actions --actions VERSION --instrument SH600030`沿用异步任务，`jobs wait TASK_UUID`的`results.details.structured_fields`给出GP41/43与配股参考的字段证据及缺口；旧数据未采字段为null。`data revise-actions`支持版本2结构化引用，完整请求契约见[公司行动README](../storage/src/corporate_actions/README.md)。
 
 已发布预测对照入口：`jfquant research replay-predictions --source SUCCESSFUL_BACKTEST_UUID --actions ACTION_VERSION --participation abandon --attempt first_day --insufficient-cash partial`。可选 participate、last_day、all_or_abandon、stop；默认放弃认购；主动选择参与时，默认首日一次、现金内部分认购。该入口验证原任务及预测身份，不加载旧模型，不重训。参与认购时，实际持仓条款不全则停止并输出字段缺口。
+
+依赖升级后的 `research verify` 保持旧 SHA-256 身份核验；`research replay-predictions` 可复用旧环境发布的预测并记录新执行环境，旧模型直接复用仍受依赖签名检查。默认配股策略继续为 abandon。

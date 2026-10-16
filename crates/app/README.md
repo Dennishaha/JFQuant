@@ -52,3 +52,5 @@ Packaged CLI acceptance also invokes `research verify --task <UUID>` after the t
 公司行动详情复用`InspectActions`，按钮“加载事件、结构化字段与公告证据”无需公告manifest即可查询结构化字段。审计JSON支持版本2结构化引用和旧版本1公告引用；不提供配股认购控件，也不将字段补齐显示为已模拟配股。验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-desktop structured_action_inspection`。
 
 研究页“配股与预测复用”使用已发布预测任务ID，提供参与/放弃、首日/截止日及部分认购/全额或放弃/停止三种资金策略；默认放弃认购；主动选择参与时，默认首日一次、部分认购。调用共享 BacktestPredictions，不重训模型。
+
+界面依赖使用 egui/eframe/egui_extras 0.37.0、rfd 0.17.2；临时状态使用显式全局 ID，局部筛选键沿用 UI scope。验收覆盖中文标签、滚动布局、日期校验、异步任务与配股默认放弃。

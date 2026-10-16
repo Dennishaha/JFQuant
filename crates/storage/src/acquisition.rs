@@ -79,7 +79,9 @@ pub fn verify_archive(path: &Path, manifest: &ReleaseManifest) -> io::Result<()>
         }
         hasher.update(&block[..n]);
     }
-    if format!("sha256:{:x}", hasher.finalize()) != manifest.archive_sha256 {
+    if format!("sha256:{:x}", analytics_core::hash::Hex(hasher.finalize()))
+        != manifest.archive_sha256
+    {
         return Err(failure("archive SHA-256 mismatch"));
     }
     Ok(())
@@ -253,7 +255,10 @@ mod tests {
             release_tag: "2026-10-12".into(),
             target_trade_date: "2026-10-12".into(),
             archive_size_bytes: 8,
-            archive_sha256: format!("sha256:{:x}", Sha256::digest(b"complete")),
+            archive_sha256: format!(
+                "sha256:{:x}",
+                analytics_core::hash::Hex(Sha256::digest(b"complete"))
+            ),
             extra: Default::default(),
         };
         verify_archive(&path, &manifest).unwrap();

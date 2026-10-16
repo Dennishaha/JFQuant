@@ -153,13 +153,16 @@ pub fn collector_signature() -> String {
         hash.update(bytes);
         hash.update([0]);
     }
-    format!("sha256:{:x}", hash.finalize())
+    format!("sha256:{:x}", analytics_core::hash::Hex(hash.finalize()))
 }
 fn invalid(s: impl std::fmt::Display) -> io::Error {
     io::Error::other(s.to_string())
 }
 fn hash(path: &Path) -> io::Result<String> {
-    Ok(format!("sha256:{:x}", Sha256::digest(fs::read(path)?)))
+    Ok(format!(
+        "sha256:{:x}",
+        analytics_core::hash::Hex(Sha256::digest(fs::read(path)?))
+    ))
 }
 pub(crate) fn verify_http_receipts(
     staging: &Path,
@@ -266,7 +269,9 @@ fn read_line_limited(reader: &mut impl BufRead, limit: usize) -> io::Result<Opti
 fn dependencies_signature() -> String {
     format!(
         "sha256:{:x}",
-        Sha256::digest(include_bytes!("../collectors/requirements.lock"))
+        analytics_core::hash::Hex(Sha256::digest(include_bytes!(
+            "../collectors/requirements.lock"
+        )))
     )
 }
 fn verify_collector_identity(message: &Value) -> io::Result<()> {
@@ -291,7 +296,9 @@ pub(crate) fn reviewed_collection_owner(owner: &Value) -> bool {
         && owner["python_runtime_sha256"]
             == format!(
                 "sha256:{:x}",
-                Sha256::digest(include_bytes!("../collectors/python-runtime.lock.json"))
+                analytics_core::hash::Hex(Sha256::digest(include_bytes!(
+                    "../collectors/python-runtime.lock.json"
+                )))
             )
         && owner["normalization"] == NORMALIZATION
 }
@@ -518,7 +525,7 @@ fn collect_with_command(
     let owner = staging.join("owner.json");
     let mut owner_value = json!({"operation":operation,"request":request,"collector_protocol":13,"normalization":NORMALIZATION,
         "collector_signature":collector_signature(),"dependencies_sha256":dependencies_signature(),
-        "python_runtime_sha256":format!("sha256:{:x}",Sha256::digest(include_bytes!("../collectors/python-runtime.lock.json")))});
+        "python_runtime_sha256":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(include_bytes!("../collectors/python-runtime.lock.json"))))});
     if operation == "reconcile_actions" {
         owner_value["reconciliation_inputs_sha256"] =
             json!(hash(&staging.join("reconciliation-inputs.json"))?);
@@ -1413,7 +1420,7 @@ fn finish_collection(
     }
     save(
         &staging.join("jfquant_source.json"),
-        &json!({"downloader":"JFQuant analytics-storage","independent_download":true,"snapshot_verified":true,"exception_bindings":!request.source_bindings.is_empty(),"provider":request.provider,"request":request,"evidence_sha256":evidence_hashes,"collector_protocol":13,"versions":complete["versions"],"collector_signature":complete["collector_signature"],"python_runtime":serde_json::from_slice::<Value>(include_bytes!("../collectors/python-runtime.lock.json")).map_err(invalid)?,"calendar_source":if request.provider==Provider::Tdxaidata {"tdxaidata.get_trading_dates"} else {"unsupported"},"dependencies_sha256":format!("sha256:{:x}",Sha256::digest(include_bytes!("../collectors/requirements.lock"))),"price_basis":manifest.price_basis,"normalization":manifest.normalization,"adjustment_source":request.adjustment_source,"adjustment_anchors":manifest.adjustment_anchors}),
+        &json!({"downloader":"JFQuant analytics-storage","independent_download":true,"snapshot_verified":true,"exception_bindings":!request.source_bindings.is_empty(),"provider":request.provider,"request":request,"evidence_sha256":evidence_hashes,"collector_protocol":13,"versions":complete["versions"],"collector_signature":complete["collector_signature"],"python_runtime":serde_json::from_slice::<Value>(include_bytes!("../collectors/python-runtime.lock.json")).map_err(invalid)?,"calendar_source":if request.provider==Provider::Tdxaidata {"tdxaidata.get_trading_dates"} else {"unsupported"},"dependencies_sha256":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(include_bytes!("../collectors/requirements.lock")))),"price_basis":manifest.price_basis,"normalization":manifest.normalization,"adjustment_source":request.adjustment_source,"adjustment_anchors":manifest.adjustment_anchors}),
     )?;
     Ok(staging.join("market"))
 }

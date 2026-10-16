@@ -118,7 +118,12 @@ fn response(root: &Path, r: &Value) -> io::Result<Value> {
         return Err(fail("unsafe native filename"));
     }
     let bytes = fs::read(root.join("raw").join(name))?;
-    if r["sha256"] != format!("sha256:{:x}", Sha256::digest(&bytes)) {
+    if r["sha256"]
+        != format!(
+            "sha256:{:x}",
+            analytics_core::hash::Hex(Sha256::digest(&bytes))
+        )
+    {
         return Err(fail("rights native hash mismatch"));
     }
     let (text, _, bad) = encoding_rs::GBK.decode(&bytes);
@@ -191,7 +196,11 @@ pub fn derive(bundle: &ActionBundle, root: &Path) -> io::Result<BTreeMap<String,
             return Err(fail("unsafe rights shard filename"));
         }
         let bytes = fs::read(root.join("raw").join(name))?;
-        if format!("sha256:{:x}", Sha256::digest(&bytes)) != *hash {
+        if format!(
+            "sha256:{:x}",
+            analytics_core::hash::Hex(Sha256::digest(&bytes))
+        ) != *hash
+        {
             return Err(fail("rights shard hash mismatch"));
         }
         let shard: Value = serde_json::from_slice(&bytes).map_err(invalid)?;
@@ -485,7 +494,10 @@ mod tests {
         let mut hashes = BTreeMap::new();
         let mut add = |function: &str, args: Value, body: Value| {
             let bytes = serde_json::to_vec(&body).unwrap();
-            let hash = format!("sha256:{:x}", Sha256::digest(&bytes));
+            let hash = format!(
+                "sha256:{:x}",
+                analytics_core::hash::Hex(Sha256::digest(&bytes))
+            );
             let name = format!("sdk-{}.body", &hash[7..]);
             fs::write(root.join("raw").join(&name), bytes).unwrap();
             hashes.insert(name.clone(), hash.clone());
@@ -510,7 +522,13 @@ mod tests {
         let name = format!("{code}-actions-structured.json");
         let shard = json!({"instrument":code,"evidence":{"provider":"tdxaidata","sdk_version":"1.2.2","sdk_receipts":receipts,"rights_fields":{"GP41":"captured","GP43":"captured"},"request_range":range,"acquired_at":"2026-10-16T00:00:00+00:00"}});
         let bytes = serde_json::to_vec(&shard).unwrap();
-        hashes.insert(name.clone(), format!("sha256:{:x}", Sha256::digest(&bytes)));
+        hashes.insert(
+            name.clone(),
+            format!(
+                "sha256:{:x}",
+                analytics_core::hash::Hex(Sha256::digest(&bytes))
+            ),
+        );
         fs::write(root.join("raw").join(name), bytes).unwrap();
         let ex = Date::parse_from_str(ex, "%Y%m%d").unwrap();
         let mut book:ActionBundle=serde_json::from_value(json!({"schema_version":7,"source_bindings":{},"structured_coverage":{},"coverage":{},"downloader":"JFQuant analytics-storage corporate-actions","downloaded_at":"fixture","queried_symbols":[],"actions":[{"id":format!("{code}:{ex}"),"instrument":code,"announced":null,"record_date":null,"ex_date":ex,"pay_date":null,"listing_date":null,"cash_per_share":"0","shares_per_share":"0","source":"fixture","terms":{"kind":"historical","category":"rights_issue","reference":{"kind":"unchanged","evidence":"fixture"}}}],"failures":{code:"settlement unverified"},"raw_sha256":hashes})).unwrap();
@@ -609,15 +627,23 @@ mod tests {
             })
             .unwrap();
         let bytes = serde_json::to_vec(&body).unwrap();
-        let hash = format!("sha256:{:x}", Sha256::digest(&bytes));
+        let hash = format!(
+            "sha256:{:x}",
+            analytics_core::hash::Hex(Sha256::digest(&bytes))
+        );
         let filename = format!("sdk-{}.body", &hash[7..]);
         fs::write(tmp.join("raw").join(&filename), bytes).unwrap();
         book.raw_sha256.insert(filename.clone(), hash.clone());
         r["filename"] = json!(filename);
         r["sha256"] = json!(hash);
         let bytes = serde_json::to_vec(&shard).unwrap();
-        book.raw_sha256
-            .insert(name, format!("sha256:{:x}", Sha256::digest(&bytes)));
+        book.raw_sha256.insert(
+            name,
+            format!(
+                "sha256:{:x}",
+                analytics_core::hash::Hex(Sha256::digest(&bytes))
+            ),
+        );
         fs::write(path, bytes).unwrap();
     }
     #[test]
@@ -695,15 +721,23 @@ mod tests {
             .unwrap();
         let body = json!({"ErrorId":"0","Date":["20220127","20220127"],"Type":["15","1"],"Value":[["0","0","0","0"],["0","14.43","0","1.50"]]});
         let bytes = serde_json::to_vec(&body).unwrap();
-        let hash = format!("sha256:{:x}", Sha256::digest(&bytes));
+        let hash = format!(
+            "sha256:{:x}",
+            analytics_core::hash::Hex(Sha256::digest(&bytes))
+        );
         let filename = format!("sdk-{}.body", &hash[7..]);
         fs::write(tmp.path().join("raw").join(&filename), bytes).unwrap();
         book.raw_sha256.insert(filename.clone(), hash.clone());
         r["filename"] = json!(filename);
         r["sha256"] = json!(hash);
         let bytes = serde_json::to_vec(&shard).unwrap();
-        book.raw_sha256
-            .insert(name, format!("sha256:{:x}", Sha256::digest(&bytes)));
+        book.raw_sha256.insert(
+            name,
+            format!(
+                "sha256:{:x}",
+                analytics_core::hash::Hex(Sha256::digest(&bytes))
+            ),
+        );
         fs::write(path, bytes).unwrap();
         refresh(&mut book, tmp.path()).unwrap();
         assert_eq!(book.field_facts["SH600030"].events.len(), 1);
@@ -764,8 +798,13 @@ mod tests {
         query["code"] = json!("600958.SH");
         receipt["arguments"] = json!([query.to_string()]);
         let bytes = serde_json::to_vec(&shard).unwrap();
-        book.raw_sha256
-            .insert(name, format!("sha256:{:x}", Sha256::digest(&bytes)));
+        book.raw_sha256.insert(
+            name,
+            format!(
+                "sha256:{:x}",
+                analytics_core::hash::Hex(Sha256::digest(&bytes))
+            ),
+        );
         fs::write(path, bytes).unwrap();
         refresh(&mut book, tmp.path()).unwrap();
         assert_eq!(book.field_facts["SH600030"].queries["GP41"], "invalid");
@@ -792,7 +831,9 @@ mod tests {
                 original_id: Some(original.id.clone()),
                 original_sha256: Some(format!(
                     "sha256:{:x}",
-                    Sha256::digest(serde_json::to_vec(original).unwrap())
+                    analytics_core::hash::Hex(Sha256::digest(
+                        serde_json::to_vec(original).unwrap()
+                    ))
                 )),
                 replacement,
                 reason: "verified structured record date".into(),
@@ -829,7 +870,7 @@ mod tests {
         );
         request.events[0].original_sha256 = Some(format!(
             "sha256:{:x}",
-            Sha256::digest(serde_json::to_vec(original).unwrap())
+            analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(original).unwrap()))
         ));
         request.events[0]
             .structured_fields

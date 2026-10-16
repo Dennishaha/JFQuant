@@ -838,7 +838,9 @@ impl DailyDataset {
                 let mut value = receipt.clone();
                 value["sha256"] = serde_json::json!(format!(
                     "sha256:{:x}",
-                    Sha256::digest(serde_json::to_vec(&receipt).map_err(invalid)?)
+                    analytics_core::hash::Hex(Sha256::digest(
+                        serde_json::to_vec(&receipt).map_err(invalid)?
+                    ))
                 ));
                 securities.insert(id, value);
                 continue;
@@ -857,7 +859,7 @@ impl DailyDataset {
                         .enumerate()
                         .find_map(|(i, f)| f.filter(|f| *f > 0.).map(|f| (i, f)))
                         .ok_or_else(|| invalid("Qlib adjustment anchor missing"))?;
-                    serde_json::json!({"basis":"qlib_stored_factor","anchor_mode":"first_stored_factor","anchor":{"trade_date":self.calendar[factors.start+offset],"factor":value.to_string()},"precision":"float32","sha256":format!("sha256:{:x}",Sha256::digest(fs::read(path)?))})
+                    serde_json::json!({"basis":"qlib_stored_factor","anchor_mode":"first_stored_factor","anchor":{"trade_date":self.calendar[factors.start+offset],"factor":value.to_string()},"precision":"float32","sha256":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(fs::read(path)?)))})
                 }
                 DailyKind::Parquet(m) => {
                     let record = self.adjustment_record(id)?;
@@ -867,7 +869,7 @@ impl DailyDataset {
                             serde_json::json!(points.as_array().map_or(0, Vec::len));
                         basis["history_start"] = points[0]["effective_date"].clone();
                     }
-                    serde_json::json!({"normalization":if self.uses_supplier_prices(id){HITHINK_NORMALIZATION}else{NORMALIZATION},"basis":basis,"source_symbol":record.source_symbol,"anchor":m.adjustment_anchors.get(id),"sha256":format!("sha256:{:x}",Sha256::digest(fs::read(self.root.join("adjustments").join(format!("{id}.json")))?))})
+                    serde_json::json!({"normalization":if self.uses_supplier_prices(id){HITHINK_NORMALIZATION}else{NORMALIZATION},"basis":basis,"source_symbol":record.source_symbol,"anchor":m.adjustment_anchors.get(id),"sha256":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(fs::read(self.root.join("adjustments").join(format!("{id}.json")))?)))})
                 }
             };
             securities.insert(id, value);

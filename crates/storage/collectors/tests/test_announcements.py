@@ -245,6 +245,8 @@ class AnnouncementHttp(unittest.TestCase):
                 document = next(
                     kw["evidence"]["documents"][0] for a, kw in emitted if a[0] == "action_shard"
                 )
+                self.assertEqual(document["parser_version"], "cninfo-candidates-v5")
+                self.assertEqual(document["pypdf_version"], "6.20.1")
                 self.assertTrue(document["candidates"]["requires_review"])
                 self.assertEqual((root / "raw" / document["text"]).read_text(), "")
                 self.assertEqual(len(capture.receipts), 2)

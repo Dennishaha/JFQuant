@@ -554,7 +554,10 @@ pub fn socket_path(workspace: &Path) -> Result<PathBuf> {
             "runtime directory must be owned by current user with mode 0700",
         ));
     }
-    let hash = format!("{:x}", Sha256::digest(root.as_os_str().as_encoded_bytes()));
+    let hash = format!(
+        "{:x}",
+        analytics_core::hash::Hex(Sha256::digest(root.as_os_str().as_encoded_bytes()))
+    );
     Ok(dir.join(format!("{}.sock", &hash[..24])))
 }
 

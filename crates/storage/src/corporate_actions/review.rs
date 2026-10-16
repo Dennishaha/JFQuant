@@ -266,7 +266,7 @@ pub struct CoverageReview {
 fn digest(value: &impl Serialize) -> io::Result<String> {
     Ok(format!(
         "sha256:{:x}",
-        Sha256::digest(serde_json::to_vec(value).map_err(invalid)?)
+        analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(value).map_err(invalid)?))
     ))
 }
 /// Read a captured document, rehash its bytes and text and reject non-implementation candidates.
@@ -295,7 +295,12 @@ pub(super) fn verified_document_records(
     {
         analytics_core::pool::validate_instrument(id).map_err(invalid)?;
         let bytes = fs::read(root.join(format!("{id}-actions-structured.json")))?;
-        if *expected != format!("sha256:{:x}", Sha256::digest(&bytes)) {
+        if *expected
+            != format!(
+                "sha256:{:x}",
+                analytics_core::hash::Hex(Sha256::digest(&bytes))
+            )
+        {
             return Err(invalid("announcement metadata receipt mismatch"));
         }
         let shard: Value = serde_json::from_slice(&bytes).map_err(invalid)?;
@@ -346,7 +351,12 @@ pub(super) fn verified_document_records(
                 return Err(invalid("invalid evidence path"));
             }
             let bytes = fs::read(root.join(name))?;
-            if d[h] != format!("sha256:{:x}", Sha256::digest(bytes)) {
+            if d[h]
+                != format!(
+                    "sha256:{:x}",
+                    analytics_core::hash::Hex(Sha256::digest(bytes))
+                )
+            {
                 return Err(invalid("announcement evidence hash mismatch"));
             }
         }
@@ -440,7 +450,11 @@ pub fn apply(
         }
         for (name, hash) in &evidence.raw_sha256 {
             let bytes = fs::read(root.join("raw").join(name))?;
-            if format!("sha256:{:x}", Sha256::digest(&bytes)) != *hash {
+            if format!(
+                "sha256:{:x}",
+                analytics_core::hash::Hex(Sha256::digest(&bytes))
+            ) != *hash
+            {
                 return Err(invalid("structured attachment changed"));
             }
             let name = if name.ends_with("-actions-structured.json")
@@ -722,7 +736,11 @@ pub fn apply(
     }
     for (name, expected) in &source.raw_sha256 {
         let bytes = fs::read(source_root.join("raw").join(name))?;
-        if format!("sha256:{:x}", Sha256::digest(&bytes)) != *expected {
+        if format!(
+            "sha256:{:x}",
+            analytics_core::hash::Hex(Sha256::digest(&bytes))
+        ) != *expected
+        {
             return Err(invalid("source action evidence hash mismatch"));
         }
         fs::write(output.join("raw").join(name), bytes)?;
@@ -773,7 +791,10 @@ pub fn apply(
                 .as_str()
                 .ok_or_else(|| invalid("missing receipt filename"))?;
             let bytes = fs::read(evidence_root.join("raw").join(name))?;
-            let hash = format!("sha256:{:x}", Sha256::digest(&bytes));
+            let hash = format!(
+                "sha256:{:x}",
+                analytics_core::hash::Hex(Sha256::digest(&bytes))
+            );
             if bundle.raw_sha256.get(name).is_some_and(|h| h != &hash) {
                 return Err(invalid("HTTP evidence name collision"));
             }
@@ -796,7 +817,10 @@ pub fn apply(
                     .join("raw")
                     .join(name),
             )?;
-            let hash = format!("sha256:{:x}", Sha256::digest(&bytes));
+            let hash = format!(
+                "sha256:{:x}",
+                analytics_core::hash::Hex(Sha256::digest(&bytes))
+            );
             if bundle.raw_sha256.get(name).is_some_and(|h| h != &hash) {
                 return Err(invalid("evidence filename collision"));
             }
@@ -804,12 +828,16 @@ pub fn apply(
             bundle.raw_sha256.insert(name.into(), hash);
         }
     }
-    let receipt = serde_json::json!({"schema_version":1,"source_sha256":digest(source)?,"request":request,"source_events":source.actions,"captured_documents":selected_documents,"collection_receipts":collection_receipts,"collector_completion":manifest["complete"],"evidence_manifest_sha256":format!("sha256:{:x}",Sha256::digest(&manifest_bytes)),"applied_at":chrono::Utc::now().to_rfc3339()});
+    let receipt = serde_json::json!({"schema_version":1,"source_sha256":digest(source)?,"request":request,"source_events":source.actions,"captured_documents":selected_documents,"collection_receipts":collection_receipts,"collector_completion":manifest["complete"],"evidence_manifest_sha256":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(&manifest_bytes))),"applied_at":chrono::Utc::now().to_rfc3339()});
     let name = format!("review-{}.json", &digest(&receipt)?[7..23]);
     let bytes = serde_json::to_vec_pretty(&receipt).map_err(invalid)?;
-    bundle
-        .raw_sha256
-        .insert(name.clone(), format!("sha256:{:x}", Sha256::digest(&bytes)));
+    bundle.raw_sha256.insert(
+        name.clone(),
+        format!(
+            "sha256:{:x}",
+            analytics_core::hash::Hex(Sha256::digest(&bytes))
+        ),
+    );
     fs::write(output.join("raw").join(&name), bytes)?;
     let review_name = name;
     for claims in bundle.coverage.values_mut() {
@@ -836,7 +864,10 @@ pub fn apply(
 mod tests {
     use super::*;
     fn sha(bytes: &[u8]) -> String {
-        format!("sha256:{:x}", Sha256::digest(bytes))
+        format!(
+            "sha256:{:x}",
+            analytics_core::hash::Hex(Sha256::digest(bytes))
+        )
     }
     #[test]
     fn acquisition_tree_is_inherited_and_tampering_is_rejected() {
@@ -913,7 +944,7 @@ mod tests {
         )
         .unwrap();
         // A failed batch can still contain a complete, immutable security receipt.
-        let owner = serde_json::json!({"operation":"announcements","collector_protocol":13,"collector_signature":crate::collector::collector_signature(),"normalization":crate::adjustment::NORMALIZATION,"dependencies_sha256":format!("sha256:{:x}",Sha256::digest(include_bytes!("../../collectors/requirements.lock"))),"python_runtime_sha256":format!("sha256:{:x}",Sha256::digest(include_bytes!("../../collectors/python-runtime.lock.json"))),"request":{"provider":"cninfo","adjustment_source":"none","start":"2024-06-01","end":"2024-06-30","instruments":["SH600000"],"source_bindings":{},"benchmarks":[],"universes":[]}});
+        let owner = serde_json::json!({"operation":"announcements","collector_protocol":13,"collector_signature":crate::collector::collector_signature(),"normalization":crate::adjustment::NORMALIZATION,"dependencies_sha256":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(include_bytes!("../../collectors/requirements.lock")))),"python_runtime_sha256":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(include_bytes!("../../collectors/python-runtime.lock.json")))),"request":{"provider":"cninfo","adjustment_source":"none","start":"2024-06-01","end":"2024-06-30","instruments":["SH600000"],"source_bindings":{},"benchmarks":[],"universes":[]}});
         fs::write(root.join("owner.json"), serde_json::to_vec(&owner).unwrap()).unwrap();
         fs::write(
             root.join("receipts.json"),
@@ -1037,7 +1068,10 @@ mod coverage_tests {
             raw_sha256: Default::default(),
         };
         let body = b"{\"totalAnnouncement\":0,\"announcements\":[]}";
-        let hash = format!("sha256:{:x}", Sha256::digest(body));
+        let hash = format!(
+            "sha256:{:x}",
+            analytics_core::hash::Hex(Sha256::digest(body))
+        );
         fs::write(evidence.join("raw/http-query.body"), body).unwrap();
         let mut shard = serde_json::json!({"instrument":"SH600000","evidence":{"documents":[],"all_announcements":[],"pagination_complete":true,"requested_announcement_dates":{"start":"2024-01-01","end":"2024-12-31"},"http_receipts":[{"url":"https://www.cninfo.com.cn/new/hisAnnouncement/query","status":200,"filename":"http-query.body","sha256":hash}]}});
         let write = |shard: &Value| {
@@ -1047,7 +1081,7 @@ mod coverage_tests {
                 &bytes,
             )
             .unwrap();
-            fs::write(evidence.join("announcements.json"),serde_json::to_vec(&serde_json::json!({"schema_version":2,"documents":[],"receipts":{"SH600000":format!("sha256:{:x}",Sha256::digest(bytes))},"complete":{}})).unwrap()).unwrap();
+            fs::write(evidence.join("announcements.json"),serde_json::to_vec(&serde_json::json!({"schema_version":2,"documents":[],"receipts":{"SH600000":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(bytes)))},"complete":{}})).unwrap()).unwrap();
         };
         write(&shard);
         let mut request = RevisionRequest {

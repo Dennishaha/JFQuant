@@ -74,11 +74,17 @@ pub fn tree_hash(root: &Path) -> io::Result<String> {
             h.update(&buf[..n]);
         }
     }
-    Ok(format!("sha256:{:x}", h.finalize()))
+    Ok(format!(
+        "sha256:{:x}",
+        analytics_core::hash::Hex(h.finalize())
+    ))
 }
 /// Exact digest of one frozen file.
 pub fn file_hash(p: &Path) -> io::Result<String> {
-    Ok(format!("sha256:{:x}", Sha256::digest(fs::read(p)?)))
+    Ok(format!(
+        "sha256:{:x}",
+        analytics_core::hash::Hex(Sha256::digest(fs::read(p)?))
+    ))
 }
 impl MarketView {
     /// Validate all dependencies before reading any research or account data.
@@ -151,5 +157,39 @@ impl MarketView {
             }
         }
         Ok((v, base))
+    }
+}
+
+#[cfg(test)]
+mod hash_compatibility_tests {
+    use super::*;
+    #[test]
+    fn sha256_vectors_and_frozen_tree_keep_legacy_digests() {
+        // NIST vectors and a tree digest captured before the sha2 upgrade.
+        for (input, expected) in [
+            (
+                b"".as_slice(),
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
+            (
+                b"abc".as_slice(),
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            ),
+        ] {
+            assert_eq!(
+                format!("{:x}", analytics_core::hash::Hex(Sha256::digest(input))),
+                expected
+            );
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("a"), b"abc").unwrap();
+        assert_eq!(
+            file_hash(&tmp.path().join("a")).unwrap(),
+            "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            tree_hash(tmp.path()).unwrap(),
+            "sha256:55726b7abfbe6468f6d7e95966cc9cc24af9f62d1111ad00ba21b0fc293ff277"
+        );
     }
 }

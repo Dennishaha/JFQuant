@@ -114,3 +114,5 @@ GP29确认停牌日且缺少原始日线/成交量为零时，在日频账户适
 最近持续停牌补充使用通达信`get_more_info`的`TPFlag=1`、`HqDate`、`StopJYDate_Recent`三字段组合，捕获固定`GetMoreInfoInStr`原生调用并绑定证券/哈希。仅当快照行情日期覆盖研究截止日、最近停牌日起未见相冲突的GP29复牌记录时，确认最近这一段持续停牌；当前标记单独存在、过期快照和缺失日期均不能回填历史。此证据只用于回溯账户估值，不用于因子或选股；保留更早未知区间。结果清单增加`dated-current-episode-v1`以隔离旧缓存。
 
 行动采集现在独立请求GP41/GP43，Rust事实格式7与版本2修订契约见[公司行动组件](../src/corporate_actions/README.md)。单字段失败保留其他回执；旧采集协议和生产者检查点需重取。巨潮目录除gssh/gssz和99数字ID外，也接受目录中匹配证券的qsgn经纪机构ID；该前缀不推断交易所，证券代码/市场仍独立校验。
+
+运行时依赖：requests 2.34.2、pandas 3.0.6、pypdf 6.20.1；通达信 SDK 保持 1.2.2。新公告标记 `cninfo-candidates-v5` 并记录 `pypdf_version`；旧公告文本、哈希、引用保留，不按新版重写。Python 独立运行时使用 3.12.15/20261013 构建。验收：`PYTHONPATH=crates/storage/collectors target/collector-build/python/bin/python3 -B -m unittest discover -s crates/storage/collectors/tests`。

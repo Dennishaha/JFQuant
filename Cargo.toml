@@ -21,13 +21,13 @@ arrow = "60.0.0"
 arrow-array = "60.0.0"
 arrow-schema = "60.0.0"
 chrono = { version = "0.4", features = ["serde"] }
-eframe = "0.36.2"
-egui = "0.36.2"
-egui_extras = "0.36.2"
+eframe = "0.37.0"
+egui = "0.37.0"
+egui_extras = "0.37.0"
 parquet = "60.0.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["raw_value"] }
-sha2 = "0.10"
+sha2 = "0.11.1"
 thiserror = "2.0"
 uuid = { version = "1.18", features = ["serde", "v4"] }
 

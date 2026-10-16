@@ -10,5 +10,5 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
-rust_decimal = { version = "=1.42.1", default-features = false, features = ["std", "serde-with-str"] }
+rust_decimal = { version = "=1.43.0", default-features = false, features = ["std", "serde-with-str"] }
 

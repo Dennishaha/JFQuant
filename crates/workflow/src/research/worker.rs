@@ -43,7 +43,7 @@ pub fn runtime_signature() -> String {
         h.update(bytes);
         h.update([0]);
     }
-    format!("sha256:{:x}", h.finalize())
+    format!("sha256:{:x}", analytics_core::hash::Hex(h.finalize()))
 }
 /// Dependency receipt for cache and model isolation.
 pub fn dependency_signature() -> String {
@@ -54,7 +54,7 @@ pub fn dependency_signature() -> String {
     digest.update(include_bytes!(
         "../../../app/packaging/akquant-source.lock.json"
     ));
-    format!("sha256:{:x}", digest.finalize())
+    format!("sha256:{:x}", analytics_core::hash::Hex(digest.finalize()))
 }
 /// Reuse one worker for all folds and final backtest; always retire it at scope exit.
 pub fn scoped<T>(body: impl FnOnce() -> T) -> T {

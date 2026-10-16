@@ -211,3 +211,5 @@ flowchart LR
 结构化行动：采集、动作刷新汇总及离线对账发布格式7，读取时重放字段证据；`InspectActions`返回`details.structured_fields`，`ReviseActions`接受版本2字段引用并保留版本1公告请求。字段补齐不清除配股执行告警，不重训模型；规则及案例见[公司行动组件](../storage/src/corporate_actions/README.md)。
 
 BacktestPredictions 接收成功原生回测任务、行动版本和 rights::Policy；冻结原任务及预测文件哈希，核验特征/市场身份后只执行账户。研究执行协议2、结果格式17及配股账本v2；旧结果16和账本v1保持只读核验。参见研究worker README。
+
+依赖升级保持服务和研究协议不变；Decimal 1.43.0 同步原生引擎，sha2 0.11.1 使用固定旧格式摘要。Python 哈希锁和原生源码锁共同隔离研究环境；旧结果只读核验与预测复用继续保留。

@@ -475,3 +475,6 @@ mod tests {
 
 /// Shared progress and cancellation for local tasks.
 pub mod task;
+
+/// Stable hash output formatting.
+pub mod hash;

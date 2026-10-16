@@ -398,7 +398,9 @@ impl ActionBundle {
                 if Path::new(name).components().count() != 1
                     || format!(
                         "sha256:{:x}",
-                        Sha256::digest(fs::read(root.join("raw").join(name))?)
+                        analytics_core::hash::Hex(Sha256::digest(fs::read(
+                            root.join("raw").join(name)
+                        )?))
                     ) != *expected
                 {
                     return Err(invalid("action evidence bytes changed"));
@@ -410,7 +412,11 @@ impl ActionBundle {
                 .parent()
                 .ok_or_else(|| invalid("missing action root"))?;
             let bytes = fs::read(root.join("raw/reconciliation-v1.json"))?;
-            if format!("sha256:{:x}", Sha256::digest(&bytes)) != *expected {
+            if format!(
+                "sha256:{:x}",
+                analytics_core::hash::Hex(Sha256::digest(&bytes))
+            ) != *expected
+            {
                 return Err(invalid("reconciliation receipt hash mismatch"));
             }
             let receipt: Value = serde_json::from_slice(&bytes).map_err(invalid)?;
@@ -479,7 +485,10 @@ impl ActionBundle {
                     }
                     let bytes = fs::read(root.join("raw").join(name))?;
                     if bundle.raw_sha256.get(name)
-                        != Some(&format!("sha256:{:x}", Sha256::digest(&bytes)))
+                        != Some(&format!(
+                            "sha256:{:x}",
+                            analytics_core::hash::Hex(Sha256::digest(&bytes))
+                        ))
                     {
                         return Err(invalid("structured_evidence_hash_mismatch"));
                     }
@@ -537,7 +546,10 @@ impl ActionBundle {
                         }
                         let bytes = fs::read(root.join("raw").join(name))?;
                         if bundle.raw_sha256.get(name)
-                            != Some(&format!("sha256:{:x}", Sha256::digest(&bytes)))
+                            != Some(&format!(
+                                "sha256:{:x}",
+                                analytics_core::hash::Hex(Sha256::digest(&bytes))
+                            ))
                         {
                             return Err(invalid("category review receipt hash mismatch"));
                         }
@@ -642,7 +654,10 @@ mod removed_source_tests {
             execution_data: None,
             raw_sha256: BTreeMap::from([(
                 "receipt.json".into(),
-                format!("sha256:{:x}", Sha256::digest(raw)),
+                format!(
+                    "sha256:{:x}",
+                    analytics_core::hash::Hex(Sha256::digest(raw))
+                ),
             )]),
         };
         let path = root.path().join("actions.json");

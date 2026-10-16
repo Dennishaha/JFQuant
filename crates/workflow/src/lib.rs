@@ -1,6 +1,8 @@
 //! Versioned local workspace, built-in research recipes and persistent run history.
 //! All execution is synchronous on the caller's worker; no native handle escapes.
 #![warn(missing_docs)]
+/// Reusable evidence capture, recovery, status and review drafts.
+pub mod action_evidence;
 /// Shared computation worker and plain-data protocol.
 pub mod backend;
 /// Acquisition progress, historical coverage and explicit availability-pool proposals.

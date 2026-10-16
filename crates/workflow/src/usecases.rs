@@ -173,6 +173,9 @@ fn execute_scoped(
         | WorkflowRequest::CollectQuotes { .. }
         | WorkflowRequest::CollectMarket { .. }
         | WorkflowRequest::DownloadActions { .. } => acquisition::execute(w, request, run, context),
+        WorkflowRequest::Evidence { request } => {
+            crate::action_evidence::execute(w, request, run, context)
+        }
         WorkflowRequest::InspectActions { .. }
         | WorkflowRequest::ReconcileActions { .. }
         | WorkflowRequest::ReviseActions { .. } => actions::execute(w, request, run, context),

@@ -178,3 +178,5 @@ last_valid_close_date 用最后一个有效收盘及价格依据判断尾部，�
 checked_fields 和 checked_days 供签名阶段复用已冻结的真实字段及日期集；来源别名按各自
 有效窗口映射到实际证券。无 scope 的既有读取仍执行完整验证。
 验收包含范围外坏值/缺口、未使用字段、基准训练前年份、历史依赖及 native 合成 smoke。
+
+选定公告留存、部分批次恢复与事件修订草稿由 `corporate_actions::evidence` 提供。沿用现有 schema-2 公告与 review 校验，包内 pypdf 提取不依赖源码或用户 Python；失败 HTTP 也保留凭证，选定文档不宣称完整历史。接口与验收见 [公司行动组件](src/corporate_actions/README.md)。

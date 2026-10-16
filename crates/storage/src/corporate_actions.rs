@@ -1,5 +1,7 @@
 //! Immutable company-action bundles and evidence validation. Incomplete dates stay null.
 //! Provider success is recorded separately from execution eligibility.
+/// Selected public documents, partial recovery and review drafts.
+pub mod evidence;
 pub mod execution_index;
 pub mod facts;
 pub mod reconcile;

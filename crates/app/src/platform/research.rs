@@ -179,6 +179,7 @@ pub fn research_panel(
             }
             if ui.button("预览研究日程").clicked(){submit(state,worker,cancel_slot,WorkflowRequest::PreviewResearch{actions:(!state.platform.actions.is_empty()).then(||state.platform.actions.clone()),template:Box::new(state.platform.template.clone()),market:state.platform.market.clone()});}
         });
+        super::evidence::controls(ui,state,worker,cancel_slot);
         ui.collapsing("公司行动：查看证据与审计修订",|ui|{
             ui.horizontal(|ui| { ui.label("核对证据任务ID（逗号分隔，可空）"); ui.text_edit_singleline(&mut state.platform.action_evidence_tasks); });
             if ui.button("自动核对并发布新版本").clicked() {

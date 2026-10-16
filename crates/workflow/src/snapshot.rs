@@ -35,6 +35,12 @@ pub fn snapshot(workspace: &Workspace, request: &WorkflowRequest) -> Result<Valu
         _ => {}
     };
     let versions = match request {
+        WorkflowRequest::Evidence { request } => request
+            .actions()
+            .map(|id| version_metadata(workspace, id, "actions"))
+            .transpose()?
+            .into_iter()
+            .collect(),
         WorkflowRequest::RefreshData { request } => {
             let mut v = vec![version_metadata(workspace, &request.market, "market")?];
             if let Some(id) = &request.actions {
@@ -112,6 +118,9 @@ pub fn snapshot(workspace: &Workspace, request: &WorkflowRequest) -> Result<Valu
             );
         }
         frozen["prediction_source_hashes"] = hashes.into();
+    }
+    if let WorkflowRequest::Evidence { request } = request {
+        frozen["evidence_inputs"] = crate::action_evidence::freeze(workspace, request)?;
     }
     if let WorkflowRequest::ReconcileActions { evidence_tasks, .. } = request {
         let mut evidence = serde_json::Map::new();

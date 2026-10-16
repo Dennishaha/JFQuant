@@ -164,3 +164,13 @@ DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow
 ```
 
 对账命令和公告采集参数见[采集组件](../../collectors/README.md)。fixture覆盖当前事件单位、null、重复、来源冲突、废弃来源与混合证据拒绝、公告字段修订和哈希篡改。HiThink账户权限、真实覆盖和稳定性须联网验证；离线通过不代表研究就绪。
+
+## 可复用的选定文档与恢复
+
+`evidence::{CaptureRequest, DocumentSpec, capture, recover_announcements, draft}` 支持共享证据维护任务。capture 使用有大小/时间限制的 HTTPS GET，禁止重定向，保存失败 HTTP 响应并逐份汇总；包内解释器仅运行固定 pypdf 提取代码，不读取临时外部脚本。证券代码、去空白标题匹配后才进入现有 schema-2 公告 manifest。实施分类由显式请求声明，默认未核实；不自动推断日期、金额或完整历史。所有选定文档历史覆盖均为 false。
+
+部分批次恢复核验 receipts、原生 shard 身份、PDF/文本及 HTTP 哈希，保留原始树与原任务出处。未完成 shard 不加入 manifest；原有分页元数据原样保留，恢复本身不新增覆盖主张。copy_tree 拒绝链接并支持取消。
+
+修订 draft 只重新绑定明确目标版本的事件哈希，不创造引用、处置或失败清除。改除权日时保留原事件身份；双重事件身份冲突拒绝。正式可用性仍由 review::apply 校验。验收：`cargo test -p analytics-storage corporate_actions::evidence` 及既有公司行动测试。
+
+恢复不复制 `.tdx-runtime` 私有 SDK 配置目录；它不是证据或检查点。任务根目录须位于工作区，根链接及树内其他链接均拒绝。

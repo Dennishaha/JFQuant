@@ -78,6 +78,9 @@ pub enum WorkspaceCommand {
 }
 #[derive(Debug, Subcommand)]
 pub enum DataCommand {
+    /// Capture PDFs, recover partial batches, inspect gaps and prepare reviewed requests.
+    #[command(subcommand)]
+    Evidence(EvidenceCommand),
     #[command(subcommand)]
     Sources(SourceCommand),
     Refresh(RefreshArgs),
@@ -160,6 +163,43 @@ pub enum DataCommand {
         market: String,
         #[arg(long)]
         resume: Option<Uuid>,
+    },
+}
+/// Agent-friendly operations sharing the desktop evidence worker.
+#[derive(Debug, Subcommand)]
+pub enum EvidenceCommand {
+    /// Capture selected public PDFs; specification format is documented in the CLI README.
+    Capture {
+        #[arg(long)]
+        request: PathBuf,
+    },
+    /// Recover checksum-verified completed output from a terminal collection task.
+    Recover {
+        #[arg(long)]
+        task: Uuid,
+    },
+    /// Retry the exact terminal native collection request using verified checkpoints.
+    Retry {
+        #[arg(long)]
+        task: Uuid,
+    },
+    /// Summarize failures, history coverage, issue hashes and raw receipt references.
+    Status {
+        #[arg(long)]
+        actions: String,
+        #[arg(long)]
+        instrument: Option<String>,
+    },
+    /// Generate a scaffold, or rebase and validate reviewed proposals without publishing.
+    Draft {
+        #[arg(long)]
+        actions: String,
+        #[arg(long)]
+        request: Option<PathBuf>,
+        #[arg(long, required_unless_present = "request")]
+        instrument: Option<String>,
+        #[arg(long, required_unless_present = "request")]
+        evidence_manifest: Option<PathBuf>,
     },
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -947,6 +987,17 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
                         reuse_shards_from,
                     }),
                 })
+            }
+            DataCommand::Evidence(command) => {
+                use analytics_workflow::action_evidence::EvidenceRequest;
+                let request=match command {
+                    EvidenceCommand::Capture { request } => EvidenceRequest::Capture{request:read(&client.root,&request)?},
+                    EvidenceCommand::Recover { task } => EvidenceRequest::Recover{task},
+                    EvidenceCommand::Retry { task } => EvidenceRequest::Retry{task},
+                    EvidenceCommand::Status {actions,instrument} => EvidenceRequest::Status{actions,instrument},
+                    EvidenceCommand::Draft {actions,request,instrument,evidence_manifest} => EvidenceRequest::Draft{actions,request:request.map(|p|read(&client.root,&p).map(Box::new)).transpose()?,instrument,evidence_manifest},
+                };
+                workflow(WorkflowRequest::Evidence{request})
             }
             DataCommand::Compose {
                 market,

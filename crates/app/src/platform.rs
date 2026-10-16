@@ -13,6 +13,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use uuid::Uuid;
+mod evidence;
 mod reads;
 pub struct PlatformState {
     pub(crate) reads: reads::ReadState,
@@ -25,6 +26,7 @@ pub struct PlatformState {
     pub schedule_editor: String,
     pub date_editor_valid: bool,
     pub action_review_editor: String,
+    pub evidence_tools: evidence::EvidenceTools,
     /// Previously completed training task ID.
     pub training_job: String,
     pub independent_training_editor: String,
@@ -98,6 +100,7 @@ impl Default for PlatformState {
             prediction_job: String::new(),
             rights_policy: Default::default(),
             action_review_editor: String::new(),
+            evidence_tools: Default::default(),
             action_review_instrument: "SH600000".into(),
             action_evidence_manifest: String::new(),
             action_evidence_tasks: String::new(),

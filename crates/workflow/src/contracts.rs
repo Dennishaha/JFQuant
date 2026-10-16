@@ -372,6 +372,11 @@ pub enum WorkflowRequest {
         /// Matching prior task checkpoint ID.
         resume: Option<Uuid>,
     },
+    /// Shared evidence maintenance for agents and desktop.
+    Evidence {
+        /// Versioned operation and plain inputs.
+        request: crate::action_evidence::EvidenceRequest,
+    },
     /// Inspect original events, stable hashes and captured candidates for a single security.
     InspectActions {
         /// Immutable original action snapshot.
@@ -509,6 +514,7 @@ impl WorkflowRequest {
             Self::BacktestPredictions { .. } => "使用已发布预测进行配股对照回测".into(),
             Self::PreviewResearch { .. } => "预览研究日期和数据需求".into(),
             Self::PrepareResearchData { .. } => "补采研究所需公司行动/公告".into(),
+            Self::Evidence { .. } => "公司行动证据维护".into(),
             Self::InspectActions { .. } => "查看公司行动原值与实施证据".into(),
             Self::ReconcileActions { .. } => "自动核对公司行动并发布新版本".into(),
             Self::ReviseActions { .. } => "实施公告对账修订".into(),

@@ -154,7 +154,7 @@ python3 crates/workflow/checks/architecture.py
 不猜测转换。尚未完成的维护 journal 阻止服务启动；恢复前重新校验清单中的文件。
 归档不会自动删除。命令实现和中断/重复执行验收见 `src/maintenance.rs`。
 
-## 组合数据检查（协议26）
+## 组合数据检查（协议27）
 
 `input_check::{InputCheckPlan,InputCheckReport,CheckRequest,run}` 提供依赖、输入、
 实际因子计算、样本四阶段检查；只有四阶段完成且现有 `AdmissionReport` 允许时才就绪。
@@ -182,3 +182,5 @@ App 的后台文件元数据探针仅提示报告过期，正式任务仍验证�
 
 验收：`cargo nextest run --workspace` 包括逐字段/横截面/递归/范围外缺口、三档策略、
 标签与基准尾部、完整检查无训练及正式任务缓存复用；安装包验收见 App packaging/verify-cli.sh。
+
+共享证据维护使用 `WorkflowRequest::Evidence` / `action_evidence::EvidenceRequest`，提供选定文档捕获、终态采集恢复/重试、缺口与修订预览。工作区证据树、来源任务记录及原始行动版本冻结后再执行；正式发布与研究准入不由草稿状态替代。接口详见 [CLI 补证流程](../cli/src/README.md#公司行动证据维护agent-与-gui-共用)。

@@ -20,6 +20,8 @@ chrono.workspace = true
 encoding_rs = "0.8"
 rustix = { version = "1", features = ["process", "fs"] }
 
+url = "2"
+
 [dev-dependencies]
 uuid.workspace = true
 tempfile = "3.23"

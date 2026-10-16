@@ -1917,3 +1917,56 @@ fn independent_app_trains_a_queries_models_previews_and_executes_b() {
         "完全未见标的回测"
     );
 }
+
+#[test]
+fn evidence_maintenance_submits_shared_status_and_scaffold_requests() {
+    for scaffold in [false, true] {
+        let (mut h, _tmp) = platform_harness(Panel::Research);
+        let w = h.app.state.platform.workspace.as_ref().unwrap().clone();
+        let (m, a, t) = analytics_workflow::testing::synthetic(&w);
+        h.app.state.platform.template = t;
+        h.app.state.platform.datasets = w.datasets().unwrap();
+        h.app.state.platform.market = m.id;
+        h.app.state.platform.actions = a.id.clone();
+        h.app.state.platform.action_review_instrument = "SH600030".into();
+        h.app.state.platform.action_evidence_manifest = "data/announcements.json".into();
+        h.ctx.all_styles_mut(|s| s.animation_time = 0.0);
+        h.click("证据维护：公告留存、批次恢复与修订草稿");
+        h.click(if scaffold {
+            "生成本证券修订草稿"
+        } else {
+            "查看本证券缺口"
+        });
+        let command = h.commands.try_recv().unwrap();
+        match command {
+            WorkerCommand::ExecuteWorkflow { request, .. } => match *request {
+                analytics_workflow::WorkflowRequest::Evidence {
+                    request:
+                        analytics_workflow::action_evidence::EvidenceRequest::Status {
+                            actions,
+                            instrument,
+                        },
+                } => {
+                    assert!(!scaffold);
+                    assert_eq!(actions, a.id);
+                    assert_eq!(instrument.as_deref(), Some("SH600030"));
+                }
+                analytics_workflow::WorkflowRequest::Evidence {
+                    request:
+                        analytics_workflow::action_evidence::EvidenceRequest::Draft {
+                            actions,
+                            request: None,
+                            instrument,
+                            ..
+                        },
+                } => {
+                    assert!(scaffold);
+                    assert_eq!(actions, a.id);
+                    assert_eq!(instrument.as_deref(), Some("SH600030"));
+                }
+                other => panic!("unexpected workflow {other:?}"),
+            },
+            _ => panic!("unexpected command"),
+        }
+    }
+}

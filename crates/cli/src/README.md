@@ -176,3 +176,33 @@ FactorCommand增加operators/library/validate/save/archive/preview/save-group/ar
 ## 独立模型命令
 
 `templates fit/model-backtest` 导出计划；`research fit/fit-inputs/models/model-backtest/backtest-inputs` 构造共享 `WorkflowRequest::Independent`。长任务只返回ID，使用jobs读取结果。参数、版本及复现示例见组件根README；无训练或账户执行逻辑进入CLI。
+
+## 公司行动证据维护（Agent 与 GUI 共用）
+
+`data evidence` 使用共享后台任务，不需要一次性 Python 脚本。命令返回 task_id，统一用 `jobs wait ID`、`jobs results ID`、`jobs cancel ID`；每次输出保存 `evidence-report.json`。
+
+```bash
+jfquant --workspace W data evidence status --actions ACTION_VERSION
+jfquant --workspace W data evidence status --actions ACTION_VERSION --instrument SH603883
+jfquant --workspace W data evidence capture --request selected-documents.json
+jfquant --workspace W data evidence recover --task TERMINAL_COLLECTION_UUID
+jfquant --workspace W data evidence retry --task ORIGINAL_COLLECTION_UUID
+jfquant --workspace W data evidence draft --actions ACTION_VERSION --instrument SH603883 --evidence-manifest data/E/announcements.json
+jfquant --workspace W data evidence draft --actions NEW_ACTION_VERSION --request reviewed-revision.json
+# 草稿结果含 request_path、validation 和 apply_argv；仅 validation.ready=true 表示校验通过。
+jfquant --workspace W data revise-actions --actions NEW_ACTION_VERSION --request ABSOLUTE_REVIEW_REQUEST_PATH
+```
+
+选定文档请求格式 1（支持多证券、多网站；URL 不跟随重定向）：
+
+```json
+{"schema_version":1,"documents":[{"id":"1220415873","instrument":"SH603883","url":"https://static.cninfo.com.cn/finalpage/2024-06-21/1220415873.PDF","announced":"2024-06-21","title":"权益分派实施公告","implementation":true}]}
+```
+
+`implementation` 默认 false；仅经人工确认的实施类文档设为 true。正文证券代码和标题摘录（忽略空白）必须匹配；HTTP 原文、状态、URL、PDF 与文本哈希保留，提取使用包内 pypdf。HTML、重定向、加密或异常 PDF 不进入有效文档。单份失败不丢失同批成功文档，报告明确 failures、captured_documents、ready_for_review。选定文档始终 `full_history=false`、`pagination_complete=false`，不能据此解除整段历史缺失。
+
+`recover` 只接收已结束的原生 actions / announcements 采集任务及选定文档捕获任务；恢复前后核验哈希和 HTTP 证据。支持 failed / cancelled 批次中的完整 shard，保留原任务状态。行动版本以原样核验后登记；公告输出可直接作为 evidence_manifest，不伪造原生生产者或完整历史。拒绝运行中任务、软链接和篡改。`retry` 只接受原始 collect-actions / collect-announcements / download-actions 任务，按原参数和 resume owner 复用检查点；旧生产者或请求不兼容时明确拒绝，不重写签名。重试失败后可继续用原始任务ID恢复其检查点。
+
+`draft` 无 --request 时生成可编辑骨架、原事件哈希、问题哈希和公告原文；缺失字段需要人工填写并引用原文。带 --request 时可同时用 --evidence-manifest 指向经核验恢复的新 manifest；把已审阅的目标事件迁移至明确选择的新版本，更新原事件哈希，保留逐字段证据、理由和显式问题处置，跳过完全相同的事件。使用正式修订校验器生成预览，校验错误保存在 validation 中；不会自动新增引用、求和重复事件、清除失败或发布版本。已有问题哈希失效时须重新审阅，不静默更新。无变更不会标为可发布。
+
+证据输入在提交时冻结树哈希，执行前再核验。正式发布仍由 `revise-actions` 验证；草稿通过不等于训练/回测准入通过。GUI 的“证据维护”提供同样的留存表单、恢复、重试、缺口查询、草稿生成/校验和载入操作，业务判断不在客户端实现。

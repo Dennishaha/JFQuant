@@ -37,6 +37,20 @@ with open(sys.argv[1]) as handle:
 assert details["instrument"] == "SH600000"
 assert "structured_fields" in details and details["structured_fields"] is None
 PY_FIELDS
+# Evidence maintenance uses the same shipped worker and writes reusable requests offline.
+run_cli data evidence status --actions "$actions" --instrument SH600000 > "$check_root/evidence-status-submit.json"
+evidence_id="$(plutil -extract task_id raw -o - "$check_root/evidence-status-submit.json")"
+run_cli jobs wait "$evidence_id" --timeout 30 > "$check_root/evidence-status.json"
+mkdir -p "$check_root/workspace/evidence-fixture/raw"
+printf '%s' '{"schema_version":2,"documents":[],"receipts":{}}' > "$check_root/workspace/evidence-fixture/announcements.json"
+run_cli data evidence draft --actions "$actions" --instrument SH600000 --evidence-manifest evidence-fixture/announcements.json > "$check_root/evidence-draft-submit.json"
+evidence_id="$(plutil -extract task_id raw -o - "$check_root/evidence-draft-submit.json")"
+run_cli jobs wait "$evidence_id" --timeout 30 > "$check_root/evidence-draft.json"
+[ "$(plutil -extract results.details.validation.ready raw -o - "$check_root/evidence-draft.json")" = false ]
+[ -f "$(plutil -extract results.details.request_path raw -o - "$check_root/evidence-draft.json")" ]
+for evidence_command in capture recover retry status draft; do
+  run_cli data evidence "$evidence_command" --help > "$check_root/evidence-$evidence_command-help.txt"
+done
 run_cli data sources list > "$check_root/sources.json"
 for role in quotes actions members calendar; do
   [ "$(plutil -extract "result.results.details.policy.priorities.$role.0" raw -o - "$check_root/sources.json")" = hithink ]

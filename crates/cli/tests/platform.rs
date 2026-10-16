@@ -1603,3 +1603,66 @@ fn independent_fit_models_preview_and_new_pool_backtest_share_service() {
     assert_eq!(backtest["record"]["status"], "succeeded", "{backtest}");
     assert_eq!(backtest["results"]["schema_version"], 19);
 }
+
+#[test]
+fn evidence_commands_share_status_and_persist_nonpublishing_scaffolds() {
+    let s = Sandbox::new();
+    let w = Workspace::open(&s.client.root).unwrap();
+    let (_, actions, _) = analytics_workflow::demo::create_canonical(&w).unwrap();
+    let sub = s.json(&[
+        "data",
+        "evidence",
+        "status",
+        "--actions",
+        &actions.id,
+        "--instrument",
+        "SH600000",
+    ]);
+    s.json(&[
+        "jobs",
+        "wait",
+        sub["task_id"].as_str().unwrap(),
+        "--timeout",
+        "30",
+    ]);
+    let result = s.json(&["jobs", "results", sub["task_id"].as_str().unwrap()]);
+    assert_eq!(result["details"]["actions"], actions.id);
+    assert!(result["details"]["entries"].is_array());
+    let root = w.resolve("selected evidence");
+    std::fs::create_dir_all(root.join("raw")).unwrap();
+    std::fs::write(
+        root.join("announcements.json"),
+        serde_json::to_vec(&json!({"schema_version":2,"documents":[],"receipts":{}})).unwrap(),
+    )
+    .unwrap();
+    let before = w.datasets().unwrap().len();
+    let sub = s.json(&[
+        "data",
+        "evidence",
+        "draft",
+        "--actions",
+        &actions.id,
+        "--instrument",
+        "SH600000",
+        "--evidence-manifest",
+        "selected evidence/announcements.json",
+    ]);
+    s.json(&[
+        "jobs",
+        "wait",
+        sub["task_id"].as_str().unwrap(),
+        "--timeout",
+        "30",
+    ]);
+    let result = s.json(&["jobs", "results", sub["task_id"].as_str().unwrap()]);
+    assert_eq!(result["details"]["validation"]["ready"], false);
+    assert!(std::path::Path::new(result["details"]["request_path"].as_str().unwrap()).is_file());
+    assert_eq!(w.datasets().unwrap().len(), before);
+    for command in ["capture", "recover", "retry", "status", "draft"] {
+        assert!(
+            s.cli(&["data", "evidence", command, "--help"])
+                .status
+                .success()
+        );
+    }
+}

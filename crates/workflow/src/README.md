@@ -65,3 +65,5 @@ Daily input dependencies union identical cross-sectional contexts and raw-field 
 materializing observation sets. This preserves disjoint windows, historical membership and
 recursive seeds while avoiding repeated full-pool expansion during real rolling fits.
 Regression compares the optimized sets against the original observation-by-observation algorithm.
+
+`action_evidence`：共享 Capture / Recover / Retry / Status / Draft 后台任务。输入版本和外部证据树在提交时冻结，执行前核对；捕获与恢复输出现有公告 manifest，修订草稿经正式 review 校验后保存在任务目录，不自动发布。失败批次的恢复保留来源任务状态与签名，原生重试保持原请求和 resume owner。客户端只传普通数据；任务沿用进度、取消和 outcome 持久化。服务协议 27。

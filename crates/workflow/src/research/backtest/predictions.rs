@@ -37,6 +37,20 @@ pub(super) fn training_source(source: &Path) -> Result<(PathBuf, Option<String>)
     Err("prediction provenance cycle or excessive depth".into())
 }
 fn identity(request: &ResearchRequest, factors: &str, folds: &[ResolvedFold]) -> Result<String> {
+    let execution: serde_json::Value = fs::read(request.output.join("execution.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    if execution["independent"]["contract"] == "independent-v1" {
+        return crate::signature(&(
+            "independent-prediction-v1",
+            factors,
+            folds,
+            &execution["independent"],
+            &request.quality_policy,
+            crate::research::worker::runtime_signature(),
+        ));
+    }
     if let Some(source) = &request.reuse_predictions {
         let (training_root, expected) = training_source(source)?;
         let bytes = fs::read(training_root.join("training.json"))?;
@@ -202,6 +216,17 @@ pub(super) fn publish(
             }
         }
     }
+    if request
+        .output
+        .join("independent_predictions.json")
+        .is_file()
+    {
+        fs::copy(
+            request.output.join("independent_predictions.json"),
+            staging.join("independent_predictions.json"),
+        )?;
+        files.push("independent_predictions.json".into());
+    }
     let hashes = files
         .iter()
         .map(|name| Ok((name.clone(), file_hash(&staging.join(name))?)))
@@ -271,9 +296,17 @@ pub(super) fn restore(
     // Required split masks are explicit; an incomplete manifest cannot reuse a
     // prediction produced before the full phase was published.
     for (i, fold) in folds.iter().enumerate() {
+        let independent = request.output.join("model_selection.json").is_file();
         for split in ["train", "prediction"]
             .into_iter()
-            .chain(fold.actual.validation.as_ref().map(|_| "validation"))
+            .filter(|s| !independent || *s == "prediction")
+            .chain(
+                fold.actual
+                    .validation
+                    .as_ref()
+                    .filter(|_| !independent)
+                    .map(|_| "validation"),
+            )
         {
             if !hashes.contains_key(&format!("sample_masks/fold-{i:04}-{split}.json")) {
                 return Err("prediction cache sample receipt missing".into());

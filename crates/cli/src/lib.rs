@@ -512,6 +512,47 @@ impl QualityOptions {
 
 #[derive(Debug, Subcommand)]
 pub enum ResearchCommand {
+    /// Fit-only plan: no test dates required.
+    Fit {
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long)]
+        market: String,
+        #[arg(long)]
+        actions: Option<String>,
+    },
+    /// Inspect or acquire inputs for an independent training plan.
+    FitInputs {
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long)]
+        market: String,
+        #[arg(long)]
+        actions: Option<String>,
+        #[arg(long)]
+        prepare: bool,
+        #[arg(long)]
+        announcements: bool,
+    },
+    /// List hash-verified model receipts without reading training market data.
+    Models {
+        #[arg(long)]
+        training: Uuid,
+    },
+    /// Predict and execute an independently configured B pool and time range.
+    ModelBacktest {
+        #[arg(long)]
+        plan: PathBuf,
+    },
+    /// Preview model switches and B data requirements, or acquire action evidence.
+    BacktestInputs {
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long)]
+        prepare: bool,
+        #[arg(long)]
+        announcements: bool,
+    },
     /// Replay a completed task's published scores without loading or training models.
     ReplayPredictions {
         #[arg(long)]
@@ -621,6 +662,30 @@ pub enum ResearchCommand {
 }
 #[derive(Debug, Subcommand)]
 pub enum TemplateCommand {
+    /// Export a fit-only plan, dropping all legacy test dates.
+    Fit {
+        #[arg(long)]
+        template: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Create an independent backtest plan; edit pool and model selection in its JSON.
+    ModelBacktest {
+        #[arg(long)]
+        template: PathBuf,
+        #[arg(long)]
+        training: Uuid,
+        #[arg(long)]
+        market: String,
+        #[arg(long)]
+        actions: String,
+        #[arg(long)]
+        start: analytics_core::Date,
+        #[arg(long)]
+        end: analytics_core::Date,
+        #[arg(long)]
+        output: PathBuf,
+    },
     /// Export the feature selection independently from a workflow.
     Factors {
         #[arg(long)]
@@ -1098,6 +1163,11 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
         },
         Command::Model(ModelCommand::Artifacts { id }) => return client.call(Rpc::Results { id }),
         Command::Research(command) => match *command {
+            ResearchCommand::Fit {plan,market,actions} => workflow(WorkflowRequest::Independent {request:Box::new(analytics_workflow::research::backtest::independent::Job::Train {plan:Box::new(read(&client.root,&plan)?),market,actions})}),
+            ResearchCommand::FitInputs {plan,market,actions,prepare,announcements} => workflow(WorkflowRequest::Independent {request:Box::new(analytics_workflow::research::backtest::independent::Job::TrainingInputs {plan:Box::new(read(&client.root,&plan)?),market,actions,prepare,announcements})}),
+            ResearchCommand::Models {training} => workflow(WorkflowRequest::Independent {request:Box::new(analytics_workflow::research::backtest::independent::Job::Models {training})}),
+            ResearchCommand::ModelBacktest {plan} => workflow(WorkflowRequest::Independent {request:Box::new(analytics_workflow::research::backtest::independent::Job::Backtest {plan:Box::new(read(&client.root,&plan)?)})}),
+            ResearchCommand::BacktestInputs {plan,prepare,announcements} => workflow(WorkflowRequest::Independent {request:Box::new(analytics_workflow::research::backtest::independent::Job::BacktestInputs {plan:Box::new(read(&client.root,&plan)?),prepare,announcements})}),
             ResearchCommand::Verify { task } => {
                 return client.call(Rpc::VerifyResearch { id: task });
             }
@@ -1231,6 +1301,20 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
         Command::Templates(command) => {
             return match command {
                 TemplateCommand::List => client.call(Rpc::Templates),
+                TemplateCommand::Fit {template,output} => {
+                    let t=ResearchTemplate::read(&resolve(&client.root,&template)).map_err(invalid)?;
+                    let plan=analytics_workflow::research::backtest::independent::TrainingPlan::from_template(&t);
+                    plan.validate().map_err(invalid)?;
+                    fs::write(resolve(&client.root,&output),serde_json::to_vec_pretty(&plan).map_err(invalid)?).map_err(invalid)?;
+                    Ok(json!({"output":output,"plan":plan}))
+                },
+                TemplateCommand::ModelBacktest {template,training,market,actions,start,end,output}=> {
+                    let t=ResearchTemplate::read(&resolve(&client.root,&template)).map_err(invalid)?;
+                    let plan=analytics_workflow::research::backtest::independent::BacktestPlan {schema_version:1,training,models:Default::default(),pool_version:t.pool_version.clone(),range:analytics_core::DateRange {start,end},market,actions,benchmark:t.benchmark.clone(),quality_policy:t.quality_policy.clone(),execution:t.execution_settings(),event_check_policy:t.event_check_policy};
+                    plan.validate().map_err(invalid)?;
+                    fs::write(resolve(&client.root,&output),serde_json::to_vec_pretty(&plan).map_err(invalid)?).map_err(invalid)?;
+                    Ok(json!({"output":output,"plan":plan}))
+                },
                 TemplateCommand::Factors { template, output } => {
                     let t = ResearchTemplate::read(&resolve(&client.root, &template))
                         .map_err(invalid)?;

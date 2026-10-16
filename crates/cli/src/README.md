@@ -172,3 +172,7 @@ flowchart LR
 
 FactorCommand增加operators/library/validate/save/archive/preview/save-group/archive-group，统一调用
 协议23共享因子库和预览任务。混合请求携带固定FactorRef，完整20日动量评估训练流程由platform集成测试覆盖。
+
+## 独立模型命令
+
+`templates fit/model-backtest` 导出计划；`research fit/fit-inputs/models/model-backtest/backtest-inputs` 构造共享 `WorkflowRequest::Independent`。长任务只返回ID，使用jobs读取结果。参数、版本及复现示例见组件根README；无训练或账户执行逻辑进入CLI。

@@ -667,7 +667,11 @@ impl Workspace {
         let training_value = if training.exists() {
             {
                 let artifact = serde_json::from_slice::<Value>(&fs::read(&training)?)?;
-                crate::research::backtest::validate_training_artifact(&artifact)?;
+                if artifact["schema_version"] == 5 {
+                    crate::research::backtest::independent::catalogue(&dir)?;
+                } else {
+                    crate::research::backtest::validate_training_artifact(&artifact)?;
+                }
                 Some(artifact)
             }
         } else {
@@ -679,6 +683,11 @@ impl Workspace {
             crate::research::backtest::validate_result(&summary)?;
             Ok(summary)
         } else {
+            if let Some(artifact) = training_value.as_ref()
+                && artifact["schema_version"] == 5
+            {
+                return Ok(artifact.clone());
+            }
             if matches!(
                 run.request["request"]["operation"].as_str(),
                 Some("train_research")
@@ -717,6 +726,11 @@ impl Workspace {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkflowRequest {
+    /// Independent fit-only models and cross-pool prediction/account execution.
+    Independent {
+        /// Shared App/CLI worker operation.
+        request: Box<research::backtest::independent::Job>,
+    },
     /// Fetch bounded implementation evidence independently of model/universe preparation.
     CollectAnnouncements {
         /// Explicit CNINFO collection scope, using the independent announcement collector.
@@ -932,6 +946,7 @@ impl WorkflowRequest {
                 "刷新研究数据"
             }
             .into(),
+            Self::Independent { .. } => "独立模型训练与回测".into(),
             Self::TrainResearch { .. } => "训练研究模型".into(),
             Self::BacktestResearch { .. } => "使用已有模型回测".into(),
             Self::BacktestPredictions { .. } => "使用已发布预测进行配股对照回测".into(),
@@ -1120,6 +1135,9 @@ fn execute_scoped(
     let mut data = None;
     let mut details = Value::Null;
     match request {
+        WorkflowRequest::Independent { request } => {
+            details = research::backtest::independent::execute(w, run, request, context)?;
+        }
         WorkflowRequest::CollectAnnouncements { request, resume } => {
             if request.provider != analytics_storage::collector::Provider::Cninfo {
                 return Err(
@@ -1623,6 +1641,11 @@ fn execute_scoped(
 }
 /// Snapshot selected input versions when creating a run, rather than resolving them later.
 pub fn snapshot(workspace: &Workspace, request: &WorkflowRequest) -> Result<Value> {
+    if let WorkflowRequest::Independent { request: job } = request {
+        return Ok(
+            json!({"request":request,"independent":research::backtest::independent::snapshot(workspace,job)?,"app_version":env!("CARGO_PKG_VERSION")}),
+        );
+    }
     match request {
         WorkflowRequest::SaveSourcePolicy { policy } => policy.validate()?,
         WorkflowRequest::RefreshData { request } => request.template.validate()?,

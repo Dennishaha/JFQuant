@@ -80,3 +80,7 @@ ResearchConfig.factor_refs可混合内置158/191及自定义定义；必须与fa
 进入因子签名及模型格式3的训练schema哈希，模型读取重核完整定义与编译收据。带引用训练描述为格式4，
 旧纯内置描述3继续验证；结果格式18，旧16/17仍读取。年度缓存按依赖扩大预热，并记录实际载入起点和递归种子规则。
 修改/归档库中公式不影响冻结模型；端到端验收见`custom_factors::tests::frozen_mixed_research_trains_and_old_model_survives_library_edits`。
+
+## 独立模型生命周期
+
+`backtest::independent` 提供无test日期的训练日程，以及按可用日期自动选择模型的独立B池预测/回测。模型保存实际拟合标的、标签边界和完整特征契约，B不参与调参；回测无需A行情。沿用worker句柄所有权、空值与连续账户语义。组件根README记录版本及复现命令。

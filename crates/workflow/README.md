@@ -1,4 +1,4 @@
-当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议23、采集协议13、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
+当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议24、采集协议13、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
 
 # analytics-workflow
 
@@ -222,7 +222,7 @@ Alpha158、GTJA191由代码生成只读内置组，分组持久化接口拒绝�
 跨家族ID及过期公式版本拒绝保存。编辑或删除分组不改变已冻结的任务和模型。
 
 `factor_evaluation::{EvaluationInput,EvaluationRequest,run,EvaluationReport}` 独立计算，无模型训练。
-服务协议23增加 `TaskRequest::EvaluateFactors`、`WorkerCommand::EvaluateFactors` 和
+服务协议24增加 `TaskRequest::EvaluateFactors`、`WorkerCommand::EvaluateFactors` 和
 `WorkerEvent::FactorsEvaluated`，复用任务进度、取消、记录及错误处理。每次任务输出
 `factor-evaluation.json`、`artifacts.json`、事件payload；完整报告保留请求、输入文件哈希、
 公式版本、有序特征的schema哈希、执行器manifest及逐日统计。输入计算前后哈希不一致拒绝发布。
@@ -266,7 +266,7 @@ DUCKDB_DOWNLOAD_LIB=1 cargo clippy -p analytics-workflow -p analytics-desktop -p
 任务从提交时内嵌的定义执行，不跟随因子库最新版本。组格式2及FactorProfile格式2增加有序factor_refs，
 组内可混合两套内置因子和自定义修订；旧格式1仍读取，保存用格式2。旧纯内置配置保持等价签名。
 
-协议23新增RPC：Operators、FactorLibrary、ValidateFactor、SaveFactor、ArchiveFactor、SaveFactorGroup、
+协议24新增RPC：Operators、FactorLibrary、ValidateFactor、SaveFactor、ArchiveFactor、SaveFactorGroup、
 ArchiveFactorGroup；App/CLI共用处理函数。PreviewFactor是worker异步任务，输出标记为合成数据的样本预览，
 不把预览当市场有效性结论。其他计算继续使用EvaluateFactors/Pipeline/TrainResearch/BacktestResearch。
 
@@ -275,13 +275,13 @@ PipelineRequest、EvaluationInput和ResearchConfig可携带factor_refs；缺省�
 缓存记录实际载入起点和首个有限值的种子规则。多体系计算共享同一价格口径和当日成员掩码。
 
 格式2因子缓存manifest、格式2评估报告、格式3模型manifest及带引用的格式4训练描述逐项记录定义、算子版本、
-顺序与哈希；研究结果格式18，仍接受16/17读取。旧模型格式2和训练描述3按旧字段验证，不补造自定义定义。
+顺序与哈希；研究结果格式19，仍接受16/17/18读取。旧模型格式2和训练描述3按旧字段验证，不补造自定义定义。
 新模型每次读取验证冻结定义、算子收据及训练schema哈希。因子定义或顺序改变会改变签名；缓存重训前检查
 来源/顺序及已记录的缓存文件哈希，避免训练后才发现来源不一致。修改或归档因子库不会破坏旧模型。
 
 ```mermaid
 flowchart LR
-  UI[App编辑器 / CLI] --> RPC[协议23共享因子库接口]
+  UI[App编辑器 / CLI] --> RPC[协议24共享因子库接口]
   RPC --> V[不可变公式修订 / 混合组]
   V --> S[提交时冻结FactorRef顺序及定义]
   S --> W[worker编译及因子计算]
@@ -299,3 +299,66 @@ cargo fmt --all -- --check
 
 验收覆盖20日动量创建、修订冲突和篡改拒绝、归档后引用保留、跨体系混合评估/训练、原模型在库修改后继续回测、
 CLI独立进程和真实egui按钮。仅使用临时合成数据，生成行情、模型和任务文件不提交。
+
+## 独立训练与跨池模型回测（服务协议24）
+
+`research::backtest::independent` 提供 `TrainingPlan`、`TrainingSchedule`、
+`BacktestPlan`、`ModelSelection`、`ModelCatalogue` 和共享 worker `Job`。
+`WorkflowRequest::Independent` 对 App/CLI 暴露训练、模型查询、两侧输入预检/补采和独立回测。
+
+```mermaid
+flowchart LR
+  A[A股票池 + 训练/验证日程] --> T[训练worker]
+  T --> M[training.json v5 + 冻结模型]
+  M --> P[按预测日冻结模型切换计划]
+  B[B股票池 + 独立行情/日期] --> F[B横截面因子 + 独立预热]
+  P --> S[预测缓存]
+  F --> S
+  S --> E[连续账户执行]
+  E --> R[结果19 + 曾见/未见贡献]
+```
+
+训练计划格式1没有测试区间。支持 `single {window}`、`manual {windows}`、
+`rolling {first,step,expanding,until}`；窗口仅含 `train` 与可空 `validation`。
+滚动 `until` 必须明确且在训练快照覆盖内。`config` 使用 FitConfig，仅包含有序因子及训练配置，没有账户字段。
+回测计划格式1独立记录训练任务ID、`models`、B池、`range`、行情/行动版本和账户参数。
+`models` 缺省为 `{"mode":"rolling"}`，或 `{"mode":"single","model_id":"..."}`。
+第一版滚动序列仅来自同一训练任务。
+
+每个模型记录原窗口、实际保留训练/验证样本数与证券集合、特征/标签最晚日期
+`fit_data_end`、下一已知交易日 `available_from` 和真实完成时间。若训练快照尚无下一交易日，
+`available_from` 为 null，执行时以 B 的已验证交易日历及 `date > fit_data_end` 判断。
+每日选择已可用且截止日期最新的模型；同日截止按窗口发布顺序选择最后一个。
+首日没有模型或窗口覆盖不足时明确失败，不缩短区间。切换不重置账户、不增加调仓。
+
+A/B允许重叠，横截面分别按各自有效成员计算；入池前历史仅用于预热。
+回测从模型读取公式修订、算子版本与特征顺序，不读取 A 行情或可变因子库。
+回测基准须符合模型的基准输入契约。正常缺失保留 null；无未来收益标签不阻断预测。
+训练签名按 A 的实际字段/身份、样本、标签边界及参数计算；预测绑定模型序列、B输入与日期，
+账户再绑定交易规则。更换B或日期不训练；只改资金/交易参数可复用相同预测。
+
+`training.json` 格式5在所有模型完成并校验后发布。失败/取消模型不能被查询为完整产物。
+模型 manifest 仍使用3，增加 `fitting` 元数据；运行结果写19并兼容读取16—18。
+旧训练3/4按原签名验证，仅当具备签名覆盖的 `fit_calendar_sha256`、签名覆盖的拟合缓存与样本掩码、
+特征及模型收据时才转为可验证清单；证据不足保留原回测入口，不补造日期或标的。
+新独立回测可以重放已发布预测，重放固定 B 与候选范围，无需训练模型文件。
+
+`model_selection.json` 保存提交时冻结的模型清单和日期区间；`independent_predictions.json`
+保存预测、可空评价标签及按当前模型判定的曾见/未见标记。
+`cross_pool_report.json` 包含每日有效候选/预测数量、分组IC、费用和同一账户损益贡献。
+分组按当日模型，而非买入批次；两组不是独立策略收益。不能归属的权益损益单独列为
+`unattributed_pnl_cny`，不隐式分摊。账户与模型切换来源同时写入结果和可读报告。
+
+复现与验收：
+
+```bash
+DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow independent::tests
+DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli independent_fit_models
+DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-desktop independent_training_and_backtest_editors
+DUCKDB_DOWNLOAD_LIB=1 cargo clippy -p analytics-workflow -p analytics-cli -p analytics-desktop --all-targets -- -D warnings
+DUCKDB_DOWNLOAD_LIB=1 RUSTDOCFLAGS='-D warnings' cargo doc -p analytics-workflow -p analytics-cli --no-deps
+cargo fmt --all -- --check
+```
+
+测试使用临时数据，覆盖A行情不可用、跨池及重叠、模型选择边界/并列、横截面手算、
+混合递归因子延长终点保持原特征/信号、缺失评价标签、缓存失效和无模型文件的预测重放。

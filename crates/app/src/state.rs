@@ -608,6 +608,9 @@ pub fn apply_event(state: &mut AppState, event: &WorkerEvent) {
             state.platform.datasets = datasets.clone();
             state.platform.runs = runs.clone();
             state.platform.details = outcome.details.clone();
+            if outcome.details["catalogue"]["models"].is_array() {
+                state.platform.independent_models = serde_json::json!({"training":outcome.details.get("training").cloned().unwrap_or_else(||serde_json::json!(record.id)),"catalogue":outcome.details["catalogue"]});
+            }
             state.platform.selected_run = Some(record.id);
             if outcome.details["status"] == "trained"
                 || outcome.details["training_artifact"]["status"] == "trained"

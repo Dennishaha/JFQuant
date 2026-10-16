@@ -1,4 +1,4 @@
-当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议23、采集协议13、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
+当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议24、采集协议13、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
 
 # analytics-cli / jfquant
 
@@ -75,7 +75,7 @@ jfquant data refresh --template workflow.json --market MARKET_ID --workers 3 --r
 DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli
 ```
 
-服务协议23；升级时先等待或取消旧版本任务，再停止旧服务。旧协议客户端不能连接新协议服务。采集协议13与公司行动格式7同步升级；特征顺序和公式版本未改变。
+服务协议24；升级时先等待或取消旧版本任务，再停止旧服务。旧协议客户端不能连接新协议服务。采集协议13与公司行动格式7同步升级；特征顺序和公式版本未改变。
 
 分区位于不同本地工作区时，可用`--sources-manifest sources.json`汇总覆盖，或`--reuse-shards-manifest sources.json`复用；JSON数组元素为当前工作区任务UUID字符串，或`{"workspace":"/absolute/workspace","task_id":"UUID"}`。只读验证原生任务、同一不可变基础数据/窗口/基准及证券子集；不修改来源工作区。尚有分区待检查的证券不被误列为缺失。复用仍由采集器重新验证全部身份及哈希。
 
@@ -94,7 +94,7 @@ DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli
 
 ## 单因子有效性批量测试
 
-`jfquant --workspace /path/to/workspace factors evaluate --request evaluation.json` 提交服务协议23
+`jfquant --workspace /path/to/workspace factors evaluate --request evaluation.json` 提交服务协议24
 的独立测试任务，后续沿用jobs查询、取消和结果读取。请求示例（路径相对工作区）：
 
 ```json
@@ -118,7 +118,7 @@ DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli
 [workflow](../workflow/README.md)。构建及验收：
 `DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli`。
 
-## 自定义公式与算子目录（协议23）
+## 自定义公式与算子目录（协议24）
 
 ```bash
 jfquant --workspace /path/to/workspace factors operators --query QLIB_MEAN
@@ -153,3 +153,37 @@ Preview返回异步任务ID，沿用jobs wait/results/cancel，结果明确为�
 旧factor_set/factor_ids请求继续支持，原始因子目录不可通过库接口覆盖。
 
 验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli custom_formula_library_mixed_evaluation_training_and_revision_receipts`。
+
+## 独立模型训练与 B 股票池回测
+
+新命令使用服务协议24；保留原 `research train/backtest/run` 的配置与执行方式。
+新训练计划格式1没有测试日期；回测计划独立指定 B、日期和行情。
+App研究页“独立训练与跨池回测”可导入、编辑和导出相同 JSON。
+
+```bash
+# recipe.json 为已有研究配置；导出后编辑 fit.json 的 A 池和训练/验证日程。
+jfquant templates fit --template recipe.json --output fit.json
+jfquant research fit-inputs --plan fit.json --market A_MARKET --actions A_ACTIONS
+jfquant research fit --plan fit.json --market A_MARKET --actions A_ACTIONS
+jfquant jobs wait TRAIN_TASK_UUID
+jfquant research models --training TRAIN_TASK_UUID
+
+# 生成后编辑 B.json 的 pool_version；账户参数取自 recipe.json。
+jfquant templates model-backtest --template recipe.json --training TRAIN_TASK_UUID \
+  --market B_MARKET --actions B_ACTIONS --start 2020-01-01 --end 2021-12-31 --output B.json
+jfquant research backtest-inputs --plan B.json
+jfquant research model-backtest --plan B.json
+jfquant jobs wait BACKTEST_TASK_UUID
+jfquant jobs results BACKTEST_TASK_UUID
+```
+
+上述异步命令返回 `task_id`，预检/模型查询也通过 `jobs wait` 读取。
+`fit-inputs` 和 `backtest-inputs` 添加 `--prepare` 可采集公司行动候选，添加
+`--announcements` 改采公告；采集结果仍需原有来源/事件核验，并不自动代表数据就绪。
+两侧预检返回证券、历史范围、依赖和质量诊断，用于行情采集；不会隐式覆盖已有行情版本。
+
+`models` 默认 `{"mode":"rolling"}`：每天使用已结束训练/验证且最新的模型；
+指定 `{"mode":"single","model_id":"查询所得ID"}` 固定一个模型。
+模型切换计划在提交时冻结。更换 B、回测日期不重训，也不要求 A 原行情仍可访问。
+首日无可用模型明确拒绝。报告区分“跨池（含曾见）”和“完全未见标的”，并提供同一账户分组贡献。
+训练产物5、结果19；旧产物能否独立复用取决于原签名覆盖的样本和日历证据，不自动推断。

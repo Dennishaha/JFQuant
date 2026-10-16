@@ -206,3 +206,7 @@ EvaluateFactors请求和FactorsEvaluated事件。契约、输入格式和验收�
 `custom_factors.rs`管理不可变修订、expected_revision冲突检查、归档和worker合成预览；
 `profiles.rs`/`factor_groups.rs`兼容旧配置并保存混合引用。pipeline、年度研究、缓存重训和模型读取
 共用冻结定义校验，协议23、模型格式3、混合训练描述4和研究结果18的契约见[组件README](../README.md)。
+
+## 独立模型接口
+
+`WorkflowRequest::Independent` 将 fit-only `TrainingPlan`、`BacktestPlan`、模型查询和两侧需求预检/补采交给同一worker。提交冻结成员及模型清单；训练5、结果19、服务24。完整格式、命令和接受检查见组件根README。

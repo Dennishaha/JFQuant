@@ -57,7 +57,11 @@ pub fn render(
         }
         Panel::Model => model_panel(ui, state, worker, cancel_slot),
         Panel::Research => {
-            crate::platform::research_panel(ui, state, worker, cancel_slot, registry)
+            ScrollArea::vertical()
+                .id_salt("research_workbench")
+                .show(ui, |ui| {
+                    crate::platform::research_panel(ui, state, worker, cancel_slot, registry);
+                });
         }
         Panel::Runs => crate::platform::runs_panel(ui, state, worker, cancel_slot),
     }

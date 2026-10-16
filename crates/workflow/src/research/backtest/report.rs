@@ -46,6 +46,47 @@ pub(super) fn render(output: &Path) -> Result<()> {
             r["performance"]["execution_fee_cny"].as_f64().unwrap_or(0.)
         )?;
     }
+    if let Some(label) = value["cross_pool"]["label"].as_str() {
+        writeln!(
+            text,
+            "\n## {label}\n\n按当日所用模型的实际拟合标的分类；以下是同一账户贡献，并非两套独立策略收益。\n"
+        )?;
+        text.push_str("| 标的组 | 预测行数 | 有标签行数 | Rank IC | 损益贡献（元） | 费用（元） |\n|---|---:|---:|---:|---:|---:|\n");
+        for g in value["cross_pool"]["groups"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            writeln!(
+                text,
+                "| {} | {} | {} | {} | {} | {} |",
+                g["group"],
+                g["prediction_rows"],
+                g["labeled_rows"],
+                g["rank_ic"],
+                g["pnl_contribution_cny"],
+                g["execution_fees_cny"]
+            )?;
+        }
+        writeln!(
+            text,
+            "\n未归属损益（元）：{}；归属是否完整：{}。\n",
+            value["cross_pool"]["unattributed_pnl_cny"],
+            value["cross_pool"]["attribution_complete"]
+        )?;
+        text.push_str("| 开始 | 结束 | 模型 ID |\n|---|---|---|\n");
+        for s in value["cross_pool"]["model_segments"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            writeln!(
+                text,
+                "| {} | {} | {} |",
+                s["range"]["start"], s["range"]["end"], s["model_id"]
+            )?;
+        }
+    }
     fs::write(output.join("report.md"), text)?;
     Ok(())
 }

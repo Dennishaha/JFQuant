@@ -1462,3 +1462,120 @@ fn custom_formula_library_mixed_evaluation_training_and_revision_receipts() {
     let library = s.json(&["factors", "library"]);
     assert_eq!(library["factors"][0]["archived"], true);
 }
+
+#[test]
+fn independent_fit_models_preview_and_new_pool_backtest_share_service() {
+    use analytics_workflow::research::backtest::independent::{
+        BacktestPlan, FitWindow, ModelSelection, TrainingPlan, TrainingSchedule,
+    };
+    let s = Sandbox::new();
+    let w = Workspace::open(&s.client.root).unwrap();
+    let (m, a, t) = analytics_workflow::testing::synthetic(&w);
+    let mut fit = TrainingPlan::from_template(&t);
+    fit.schedule = TrainingSchedule::Single {
+        window: FitWindow {
+            train: analytics_core::DateRange {
+                start: "2008-01-02".parse().unwrap(),
+                end: "2008-01-12".parse().unwrap(),
+            },
+            validation: None,
+        },
+    };
+    let path = w.resolve("fit.json");
+    std::fs::write(&path, serde_json::to_vec_pretty(&fit).unwrap()).unwrap();
+    let submitted = s.json(&[
+        "research",
+        "fit",
+        "--plan",
+        path.to_str().unwrap(),
+        "--market",
+        &m.id,
+        "--actions",
+        &a.id,
+    ]);
+    let training = submitted["task_id"].as_str().unwrap();
+    let done = s.json(&["jobs", "wait", training, "--timeout", "30"]);
+    assert_eq!(done["record"]["status"], "succeeded", "{done}");
+    assert_eq!(done["results"]["schema_version"], 5);
+    let models = s.json(&["research", "models", "--training", training]);
+    let listed = s.json(&[
+        "jobs",
+        "wait",
+        models["task_id"].as_str().unwrap(),
+        "--timeout",
+        "30",
+    ]);
+    assert_eq!(listed["record"]["status"], "succeeded", "{listed}");
+    assert_eq!(
+        listed["results"]["details"]["catalogue"]["models"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let pool = w
+        .save_pool(analytics_core::pool::PoolDefinition {
+            schema_version: 3,
+            name: "B only".into(),
+            coverage: analytics_core::DateRange {
+                start: "2007-01-02".parse().unwrap(),
+                end: "2010-01-12".parse().unwrap(),
+            },
+            expression: analytics_core::pool::PoolExpression::Symbols {
+                instruments: ["SH600001".into()].into(),
+            },
+            adjustments: vec![],
+        })
+        .unwrap();
+    let plan = BacktestPlan {
+        schema_version: 1,
+        training: training.parse().unwrap(),
+        models: ModelSelection::Rolling,
+        pool_version: pool.id,
+        range: analytics_core::DateRange {
+            start: "2010-01-02".parse().unwrap(),
+            end: "2010-01-12".parse().unwrap(),
+        },
+        market: m.id,
+        actions: a.id,
+        benchmark: t.benchmark.clone(),
+        quality_policy: t.quality_policy.clone(),
+        execution: t.execution_settings(),
+        event_check_policy: Default::default(),
+    };
+    let path = w.resolve("B.json");
+    std::fs::write(&path, serde_json::to_vec_pretty(&plan).unwrap()).unwrap();
+    let preview = s.json(&[
+        "research",
+        "backtest-inputs",
+        "--plan",
+        path.to_str().unwrap(),
+    ]);
+    let preview = s.json(&[
+        "jobs",
+        "wait",
+        preview["task_id"].as_str().unwrap(),
+        "--timeout",
+        "30",
+    ]);
+    assert_eq!(preview["record"]["status"], "succeeded", "{preview}");
+    assert_eq!(
+        preview["results"]["details"]["training_data_required"],
+        false
+    );
+    let backtest = s.json(&[
+        "research",
+        "model-backtest",
+        "--plan",
+        path.to_str().unwrap(),
+    ]);
+    let backtest = s.json(&[
+        "jobs",
+        "wait",
+        backtest["task_id"].as_str().unwrap(),
+        "--timeout",
+        "30",
+    ]);
+    assert_eq!(backtest["record"]["status"], "succeeded", "{backtest}");
+    assert_eq!(backtest["results"]["schema_version"], 19);
+}

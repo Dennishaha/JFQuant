@@ -1723,3 +1723,109 @@ fn formula_editor_saves_revisions_applies_mixed_selection_and_submits_preview() 
         WorkerCommand::PreviewFactor { .. }
     ));
 }
+
+#[test]
+fn independent_training_and_backtest_editors_dispatch_separate_plans() {
+    use analytics_workflow::research::backtest::independent::{Job, TrainingPlan};
+    let (mut h, _tmp) = platform_harness(Panel::Research);
+    let w = h.app.state.platform.workspace.as_ref().unwrap().clone();
+    let (market, actions, t) = analytics_workflow::testing::synthetic(&w);
+    h.app.state.platform.template = t;
+    h.app.state.platform.market = market.id;
+    h.app.state.platform.actions = actions.id;
+    h.ctx.all_styles_mut(|s| s.animation_time = 0.);
+    h.click("独立训练与跨池回测");
+    h.click("从当前配置生成训练计划");
+    let plan: TrainingPlan =
+        serde_json::from_str(&h.app.state.platform.independent_training_editor).unwrap();
+    let raw: serde_json::Value = serde_json::to_value(&plan).unwrap();
+    assert!(!raw["schedule"].to_string().contains("test"));
+    h.click("提交独立训练");
+    let command = h.commands.try_recv().unwrap();
+    assert!(
+        matches!(command,WorkerCommand::ExecuteWorkflow {request,..} if matches!(&*request,analytics_workflow::WorkflowRequest::Independent {request} if matches!(&**request,Job::Train {..})))
+    );
+    h.finish_recorded_task();
+    h.app.state.platform.training_job = uuid::Uuid::new_v4().to_string();
+    h.app.state.platform.start = "2011-01-01".into();
+    h.app.state.platform.end = "2012-01-01".into();
+    h.click("生成独立回测计划");
+    let backtest: serde_json::Value =
+        serde_json::from_str(&h.app.state.platform.independent_backtest_editor).unwrap();
+    assert_eq!(backtest["range"]["start"], "2011-01-01");
+    assert_eq!(backtest["models"]["mode"], "rolling");
+}
+
+#[test]
+fn independent_app_trains_a_queries_models_previews_and_executes_b() {
+    use analytics_workflow::research::backtest::independent::BacktestPlan;
+    let (mut h, _tmp) = platform_harness(Panel::Research);
+    let w = h.app.state.platform.workspace.as_ref().unwrap().clone();
+    let (m, a, mut t) = analytics_workflow::testing::synthetic(&w);
+    let pool = |name: &str, id: &str| {
+        w.save_pool(analytics_core::pool::PoolDefinition {
+            schema_version: 3,
+            name: name.into(),
+            coverage: analytics_core::DateRange {
+                start: "2007-01-02".parse().unwrap(),
+                end: "2010-01-12".parse().unwrap(),
+            },
+            expression: analytics_core::pool::PoolExpression::Symbols {
+                instruments: [id.to_owned()].into(),
+            },
+            adjustments: vec![],
+        })
+        .unwrap()
+        .id
+    };
+    t.pool_version = pool("App train A", "SH600000");
+    let b = pool("App execute B", "SH600001");
+    let (worker, events) = worker::spawn_in_workspace(h.ctx.clone(), Some(w.root().to_owned()));
+    h.app.worker = worker;
+    h.app.events = events;
+    h.app.state.platform.template = t;
+    h.app.state.platform.datasets = w.datasets().unwrap();
+    h.app.state.platform.market = m.id;
+    h.app.state.platform.actions = a.id;
+    h.app.state.platform.start = "2010-01-02".into();
+    h.app.state.platform.end = "2010-01-12".into();
+    h.ctx.all_styles_mut(|s| s.animation_time = 0.);
+    h.click("独立训练与跨池回测");
+    h.click("从当前配置生成训练计划");
+    h.click("提交独立训练");
+    h.wait_for(|app| !app.state.busy() && app.state.platform.details["schema_version"] == 5);
+    let training = h.app.state.platform.training_job.clone();
+    assert!(!training.is_empty());
+    h.click("查询已训练模型");
+    h.wait_for(|app| !app.state.busy() && app.state.platform.details["training"] == training);
+    h.click("生成独立回测计划");
+    let mut p: BacktestPlan =
+        serde_json::from_str(&h.app.state.platform.independent_backtest_editor).unwrap();
+    p.pool_version = b;
+    h.app.state.platform.independent_backtest_editor = serde_json::to_string_pretty(&p).unwrap();
+    h.frame(vec![
+        Event::PointerMoved(Pos2::new(800., 600.)),
+        Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: Vec2::new(0., -700.),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Unknown,
+            modifiers: Default::default(),
+        },
+    ]);
+    for _ in 0..16 {
+        h.frame(vec![]);
+    }
+    h.click("预检B与模型切换");
+    h.wait_for(|app| {
+        !app.state.busy() && app.state.platform.details["model_selection"]["segments"].is_array()
+    });
+    h.click("提交独立模型回测");
+    h.wait_for(|app| {
+        !app.state.busy() && app.state.platform.details["stages"]["backtest"] == "completed"
+    });
+    assert_eq!(
+        h.app.state.platform.details["cross_pool"]["label"],
+        "完全未见标的回测"
+    );
+}

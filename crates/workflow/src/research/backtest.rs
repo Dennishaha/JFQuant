@@ -5,6 +5,8 @@ mod adjustment;
 mod akquant;
 mod data;
 mod execution;
+/// Fit-only models and independent cross-pool prediction/account tasks.
+pub mod independent;
 mod portfolio;
 mod predictions;
 /// Shared dated input qualification and audit artifacts.
@@ -52,7 +54,7 @@ const SUPPORTED_RESEARCH_INPUTS: [&str; 15] = [
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// Current strict integer-share research result format.
-pub const RESEARCH_SCHEMA_VERSION: u32 = 18;
+pub const RESEARCH_SCHEMA_VERSION: u32 = 19;
 
 /// A result cannot be interpreted using the current research contract.
 #[derive(Debug, thiserror::Error)]
@@ -156,14 +158,16 @@ pub fn validate_result(
     value: &serde_json::Value,
 ) -> std::result::Result<(), UnsupportedResultFormat> {
     let validate = || -> Result<()> {
-        if !matches!(value["schema_version"].as_u64(), Some(16..=18))
+        if !matches!(value["schema_version"].as_u64(), Some(16..=19))
             || value["execution"]["mode"] != "akquant_ex_date"
             || !matches!(
                 value["backtest_status"].as_str(),
                 Some("completed" | "no_valid_trades" | "execution_data_not_ready")
             )
         {
-            return Err("requires research schema 16/17/18 and akquant_ex_date execution".into());
+            return Err(
+                "requires research schema 16/17/18/19 and akquant_ex_date execution".into(),
+            );
         }
         let hash = |value: &serde_json::Value| {
             value.as_str().is_some_and(|s| {
@@ -469,17 +473,35 @@ pub fn validate_result(
         let masks = selection["selections"]
             .as_array()
             .ok_or("missing sample mask manifests")?;
+        let independent = execution["independent"]["contract"] == "independent-v1";
+        if independent && value["schema_version"] != 19 {
+            return Err("independent execution requires schema 19".into());
+        }
         let expected: usize = frozen
             .iter()
-            .map(|f| if f.actual.validation.is_some() { 3 } else { 2 })
+            .map(|f| {
+                if independent {
+                    1
+                } else if f.actual.validation.is_some() {
+                    3
+                } else {
+                    2
+                }
+            })
             .sum();
         if masks.len() != expected {
             return Err("incomplete sample mask manifests".into());
+        }
+        if independent {
+            independent::validate_execution(&execution["independent"], &frozen)?;
         }
         let mut seen = BTreeSet::new();
         for mask in masks {
             let index = mask["fold"].as_u64().ok_or("missing mask fold")? as usize;
             let split = mask["split"].as_str().ok_or("missing mask split")?;
+            if independent && split != "prediction" {
+                return Err("independent backtest must only contain prediction masks".into());
+            }
             let fold = frozen.get(index).ok_or("mask fold outside schedule")?;
             let range = match split {
                 "train" => Some(&fold.actual.train),
@@ -957,6 +979,9 @@ pub fn backtest_from_predictions(
     rights_policy: analytics_core::rights::Policy,
     context: &analytics_core::task::TaskContext,
 ) -> Result<()> {
+    if source.join("model_selection.json").is_file() {
+        return independent::replay_predictions(source, output, actions, rights_policy, context);
+    }
     let (training_root, _) = predictions::training_source(source)?;
     let training: serde_json::Value =
         serde_json::from_slice(&fs::read(training_root.join("training.json"))?)?;
@@ -983,6 +1008,11 @@ pub fn backtest_from_predictions(
 }
 
 fn run_scoped(request: &ResearchRequest) -> Result<()> {
+    run_scoped_mode(request, None)
+}
+
+fn run_scoped_mode(request: &ResearchRequest, mode: Option<&independent::Execution>) -> Result<()> {
+    let predicting = mode.is_some_and(|m| m.predicting());
     let context = analytics_core::task::TaskContext::current();
     let training_source_request = request.clone();
     context.check()?;
@@ -992,7 +1022,9 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         let existing = serde_json::from_slice(&fs::read(request.output.join("summary.json"))?)?;
         validate_result(&existing)?;
     }
-    request.schedule.validate()?;
+    if mode.is_none() {
+        request.schedule.validate()?;
+    }
     if request.action_policy.exercise_optional_cash_choice {
         return Err("unsupported active cash-choice policy".into());
     }
@@ -1069,24 +1101,32 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         None => dataset.pool(&request.universe_id)?,
     };
     let last = dataset.calendar.last().copied().ok_or("empty calendar")?;
-    let folds = match request
-        .schedule
-        .resolve_with_warmup(&dataset.calendar, request.warmup_sessions())
-    {
-        Ok(f) => f,
-        Err(e) => {
-            save(
-                request.output.join("execution_readiness.json"),
-                &serde_json::json!({"ready":false,"reason":e,"checks":{"schedule":"failed","events":"not_run"}}),
-            )?;
-            return if request.audit_only {
-                Ok(())
-            } else {
-                Err(format!("data_not_ready: {e}").into())
-            };
+    let folds = if let Some(m) = mode {
+        m.folds.clone()
+    } else {
+        match request
+            .schedule
+            .resolve_with_warmup(&dataset.calendar, request.warmup_sessions())
+        {
+            Ok(f) => f,
+            Err(e) => {
+                save(
+                    request.output.join("execution_readiness.json"),
+                    &serde_json::json!({"ready":false,"reason":e,"checks":{"schedule":"failed","events":"not_run"}}),
+                )?;
+                return if request.audit_only {
+                    Ok(())
+                } else {
+                    Err(format!("data_not_ready: {e}").into())
+                };
+            }
         }
     };
-    let history_start = folds.iter().map(|f| f.actual.train.start).min().unwrap();
+    let history_start = if predicting {
+        folds[0].actual.test.start
+    } else {
+        folds.iter().map(|f| f.actual.train.start).min().unwrap()
+    };
     let first_required = history_start;
     let execution_start = folds[0].actual.test.start;
     let needed_end = if request.train_only {
@@ -1261,9 +1301,10 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
     {
         admission_issues.push("sample input reads failed; see sample_readiness.issues".into());
     }
-    if sample_readiness["issues"]
-        .as_object()
-        .is_some_and(|m| m.is_empty())
+    if !predicting
+        && sample_readiness["issues"]
+            .as_object()
+            .is_some_and(|m| m.is_empty())
         && sample_readiness["folds"].as_array().is_some_and(|rows| {
             rows.iter().enumerate().any(|(i, r)| {
                 r["training_label_rows"] == 0
@@ -1389,12 +1430,14 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         sample_readiness["issues"]
             .as_object()
             .is_some_and(|m| !m.is_empty())
-            || sample_readiness["folds"].as_array().is_some_and(|rs| {
-                rs.iter().enumerate().any(|(i, r)| {
-                    r["training_label_rows"] == 0
-                        || (folds[i].actual.validation.is_some() && r["validation_label_rows"] == 0)
-                })
-            }),
+            || (!predicting
+                && sample_readiness["folds"].as_array().is_some_and(|rs| {
+                    rs.iter().enumerate().any(|(i, r)| {
+                        r["training_label_rows"] == 0
+                            || (folds[i].actual.validation.is_some()
+                                && r["validation_label_rows"] == 0)
+                    })
+                })),
         sample_readiness.to_string(),
     );
     add_check(
@@ -1596,27 +1639,63 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         ids = request.config.factor_ids.clone();
     }
     let formula_version = registry.selection_version(&ids)?;
-    let signature = format!(
-        "sha256:{:x}",
-        analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(&(
-            source.clone(),
-            &market_content_sha256,
+    let source_contract = if mode.is_some() {
+        independent::input_signature(
+            &dataset,
+            &members,
+            &request.benchmark,
+            relevant_start,
+            needed_end,
+        )?
+    } else {
+        market_content_sha256.clone()
+    };
+    let signature = if mode.is_some() {
+        crate::signature(&(
+            "independent-factor-input-v1",
+            &source_contract,
             &ids,
             &formula_version,
             &pool,
-            &request.pool_signature,
             &request.benchmark,
-            &price_inputs,
             &request.price_basis,
-            &request.factor_set,
             &quality_snapshot,
             request.warmup_sessions(),
-            "open-next-2,pit-mask,explicit-or-provider-price-input-v3"
-        ))?))
-    );
+        ))?
+    } else {
+        let legacy_signature = format!(
+            "sha256:{:x}",
+            analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(&(
+                source.clone(),
+                &market_content_sha256,
+                &ids,
+                &formula_version,
+                &pool,
+                &request.pool_signature,
+                &request.benchmark,
+                &price_inputs,
+                &request.price_basis,
+                &request.factor_set,
+                &quality_snapshot,
+                request.warmup_sessions(),
+                "open-next-2,pit-mask,explicit-or-provider-price-input-v3"
+            ))?))
+        );
+        legacy_signature
+    };
     let historical_basis_signature =
         if request.price_basis == analytics_core::research_quality::PriceBasis::Verified {
-            adjustment_basis_signature(action_book.as_ref(), relevant_start, needed_end)?
+            if mode.is_some() {
+                let mut scoped = action_book.clone();
+                if let Some(book) = scoped.as_mut() {
+                    book.actions.retain(|a| {
+                        members.contains_key(&a.instrument) || a.instrument == request.benchmark
+                    });
+                }
+                adjustment_basis_signature(scoped.as_ref(), relevant_start, needed_end)?
+            } else {
+                adjustment_basis_signature(action_book.as_ref(), relevant_start, needed_end)?
+            }
         } else {
             "provider-quotations;events-not-training-input".into()
         };
@@ -1630,13 +1709,22 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
     if let Some(source) = &request.reuse_training {
         let artifact: serde_json::Value =
             serde_json::from_slice(&fs::read(source.join("training.json"))?)?;
-        validate_training_artifact(&artifact)?;
+        if !predicting {
+            validate_training_artifact(&artifact)?;
+        }
         execution["training_provenance"] = serde_json::json!({"training_signature":artifact["training_signature"],"models":artifact["models"].as_array().ok_or("missing model receipts")?.iter().map(|m|serde_json::json!({"fold":m["fold"],"model_sha256":m["model_sha256"]})).collect::<Vec<_>>(),"feature_order":artifact["feature_order"]});
     }
     if let Some(source) = &request.reuse_predictions {
         let original: serde_json::Value =
             serde_json::from_slice(&fs::read(source.join("execution.json"))?)?;
         execution["prediction_provenance"] = serde_json::json!({"source":source,"manifest_sha256":file_hash(&source.join("prediction_manifest.json"))?,"producer_runtime":original["runtime_signature"],"producer_dependencies":original["dependency_signature"],"training":original["training_provenance"]});
+    }
+    if let Some(m) = mode
+        && let Some(c) = &m.catalogue
+    {
+        execution["training_provenance"] = serde_json::json!({"training_signature":c.training_signature,"models":c.models,"feature_order":c.plan.config.factor_ids});
+        execution["independent"] =
+            serde_json::json!({"catalogue":c,"segments":m.segments,"contract":"independent-v1"});
     }
     if let Some(policy) = &request.rights_policy {
         execution["rights_policy"] = serde_json::to_value(policy)?;
@@ -1791,7 +1879,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
     let mut feature_issues = Vec::new();
     let mut sample_selections = Vec::new();
     fs::create_dir_all(request.output.join("sample_masks"))?;
-    for (index, f) in folds.iter().enumerate() {
+    for (index, f) in folds.iter().enumerate().filter(|_| !predicting) {
         let selection = data::matrix_range_with_policy(
             &cache,
             &f.actual.train,
@@ -1887,7 +1975,11 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
             &request.schedule,
             &folds,
             &historical_basis_signature,
-            dataset.source_map(),
+            if mode.is_some() {
+                serde_json::json!({"input_signature":source_contract})
+            } else {
+                serde_json::to_value(dataset.source_map())?
+            },
             &ids,
             crate::research::worker::runtime_signature(),
             crate::research::worker::dependency_signature()
@@ -1960,16 +2052,20 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         context.check()?;
         let f = &resolved.actual;
         let year = f.test.start.year();
-        let train = data::matrix_range_with_policy(
-            &cache,
-            &f.train,
-            &ids,
-            &dataset.calendar,
-            &request.quality_policy,
-        )?
-        .matrix;
+        let train = if predicting {
+            data::empty_matrix(ids.len())
+        } else {
+            data::matrix_range_with_policy(
+                &cache,
+                &f.train,
+                &ids,
+                &dataset.calendar,
+                &request.quality_policy,
+            )?
+            .matrix
+        };
         let valid = match &f.validation {
-            Some(v) => {
+            Some(v) if !predicting => {
                 data::matrix_range_with_policy(
                     &cache,
                     v,
@@ -1979,7 +2075,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
                 )?
                 .matrix
             }
-            None => data::empty_matrix(ids.len()),
+            _ => data::empty_matrix(ids.len()),
         };
         let test = if request.train_only {
             None
@@ -1992,7 +2088,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
                 &request.quality_policy,
             )?)
         };
-        let test_matrix = if request.train_only {
+        let test_matrix = if request.train_only || predicting {
             data::empty_matrix(ids.len())
         } else {
             data::matrix_range_with_policy(
@@ -2033,7 +2129,10 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
             },
         };
         let (model_path, _manifest_path) = if let Some(source) = &request.reuse_training {
-            let fold = source.join(format!("fold-{fold_index:04}"));
+            let model_index = mode
+                .filter(|m| m.predicting())
+                .map_or(fold_index, |m| m.segments[fold_index].model_index);
+            let fold = source.join(format!("fold-{model_index:04}"));
             (fold.join("model.txt"), fold.join("manifest.json"))
         } else {
             let (tx, rx) = mpsc::channel();
@@ -2098,6 +2197,18 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
                 .collect::<Vec<_>>()
         };
         drop(split);
+        if let Some(m) = mode
+            && m.predicting()
+        {
+            independent::record_predictions(
+                request,
+                m,
+                fold_index,
+                &dataset.calendar,
+                &test.meta.rows,
+                &scores,
+            )?;
+        }
         let (ic_rows, ic_scores): (Vec<_>, Vec<_>) = test
             .meta
             .rows
@@ -2161,12 +2272,31 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         save(request.output.join("fold_reports.json"), &reports)?;
     }
     if request.reuse_training.is_none() {
+        save(request.output.join("fit_calendar.json"), &dataset.calendar)?;
         let models:Vec<_>=(0..folds.len()).map(|i|{let folder=request.reuse_training.as_ref().unwrap_or(&request.output).join(format!("fold-{i:04}"));Ok(serde_json::json!({"fold":i,"model_sha256":file_hash(&folder.join("model.txt"))?,"manifest_sha256":file_hash(&folder.join("manifest.json"))?}))}).collect::<Result<_>>()?;
         let mut original = training_source_request;
         original.train_only = false;
         original.config.factor_ids = ids.clone();
         original.reuse_training = None;
         let mut training = serde_json::json!({"schema_version":if request.config.factor_refs.is_empty(){3}else{4},"runtime_signature":crate::research::worker::runtime_signature(),"dependency_signature":crate::research::worker::dependency_signature(),"factor_set":request.factor_set,"price_basis":request.price_basis,"status":"trained","request":original,"factor_signature":signature,"models":models,"adjustment_basis_signature":historical_basis_signature,"training_signature":training_signature,"source_map":dataset.source_map(),"resolved_folds":folds,"formula_version":formula_version,"feature_order":ids});
+        let fit_cache_receipts = (history_start.year()..=needed_end.year())
+            .map(|year| {
+                let paths = [
+                    format!("factor-cache/{year}.json"),
+                    format!("factor-cache/{year}.bin"),
+                ];
+                paths
+                    .into_iter()
+                    .map(|name| Ok((name.clone(), file_hash(&request.output.join(name))?)))
+                    .collect::<Result<BTreeMap<_, _>>>()
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect::<BTreeMap<_, _>>();
+        training["fit_cache_receipts"] = serde_json::to_value(fit_cache_receipts)?;
+        training["fit_calendar_sha256"] =
+            file_hash(&request.output.join("fit_calendar.json"))?.into();
         training["source_warnings"] = serde_json::to_value(
             admission
                 .checks
@@ -2180,7 +2310,13 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
             "sha256:{:x}",
             analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(&training)?))
         ));
-        save(request.output.join("training.json"), &training)?;
+        if let Some(m) = mode
+            && let Some(plan) = &m.training_plan
+        {
+            independent::publish_training(request, plan, &dataset, &folds, &training)?;
+        } else {
+            save(request.output.join("training.json"), &training)?;
+        }
         if request.train_only {
             return Ok(());
         }
@@ -2369,8 +2505,10 @@ fn finish(
         .cloned()
         .collect();
     save(request.output.join("execution_warnings.json"), &warnings)?;
+    let cross_pool =
+        independent::scope_report(&request.output, &audit["execution"]["independent"])?;
     let summary = serde_json::json!({
-        "unsupported_event_policy":"warn_and_skip","event_simulation_complete":warnings.is_empty(),"skipped_event_count":skipped.len(),"skipped_events":skipped,"schema_version":RESEARCH_SCHEMA_VERSION,"stages":{"training":"completed","prediction":"completed","backtest":"completed"},"execution_diagnostics":diagnostics,"backtest_status":if has_trades{"completed"}else{"no_valid_trades"},"execution_warnings":warnings,"input_kind":if audit["source"]["synthetic_fixture"]==true{"synthetic_fixture"}else{"public_market"},"method":"JFQuant Rust factors + Python LightGBM + AKQuant",
+        "cross_pool":cross_pool,"unsupported_event_policy":"warn_and_skip","event_simulation_complete":warnings.is_empty(),"skipped_event_count":skipped.len(),"skipped_events":skipped,"schema_version":RESEARCH_SCHEMA_VERSION,"stages":{"training":"completed","prediction":"completed","backtest":"completed"},"execution_diagnostics":diagnostics,"backtest_status":if has_trades{"completed"}else{"no_valid_trades"},"execution_warnings":warnings,"input_kind":if audit["source"]["synthetic_fixture"]==true{"synthetic_fixture"}else{"public_market"},"method":"JFQuant Rust factors + Python LightGBM + AKQuant",
         "fold_reports":reports,"annual_reports":annual,"aggregate":aggregate,"source":audit["source"],
         "formula_version":audit["formula_version"],"signature":run_signature,"factor_signature":factor_signature,
         "admission":serde_json::from_slice::<serde_json::Value>(&fs::read(request.output.join("admission.json"))?)?,"sample_selection":serde_json::from_slice::<serde_json::Value>(&fs::read(request.output.join("sample_selection.json"))?)?,"research_scope":if request.quality_policy.strictness==analytics_core::research_quality::ResearchStrictness::QualifiedOnly{"经数据筛选的研究股票池"}else{"原股票池"},

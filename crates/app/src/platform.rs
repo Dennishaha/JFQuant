@@ -25,6 +25,9 @@ pub struct PlatformState {
     pub action_review_editor: String,
     /// Previously completed training task ID.
     pub training_job: String,
+    pub independent_training_editor: String,
+    pub independent_backtest_editor: String,
+    pub independent_models: Value,
     pub prediction_job: String,
     pub rights_policy: analytics_core::rights::Policy,
     pub action_review_instrument: String,
@@ -86,6 +89,9 @@ impl Default for PlatformState {
             schedule_editor: String::new(),
             date_editor_valid: true,
             training_job: String::new(),
+            independent_training_editor: String::new(),
+            independent_backtest_editor: String::new(),
+            independent_models: Value::Null,
             prediction_job: String::new(),
             rights_policy: Default::default(),
             action_review_editor: String::new(),
@@ -698,6 +704,12 @@ pub fn research_panel(
     _registry: &analytics_factor::FactorRegistry,
 ) {
     ui.heading("研究流程");
+    if state.platform.details["input_kind"] == "synthetic_fixture" {
+        ui.colored_label(
+            crate::theme::semantic(ui.ctx()).warning,
+            "合成演示数据，仅验证流程与账本，不代表真实市场收益。",
+        );
+    }
     crate::quality_ui::reasons(ui, &state.platform.details);
     if state.platform.workspace.is_none() {
         ui.label("先创建或打开工作区。");
@@ -1032,7 +1044,8 @@ pub fn research_panel(
                 });
         },
     );
-    ui.label("不复权成交、整数股、T+1、跨年持续账户；训练与账户执行资料分别检查。");
+    independent_panel(ui, state, worker, cancel_slot, enabled);
+    ui.label("原研究流程：不复权成交、整数股、T+1、跨年持续账户。");
     let ready = enabled && !state.platform.market.is_empty();
     let execute_ready = ready && !state.platform.actions.is_empty();
     let mut run = None;
@@ -1438,6 +1451,41 @@ fn show_results(ui: &mut egui::Ui, value: &Value) {
             d["valid_signals"], d["filled_events"], d["rejected_events"]
         ));
     }
+    if let Some(label) = value["cross_pool"]["label"].as_str() {
+        ui.strong(label);
+        ui.small("曾见/未见按当日所用模型的实际训练及验证样本判断；贡献来自同一个连续账户。");
+        for group in value["cross_pool"]["groups"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            ui.label(format!(
+                "{}：预测 {} 行，有标签 {} 行，Rank IC {}，损益贡献 {} 元，费用 {} 元",
+                if group["group"] == "seen" {
+                    "曾见标的"
+                } else {
+                    "未见标的"
+                },
+                group["prediction_rows"],
+                group["labeled_rows"],
+                group["rank_ic"],
+                group["pnl_contribution_cny"],
+                group["execution_fees_cny"]
+            ));
+        }
+        ui.collapsing("冻结模型切换计划", |ui| {
+            for segment in value["cross_pool"]["model_segments"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                ui.label(format!(
+                    "{} → {} · {}",
+                    segment["range"]["start"], segment["range"]["end"], segment["model_id"]
+                ));
+            }
+        });
+    }
     if value["input_kind"] == "synthetic_fixture" {
         ui.colored_label(
             crate::theme::semantic(ui.ctx()).warning,
@@ -1607,4 +1655,70 @@ fn show_nav(ui: &mut egui::Ui, path: &Path, synthetic: bool) {
         ui.painter()
             .add(egui::Shape::line(points, egui::Stroke::new(1.5, color)));
     }
+}
+
+fn independent_panel(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    worker: &WorkerHandle,
+    cancel_slot: &mut Option<Cancellation>,
+    enabled: bool,
+) {
+    use analytics_workflow::research::backtest::independent::{
+        BacktestPlan, Job, ModelSelection, TrainingPlan,
+    };
+    egui::CollapsingHeader::new("独立训练与跨池回测").default_open(false).show(ui,|ui| {
+        ui.label("训练模型：A 股票池与训练/验证周期，不需要测试日期。");
+        ui.horizontal(|ui| {
+            if ui.button("从当前配置生成训练计划").clicked() {state.platform.independent_training_editor=serde_json::to_string_pretty(&TrainingPlan::from_template(&state.platform.template)).unwrap();}
+            if ui.button("导出独立训练JSON").clicked() && let Some(p)=rfd::FileDialog::new().set_file_name("fit.json").save_file() {match serde_json::from_str::<TrainingPlan>(&state.platform.independent_training_editor) {Ok(plan)=>{if let Err(e)=fs::write(p,serde_json::to_vec_pretty(&plan).unwrap()){state.platform.error=Some(e.to_string());}},Err(e)=>state.platform.error=Some(e.to_string())}}
+            if ui.button("导入独立训练JSON").clicked() && let Some(p)=rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file() {match fs::read_to_string(p) {Ok(v)=>state.platform.independent_training_editor=v,Err(e)=>state.platform.error=Some(e.to_string())}}
+        });
+        ui.collapsing("独立训练计划JSON", |ui| {
+            ui.add(egui::TextEdit::multiline(&mut state.platform.independent_training_editor).id_salt("independent_fit_plan").desired_rows(9).desired_width(f32::INFINITY).hint_text("TrainingPlan JSON：single / manual / rolling；仅训练与验证日期"));
+        });
+        if let Ok(p)=serde_json::from_str::<TrainingPlan>(&state.platform.independent_training_editor) {ui.small(format!("训练A：{} · {:?}",p.pool_version,p.schedule));}
+        let mut action=None;
+        ui.add_enabled_ui(enabled && !state.platform.market.is_empty(),|ui|{ui.horizontal(|ui| {
+            if ui.button("预检训练A输入").clicked(){action=Some((false,false));}
+            if ui.button("补采训练A公司行动").clicked(){action=Some((true,false));}
+            if ui.button("提交独立训练").clicked(){action=Some((false,true));}
+        });});
+        if let Some((prepare,train))=action {match serde_json::from_str::<TrainingPlan>(&state.platform.independent_training_editor) {
+            Ok(plan)=>{let market=state.platform.market.clone();let actions=(!state.platform.actions.is_empty()).then(||state.platform.actions.clone());let job=if train {Job::Train {plan:Box::new(plan),market,actions}} else {Job::TrainingInputs {plan:Box::new(plan),market,actions,prepare,announcements:false}};submit(state,worker,cancel_slot,WorkflowRequest::Independent {request:Box::new(job)});},
+            Err(e)=>state.platform.error=Some(e.to_string()),
+        }}
+        ui.separator();ui.label("模型回测：独立选择 B 股票池、行情版本、日期与账户；默认滚动使用已可用模型。");
+        ui.horizontal(|ui| {
+            ui.label("模型训练任务ID");ui.text_edit_singleline(&mut state.platform.training_job);
+            if ui.add_enabled(enabled,egui::Button::new("查询已训练模型")).clicked() {match state.platform.training_job.parse() {Ok(training)=>submit(state,worker,cancel_slot,WorkflowRequest::Independent {request:Box::new(Job::Models {training})}),Err(_)=>state.platform.error=Some("训练任务ID无效".into())}}
+        });
+        ui.horizontal(|ui| {
+            if ui.button("生成独立回测计划").clicked() {let result=(|| -> Result<BacktestPlan,String> {Ok(BacktestPlan {schema_version:1,training:state.platform.training_job.parse().map_err(|_|"请先填写训练任务ID")?,models:ModelSelection::Rolling,pool_version:state.platform.template.pool_version.clone(),range:analytics_core::DateRange {start:state.platform.start.parse().map_err(|_|"开始日期无效")?,end:state.platform.end.parse().map_err(|_|"结束日期无效")?},market:state.platform.market.clone(),actions:state.platform.actions.clone(),benchmark:state.platform.template.benchmark.clone(),quality_policy:state.platform.template.quality_policy.clone(),execution:state.platform.template.execution_settings(),event_check_policy:state.platform.template.event_check_policy})})();match result {Ok(p)=>state.platform.independent_backtest_editor=serde_json::to_string_pretty(&p).unwrap(),Err(e)=>state.platform.error=Some(e)}}
+            if ui.button("导出独立回测JSON").clicked() && let Some(p)=rfd::FileDialog::new().set_file_name("backtest-B.json").save_file() {match serde_json::from_str::<BacktestPlan>(&state.platform.independent_backtest_editor) {Ok(plan)=>{if let Err(e)=fs::write(p,serde_json::to_vec_pretty(&plan).unwrap()){state.platform.error=Some(e.to_string());}},Err(e)=>state.platform.error=Some(e.to_string())}}
+            if ui.button("导入独立回测JSON").clicked() && let Some(p)=rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file() {match fs::read_to_string(p) {Ok(v)=>state.platform.independent_backtest_editor=v,Err(e)=>state.platform.error=Some(e.to_string())}}
+        });
+        ui.small("回测 JSON 的 pool_version / range / market 独立于训练。models 默认 {\"mode\":\"rolling\"}；固定模型使用 {\"mode\":\"single\",\"model_id\":\"查询所得ID\"}。");
+        if let Ok(mut p)=serde_json::from_str::<BacktestPlan>(&state.platform.independent_backtest_editor) {
+            let mut changed=false;
+            ui.horizontal(|ui| {ui.label("回测B股票池");changed|=ui.text_edit_singleline(&mut p.pool_version).changed();});
+            ui.horizontal(|ui| {ui.label("回测B行情");let old=p.market.clone();select_data(ui,"independent_b_market","market",&mut p.market,&state.platform.datasets);changed|=p.market!=old;ui.label("回测B公司行动");let old=p.actions.clone();select_data(ui,"independent_b_actions","actions",&mut p.actions,&state.platform.datasets);changed|=p.actions!=old;});
+            ui.small(format!("回测日期：{} → {}（在回测JSON中修改）",p.range.start,p.range.end));
+            egui::ComboBox::from_id_salt("independent_model_selection").selected_text(match &p.models {ModelSelection::Rolling=>"默认滚动切换".to_owned(),ModelSelection::Single {model_id}=>format!("固定模型 {model_id}")}).show_ui(ui,|ui| {
+                if ui.selectable_label(matches!(p.models,ModelSelection::Rolling),"默认滚动切换").clicked() {p.models=ModelSelection::Rolling;changed=true;}
+                if state.platform.independent_models["training"]==p.training.to_string() {for model in state.platform.independent_models["catalogue"]["models"].as_array().into_iter().flatten() {let id=model["id"].as_str().unwrap_or("");if ui.selectable_label(matches!(&p.models,ModelSelection::Single {model_id} if model_id==id),format!("{} · 截止 {} · 可用 {}",id,model["fit_data_end"],model["available_from"])).clicked() {p.models=ModelSelection::Single {model_id:id.into()};changed=true;}}}
+            });
+            if changed {state.platform.independent_backtest_editor=serde_json::to_string_pretty(&p).unwrap();}
+        }
+        ui.collapsing("独立回测计划JSON",|ui| {ui.add(egui::TextEdit::multiline(&mut state.platform.independent_backtest_editor).id_salt("independent_backtest_plan").desired_rows(9).desired_width(f32::INFINITY));});
+        let mut action=None;
+        ui.add_enabled_ui(enabled,|ui| {ui.horizontal(|ui| {
+            if ui.button("预检B与模型切换").clicked(){action=Some((false,false));}
+            if ui.button("补采回测B公司行动").clicked(){action=Some((true,false));}
+            if ui.button("提交独立模型回测").clicked(){action=Some((false,true));}
+        });});
+        if let Some((prepare,execute))=action {match serde_json::from_str::<BacktestPlan>(&state.platform.independent_backtest_editor) {
+            Ok(plan)=>{let job=if execute {Job::Backtest {plan:Box::new(plan)}} else {Job::BacktestInputs {plan:Box::new(plan),prepare,announcements:false}};submit(state,worker,cancel_slot,WorkflowRequest::Independent {request:Box::new(job)});},Err(e)=>state.platform.error=Some(e.to_string()),
+        }}
+    });
 }

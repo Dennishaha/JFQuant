@@ -69,6 +69,11 @@ pub enum WorkerCommand {
         draft: crate::custom_factors::FactorDraft,
         cancel: Cancellation,
     },
+    CheckFactors {
+        task: Uuid,
+        request: crate::input_check::CheckRequest,
+        cancel: Cancellation,
+    },
     EvaluateFactors {
         task: Uuid,
         request: crate::factor_evaluation::EvaluationRequest,
@@ -188,6 +193,10 @@ pub enum WorkerEvent {
     FactorPreviewed {
         task: Uuid,
         preview: crate::custom_factors::FormulaPreview,
+    },
+    FactorsChecked {
+        task: Uuid,
+        report: crate::input_check::InputCheckReport,
     },
     FactorsEvaluated {
         task: Uuid,
@@ -325,6 +334,7 @@ impl WorkerCommand {
             Self::ExportQuery { task, .. } => (*task, TaskKind::Export),
             Self::PreviewFactor { task, .. }
             | Self::EvaluateFactors { task, .. }
+            | Self::CheckFactors { task, .. }
             | Self::RunPipeline { task, .. } => (*task, TaskKind::Pipeline),
             Self::TrainFromCache { task, .. } => (*task, TaskKind::Training),
             #[cfg(any(test, feature = "test-support"))]
@@ -447,6 +457,7 @@ impl Worker {
                 | WorkerEvent::Exported { task, .. }
                 | WorkerEvent::FactorPreviewed { task, .. }
                 | WorkerEvent::FactorsEvaluated { task, .. }
+                | WorkerEvent::FactorsChecked { task, .. }
                 | WorkerEvent::PipelineFinished { task, .. }
                 | WorkerEvent::TrainingFinished { task, .. } => Some(task),
                 _ => None,
@@ -675,6 +686,42 @@ impl Worker {
                             .map_err(|e| e.to_string())?;
                         }
                         worker.emit_result(WorkerEvent::FactorPreviewed { task, preview })?;
+                        Ok(())
+                    },
+                );
+            }
+            WorkerCommand::CheckFactors {
+                task,
+                mut request,
+                cancel,
+            } => {
+                request.input.market_path = self.path(request.input.market_path);
+                request.input.universe_path = self.path(request.input.universe_path);
+                request.input.output_dir = if let Some(root) = &self.root {
+                    root.join(format!(".jfquant/runs/{task}"))
+                } else {
+                    self.path(request.input.output_dir)
+                };
+                self.record_request = serde_json::to_value(&request).ok();
+                self.active_cancel = Some(cancel.clone());
+                self.run_task(
+                    task,
+                    TaskKind::Pipeline,
+                    "检查组合数据".into(),
+                    |worker| {
+                        let (progress, thread) = worker.pipeline_progress(task);
+                        let result = crate::input_check::run(&request, progress, cancel)
+                            .map_err(pipeline_error_message);
+                        let _ = thread.join();
+                        let report = result?;
+                        if let Some(root) = &worker.root {
+                            crate::atomic_json(
+                                &root.join(format!(".jfquant/runs/{task}/artifacts.json")),
+                                &report,
+                            )
+                            .map_err(|e| e.to_string())?;
+                        }
+                        worker.emit_result(WorkerEvent::FactorsChecked { task, report })?;
                         Ok(())
                     },
                 );
@@ -919,6 +966,7 @@ pub fn pipeline_error_message(error: PipelineError) -> String {
 /// Maps a pipeline stage event to a display line.
 fn describe_pipeline_event(event: &PipelineEvent) -> String {
     match event {
+        PipelineEvent::CheckingInputs { stage } => format!("组合检查：{stage}"),
         PipelineEvent::LoadingMarket => "正在加载行情与股票池…".into(),
         PipelineEvent::MarketLoaded { rows } => format!("行情加载完成：{rows} 行"),
         PipelineEvent::Factors(FactorEvent::Started { total_factors }) => {

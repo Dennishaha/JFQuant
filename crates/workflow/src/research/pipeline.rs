@@ -22,10 +22,7 @@ use analytics_core::{
     Date, DateRange, MarketRow, Objective, TrainRequest, TrainingArtifact, chronological_date_split,
 };
 use analytics_engine::DuckDbEngine;
-use analytics_factor::{
-    FactorEvent, FactorExecutor, FactorRegistry, FactorRunArtifact, FactorRunRequest,
-    InMemoryFactorExecutor, Panel, next_return_labels,
-};
+use analytics_factor::{FactorEvent, FactorRegistry, FactorRunArtifact, Panel, next_return_labels};
 use arrow_array::{Array, ArrayRef, Date32Array, Float64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType as ArrowDataType, Field, Schema};
 use chrono::NaiveDate;
@@ -86,6 +83,11 @@ pub enum PipelineEvent {
     MarketLoaded {
         /// Rows kept after `is_trading` and listing-date filtering.
         rows: usize,
+    },
+    /// Current shared input-check phase.
+    CheckingInputs {
+        /// Machine-readable phase name.
+        stage: String,
     },
     /// Factor execution progress, forwarded from `analytics-factor`.
     Factors(FactorEvent),
@@ -232,34 +234,71 @@ pub fn run_factor_pipeline(
         &request.factor_refs,
         &request.factor_ids,
     )?;
-    for id in &request.factor_ids {
-        let spec = registry
-            .get(id)
-            .ok_or_else(|| PipelineError::InvalidInput(format!("unknown factor {id}")))?;
-        let panel_len = panel.instrument_id.len();
-        for column in &spec.input_columns {
-            panel
-                .columns
-                .entry(column.clone())
-                .or_insert_with(|| vec![None; panel_len]);
-        }
-    }
+    let input_columns =
+        crate::input_check::parquet::market_columns(&mut engine, &request.market_path)?;
+    let absent = crate::input_check::parquet::missing_inputs(
+        &registry,
+        &request.factor_ids,
+        &input_columns,
+        &mut panel,
+    )?;
     let formula_version = registry.selection_version(&request.factor_ids)?;
-    let executor = InMemoryFactorExecutor {
-        registry,
+    let snapshot = snapshot_hash(&request.market_path, &request.universe_path)?;
+    let labels = next_return_labels(
+        &panel.instrument_id,
+        &panel.trade_date,
+        &panel.columns["adj_close"],
+    )?;
+    let calendar = panel
+        .trade_date
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let expected = rows
+        .iter()
+        .zip(&eligible)
+        .filter(|(_, m)| **m)
+        .map(|(r, _)| (r.instrument_id.clone(), r.trade_date))
+        .collect();
+    let mut prepared = crate::input_check::parquet::Prepared {
+        rows: rows.clone(),
+        eligible: eligible.clone(),
         panel: panel.clone(),
+        registry,
+        calendar,
+        labels,
+        input_hash: snapshot.clone(),
+        absent,
+        expected,
+        cache_context: serde_json::json!({"adapter":if request.factor_refs.is_empty(){"pipeline-legacy-v1"}else{"parquet-history-v1"},"price_basis":"adjusted_with_raw_fallback","data":snapshot,"horizon":1,"policy":analytics_core::research_quality::ResearchQualityPolicy::default()}),
     };
-    let factor_progress = forward_events(&progress, PipelineEvent::Factors);
-    let mut factor_artifact = executor.compute(
-        FactorRunRequest {
-            date_range: request.date_range.clone(),
-            universe_id: request.universe_id.clone(),
-            factor_ids: request.factor_ids.clone(),
-            formula_version: formula_version.clone(),
-        },
-        factor_progress,
+    let check_request = crate::input_check::CheckRequest {
+        expected_input_hash: Some(snapshot),
+        expected_source_stamp: None,
+        input: request.clone().into(),
+        horizon: 1,
+        policy: Default::default(),
+    };
+    let (report, artifact) = crate::input_check::parquet::run_prepared(
+        &check_request,
+        &mut prepared,
+        progress.clone(),
         cancel.clone(),
     )?;
+    if !report.ready() {
+        return Err(PipelineError::InvalidInput(
+            "data_not_ready: input check failed; see input-check.json".into(),
+        ));
+    }
+    let mut factor_artifact = artifact
+        .ok_or_else(|| PipelineError::InvalidInput("factor computation did not complete".into()))?;
+    crate::atomic_json(
+        &request.output_dir.join("factor-receipt.json"),
+        &report.artifact,
+    )
+    .map_err(|e| PipelineError::InvalidInput(e.to_string()))?;
     check_cancel(&cancel)?;
 
     let _ = progress.send(PipelineEvent::WritingArtifacts);

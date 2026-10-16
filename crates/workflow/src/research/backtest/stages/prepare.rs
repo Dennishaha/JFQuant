@@ -7,6 +7,24 @@ pub(super) fn prepare(
 ) -> Result<Option<PreparedResearch>> {
     let predicting = mode.is_some_and(|m| m.predicting());
     let training_source_request = request.clone();
+    let mut selected_request = request.clone();
+    if selected_request.config.factor_ids.is_empty() {
+        selected_request.config.factor_ids = selected_request
+            .factor_registry()?
+            .all()
+            .filter(|s| {
+                !matches!(
+                    s.expression,
+                    analytics_factor::FactorExpr::Unsupported { .. }
+                ) && s
+                    .input_columns
+                    .iter()
+                    .all(|c| SUPPORTED_RESEARCH_INPUTS.contains(&c.as_str()))
+            })
+            .map(|s| s.id.clone())
+            .collect();
+    }
+    let request = &selected_request;
     context.check()?;
     request.config.validate()?;
     request.quality_policy.validate()?;
@@ -93,13 +111,39 @@ pub(super) fn prepare(
         None => dataset.pool(&request.universe_id)?,
     };
     let last = dataset.calendar.last().copied().ok_or("empty calendar")?;
-    let folds = if let Some(m) = mode {
-        m.folds.clone()
+    let tail = if request.train_only {
+        last
     } else {
-        match request
-            .schedule
-            .resolve_with_warmup(&dataset.calendar, request.warmup_sessions())
-        {
+        dataset
+            .last_valid_close_date(&request.benchmark)?
+            .ok_or("benchmark has no valid closing price")?
+            .min(last)
+    };
+    let folds = if let Some(m) = mode {
+        let mut folds = m.folds.clone();
+        if !request.train_only {
+            folds.retain(|f| f.actual.test.start <= tail);
+            for f in &mut folds {
+                f.actual.test.end = f.actual.test.end.min(tail);
+            }
+            if folds.is_empty() {
+                return Err("no backtest trading dates after tail adjustment".into());
+            }
+        }
+        folds
+    } else {
+        let resolved = if request.train_only {
+            request
+                .schedule
+                .resolve_for_training(&dataset.calendar, request.warmup_sessions())
+        } else {
+            request.schedule.resolve_for_input_check(
+                &dataset.calendar,
+                request.warmup_sessions(),
+                tail,
+            )
+        };
+        match resolved {
             Ok(f) => f,
             Err(e) => {
                 save(
@@ -145,7 +189,16 @@ pub(super) fn prepare(
         !ranges.is_empty()
     });
     let registry = request.factor_registry()?;
-    let quality_snapshot = quality::qualify_with_registry(
+    let (check_plan, required_inputs) = input_report::plan(
+        request,
+        &mut dataset,
+        &registry,
+        &pool,
+        &folds,
+        predicting,
+        &market_content_sha256,
+    )?;
+    let quality_snapshot = quality::qualify_scoped(
         &dataset,
         &pool,
         &request.quality_policy,
@@ -155,12 +208,16 @@ pub(super) fn prepare(
         },
         &request.config.factor_ids,
         &registry,
+        Some(&check_plan),
     )?;
     save(request.output.join("quality.json"), &quality_snapshot)?;
     pool = quality_snapshot.effective_pool.clone();
     // Both factor and execution workers consume exactly this frozen derived pool.
     let mut effective_request = request.clone();
     effective_request.pool = Some(pool.clone());
+    effective_request.schedule = Schedule::Manual {
+        folds: folds.iter().map(|f| f.actual.clone()).collect(),
+    };
     let request = &effective_request;
     let pool_problem = pool.validate().err();
     let members = dataset.align_membership(&pool);
@@ -204,9 +261,11 @@ pub(super) fn prepare(
     let mut allowed_market_missing = BTreeMap::new();
     for symbol in members.keys().chain(std::iter::once(&request.benchmark)) {
         let mut problems = vec![];
-        for field in [
-            "open", "high", "low", "close", "volume", "amount", "vwap", "factor",
-        ] {
+        let fields: Vec<&str> = required_inputs
+            .get(symbol)
+            .map(|m| m.keys().map(String::as_str).collect())
+            .unwrap_or_default();
+        for field in fields {
             if let Err(e) = dataset.research_field(
                 symbol,
                 field,
@@ -235,7 +294,11 @@ pub(super) fn prepare(
         admission_issues.push("required market fields unavailable; see market_issues".into());
     }
     let mut factor_basis_issues = BTreeMap::new();
-    for symbol in members.keys().chain(std::iter::once(&request.benchmark)) {
+    for symbol in members
+        .keys()
+        .chain(std::iter::once(&request.benchmark))
+        .filter(|s| required_inputs.contains_key(*s))
+    {
         context.check()?;
         if let Err(error) = dataset
             .validate_factor_basis(symbol)
@@ -247,7 +310,9 @@ pub(super) fn prepare(
     let mut adjustment_issues = BTreeMap::new();
     {
         let mut symbols: BTreeSet<_> = members.keys().cloned().collect();
-        if !dataset.is_price_index(&request.benchmark).unwrap_or(false) {
+        if required_inputs.contains_key(&request.benchmark)
+            && !dataset.is_price_index(&request.benchmark).unwrap_or(false)
+        {
             symbols.insert(request.benchmark.clone());
         }
         match &action_book {
@@ -258,13 +323,28 @@ pub(super) fn prepare(
                         .get(id)
                         .and_then(|rs| rs.iter().map(|r| r.end).max())
                         .map_or(needed_end, |d| d.min(needed_end));
-                    adjustment_issues.extend(adjustment::adjustment_issues(
-                        &dataset,
-                        book,
-                        &BTreeSet::from([id.clone()]),
-                        relevant_start,
-                        until,
-                    )?);
+                    if let Some(fields) = required_inputs.get(id) {
+                        let dates: BTreeSet<_> = fields.values().flatten().copied().collect();
+                        let mut intervals: Vec<(usize, usize)> = vec![];
+                        for day in dates {
+                            if let Some((_, end)) = intervals.last_mut()
+                                && *end + 1 == day
+                            {
+                                *end = day;
+                            } else {
+                                intervals.push((day, day));
+                            }
+                        }
+                        for (a, b) in intervals {
+                            adjustment_issues.extend(adjustment::adjustment_issues(
+                                &dataset,
+                                book,
+                                &BTreeSet::from([id.clone()]),
+                                dataset.calendar[a],
+                                dataset.calendar[b].min(until),
+                            )?);
+                        }
+                    }
                 }
             }
             None => {
@@ -282,7 +362,9 @@ pub(super) fn prepare(
     let settlement_issues = BTreeMap::<String, String>::new();
     let successor_issues = BTreeMap::<String, String>::new();
     let benchmark_check = (|| -> Result<()> {
-        dataset.validate_factor_basis(&request.benchmark)?;
+        if required_inputs.contains_key(&request.benchmark) {
+            dataset.validate_factor_basis(&request.benchmark)?;
+        }
         Ok(())
     })();
     let sample_readiness =
@@ -549,6 +631,14 @@ pub(super) fn prepare(
         affected_factors: request.config.factor_ids.clone(),
     });
     save(request.output.join("admission.json"), &admission)?;
+    input_report::inputs(
+        request,
+        check_plan,
+        &dataset,
+        &required_inputs,
+        &admission,
+        admission_issues.is_empty(),
+    )?;
     if !admission_issues.is_empty() {
         let affected_factor_ids: Vec<_> =
             if factor_basis_issues.is_empty() && adjustment_issues.is_empty() {

@@ -1108,7 +1108,7 @@ fn relocated_workspace_reuses_models_from_verified_relative_market_version() {
 }
 
 #[test]
-fn changed_model_parameters_reuse_verified_factor_shards_and_corruption_blocks() {
+fn changed_model_parameters_reuse_verified_factor_shards_and_corruption_recomputes() {
     let tmp = tempfile::tempdir().unwrap();
     let w = Workspace::open(tmp.path()).unwrap();
     let (m, a, mut t) = demo::create(&w).unwrap();
@@ -1157,11 +1157,8 @@ fn changed_model_parameters_reuse_verified_factor_shards_and_corruption_blocks()
             actions: Some(a.id),
         },
     );
-    assert!(
-        out.unwrap_err()
-            .to_string()
-            .contains("factor shard content/identity mismatch")
-    );
+    out.unwrap();
+    assert!(shared.join("features.parquet").metadata().unwrap().len() > 7);
 }
 
 #[test]

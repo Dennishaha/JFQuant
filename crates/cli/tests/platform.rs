@@ -979,6 +979,8 @@ fn date_overrides_preview_and_no_validation_run_share_the_public_schedule() {
         "recipe.json",
         "--market",
         &m.id,
+        "--actions",
+        &a.id,
         "--train-start",
         "2007-01-02",
         "--train-end",
@@ -1399,7 +1401,28 @@ fn custom_formula_library_mixed_evaluation_training_and_revision_receipts() {
         output_dir: "unused".into(),
         training: Default::default(),
     };
+    let check = analytics_workflow::input_check::CheckRequest {
+        expected_input_hash: None,
+        expected_source_stamp: None,
+        input: input.clone().into(),
+        horizon: 5,
+        policy: Default::default(),
+    };
+    write("check.json", &serde_json::to_value(check).unwrap());
+    let checked = s.json(&["factors", "check", "--request", "check.json"]);
+    let check_id = checked["task_id"].as_str().unwrap().parse().unwrap();
+    let checked = s.client.wait(check_id, Some(15)).unwrap();
+    assert_eq!(checked["results"]["ready"], true);
+    assert_eq!(checked["results"]["factors"].as_array().unwrap().len(), 3);
+    assert_eq!(checked["results"]["artifact"]["cache_hit"], false);
+    assert!(
+        !s.client
+            .root
+            .join(format!(".jfquant/runs/{check_id}/model.txt"))
+            .exists()
+    );
     let evaluation = analytics_workflow::factor_evaluation::EvaluationRequest {
+        policy: Default::default(),
         input: input.clone().into(),
         horizon: 5,
         quantiles: 3,
@@ -1423,6 +1446,7 @@ fn custom_formula_library_mixed_evaluation_training_and_revision_receipts() {
     )
     .unwrap();
     assert_eq!(report["factors"][0]["factor_id"], saved.id);
+    assert_eq!(report["computation_receipt"]["cache_hit"], true);
     assert_eq!(report["factors"].as_array().unwrap().len(), 3);
     write("pipeline.json", &serde_json::to_value(input).unwrap());
     let train = s.json(&["factors", "run", "--request", "pipeline.json"]);

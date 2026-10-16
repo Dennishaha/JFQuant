@@ -315,7 +315,12 @@ pub(super) fn checks(
             if id != &request.benchmark {
                 analytics_core::market_rules::classify(id)?;
             }
-            let prices = ["open", "high", "low", "close"]
+            let fields: &[&str] = if id == &request.benchmark {
+                &["close"]
+            } else {
+                &["open", "high", "low", "close"]
+            };
+            let prices = fields
                 .iter()
                 .map(|name| dataset.research_raw_field(id, name, false))
                 .collect::<std::io::Result<Vec<_>>>()?;
@@ -345,8 +350,9 @@ pub(super) fn checks(
                     .enumerate()
                     .filter(|(_, d)| dates.contains(**d))
                 {
-                    if !close.get(day).is_some_and(|v| v.is_finite() && v > 0.)
-                        || (day > 0 && !close.get(day - 1).is_some_and(|v| v.is_finite() && v > 0.))
+                    if day == 0
+                        || !close.get(day).is_some_and(|v| v.is_finite() && v > 0.)
+                        || !close.get(day - 1).is_some_and(|v| v.is_finite() && v > 0.)
                     {
                         return Err("benchmark return missing".into());
                     }

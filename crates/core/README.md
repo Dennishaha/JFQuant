@@ -66,3 +66,10 @@ ModelManifest继续读取格式2，并在格式3保留有序factor_refs和factor
 避免类型化读取/序列化时丢失自定义修订和算子收据。core不依赖因子执行器，具体版本和AST校验
 由factor/workflow执行；格式3训练schema哈希同时绑定特征名称、类型、顺序和固定定义。
 验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow custom_factors`及CLI混合因子集成测试。
+
+`Schedule::resolve_for_input_check` 仅缩短预测/回测尾部并保留 requested；原 resolve API 的严格
+覆盖规则保留。训练/验证不缩短。AdmissionReport 允许合格样本模式下明确排除证券的 market
+缺失检查，但损坏、冲突、执行依赖及未执行检查仍不能被该策略放行。
+
+`Schedule::resolve_for_training` 只要求训练和验证的日历覆盖；未执行的未来测试窗口不影响
+独立训练准入。滚动训练沿用既有折选择及历史种子，检查报告只包含实际使用的阶段。

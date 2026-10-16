@@ -159,6 +159,44 @@ mod duckdb_backend {
             self.load_factor_rows(market_path, universe_path, universe_id, date_range, true)
         }
 
+        /// Expected historical members on market-calendar dates, including missing bars.
+        /// The connection and returned iteration remain owned by the calling worker.
+        pub fn factor_expected_members(
+            &mut self,
+            market_path: &Path,
+            universe_path: &Path,
+            universe_id: &str,
+            end: analytics_core::Date,
+        ) -> Result<Vec<(String, analytics_core::Date)>> {
+            let market = escape_sql_literal(&parquet_source(market_path));
+            let universe = escape_sql_literal(&parquet_source(universe_path));
+            let sql = format!(
+                "WITH calendar AS (SELECT DISTINCT trade_date FROM read_parquet('{market}',union_by_name=true) WHERE trade_date <= ?), ids AS (SELECT DISTINCT instrument_id FROM read_parquet('{universe}',union_by_name=true) WHERE universe_id=?), dated AS (SELECT ids.instrument_id,c.trade_date,u.is_member,row_number() OVER (PARTITION BY ids.instrument_id,c.trade_date ORDER BY u.trade_date DESC) AS rn FROM ids CROSS JOIN calendar c LEFT JOIN read_parquet('{universe}',union_by_name=true) u ON u.instrument_id=ids.instrument_id AND u.universe_id=? AND u.trade_date<=c.trade_date) SELECT instrument_id,CAST(trade_date AS VARCHAR) FROM dated WHERE rn=1 AND is_member ORDER BY trade_date,instrument_id"
+            );
+            let mut statement = self
+                .connection
+                .prepare(&sql)
+                .map_err(|e| EngineError::DuckDb(e.to_string()))?;
+            let mut rows = statement
+                .query(duckdb::params![end.to_string(), universe_id, universe_id])
+                .map_err(|e| EngineError::DuckDb(e.to_string()))?;
+            let mut output = Vec::new();
+            while let Some(row) = rows
+                .next()
+                .map_err(|e| EngineError::DuckDb(e.to_string()))?
+            {
+                let id = row
+                    .get::<_, String>(0)
+                    .map_err(|e| EngineError::DuckDb(e.to_string()))?;
+                let date = parse_date(
+                    row.get::<_, String>(1)
+                        .map_err(|e| EngineError::DuckDb(e.to_string()))?,
+                )?;
+                output.push((id, date));
+            }
+            Ok(output)
+        }
+
         fn load_factor_rows(
             &mut self,
             market_path: &Path,
@@ -172,9 +210,49 @@ mod duckdb_backend {
                 .map_err(|error| EngineError::InvalidRequest(error.to_string()))?;
             let market = parquet_source(market_path);
             let universe = parquet_source(universe_path);
+            let columns: std::collections::BTreeSet<_> = self
+                .describe(&format!(
+                    "SELECT * FROM read_parquet('{}', union_by_name=true)",
+                    escape_sql_literal(&market)
+                ))?
+                .into_iter()
+                .map(|c| c.name)
+                .collect();
+            let optional = |name: &str, ty: &str| {
+                if columns.contains(name) {
+                    format!("m.\"{name}\"")
+                } else {
+                    format!("NULL::{ty}")
+                }
+            };
+            let mut projected = vec!["m.instrument_id".to_owned(), "m.trade_date".to_owned()];
+            for name in [
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "amount",
+                "adj_open",
+                "adj_high",
+                "adj_low",
+                "adj_close",
+            ] {
+                projected.push(format!("{} AS {name}", optional(name, "DOUBLE")));
+            }
+            projected.push(format!(
+                "{} AS is_trading",
+                optional("is_trading", "BOOLEAN")
+            ));
+            projected.push(format!(
+                "{} AS listing_date",
+                optional("listing_date", "DATE")
+            ));
+            let projected = projected.join(", ");
+
             let sql = format!(
                 "WITH joined AS (
-                    SELECT m.*, u.is_member,
+                    SELECT {projected}, u.is_member,
                         row_number() OVER (PARTITION BY m.instrument_id, m.trade_date
                             ORDER BY u.trade_date DESC) AS membership_rank
                     FROM read_parquet('{market}', union_by_name=true) m

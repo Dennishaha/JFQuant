@@ -26,6 +26,15 @@ impl Workspace {
         if workbench.exists() {
             return Ok(serde_json::from_slice(&fs::read(workbench)?)?);
         }
+        if dir.join("input-check.json").is_file()
+            && dir.join("outcome.json").is_file()
+            && !dir.join("training.json").exists()
+            && !dir.join("summary.json").exists()
+        {
+            return Ok(serde_json::from_slice(&fs::read(
+                dir.join("outcome.json"),
+            )?)?);
+        }
         let training = dir.join("training.json");
         let training_value = if training.exists() {
             {

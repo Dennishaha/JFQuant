@@ -32,6 +32,11 @@ pub(super) fn sign(
     let price_symbols: BTreeSet<String> = members
         .keys()
         .chain(std::iter::once(&request.benchmark))
+        .filter(|id| {
+            dataset
+                .checked_fields(id)
+                .is_none_or(|fields| !fields.is_empty())
+        })
         .cloned()
         .collect();
     let price_inputs = dataset.price_inputs(&price_symbols)?;

@@ -39,7 +39,11 @@ struct Journal {
     plan: MaintenancePlan,
 }
 fn archive_entry(name: &str) -> bool {
-    Uuid::parse_str(name).is_ok() || matches!(name, ".factor-shards-v1" | ".predictions-v1")
+    Uuid::parse_str(name).is_ok()
+        || matches!(
+            name,
+            ".factor-shards-v1" | ".predictions-v1" | ".factor-artifacts-v2"
+        )
 }
 fn root(path: &Path) -> Result<PathBuf> {
     let root = path.canonicalize()?;
@@ -311,14 +315,22 @@ mod tests {
     #[test]
     fn shared_caches_are_archived_without_active_aliases() {
         let (_temp, w, _) = fixture();
-        for name in [".factor-shards-v1", ".predictions-v1"] {
+        for name in [
+            ".factor-shards-v1",
+            ".predictions-v1",
+            ".factor-artifacts-v2",
+        ] {
             let path = w.root().join(".jfquant/runs").join(name);
             fs::create_dir(&path).unwrap();
             fs::write(path.join("cache.bin"), b"derived").unwrap();
         }
         let result = apply(w.root()).unwrap();
         let archive = Path::new(result["archive"].as_str().unwrap());
-        for name in [".factor-shards-v1", ".predictions-v1"] {
+        for name in [
+            ".factor-shards-v1",
+            ".predictions-v1",
+            ".factor-artifacts-v2",
+        ] {
             assert!(!w.root().join(".jfquant/runs").join(name).exists());
             assert_eq!(
                 fs::read(archive.join("runs").join(name).join("cache.bin")).unwrap(),

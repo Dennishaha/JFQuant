@@ -32,6 +32,7 @@ use thiserror::Error;
 
 pub mod alpha158;
 pub mod audit;
+pub mod dependencies;
 mod formulas;
 pub mod operators;
 mod parser;

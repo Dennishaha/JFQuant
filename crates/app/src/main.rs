@@ -8,6 +8,7 @@
 #![warn(missing_docs)]
 
 mod custom_factors;
+mod factor_checks;
 mod factor_groups;
 mod panels;
 mod platform;

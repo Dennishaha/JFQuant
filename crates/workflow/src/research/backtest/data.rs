@@ -355,11 +355,44 @@ pub(super) fn prepare_year(
         .max()
         .unwrap_or(1);
     let warmup = first.saturating_sub(756.max(lookback));
-    let benchmark_open = dataset.field(benchmark, "open")?;
-    let benchmark_close = dataset.field(benchmark, "close")?;
-    let benchmark_factor = dataset.field(benchmark, "factor")?;
-    let (b_anchor, _, _) =
-        input_scales(dataset.uses_supplier_prices(benchmark), &benchmark_factor)?;
+    let inputs: std::collections::BTreeSet<_> = ids
+        .iter()
+        .filter_map(|id| registry.get(id))
+        .flat_map(|s| s.input_columns.iter().map(String::as_str))
+        .collect();
+    let raw_inputs: std::collections::BTreeSet<_> = inputs
+        .iter()
+        .flat_map(|s| {
+            crate::input_check::raw_inputs(s)
+                .into_iter()
+                .map(|(f, _)| f)
+        })
+        .chain(["open", "close", "factor"])
+        .collect();
+    let empty = || DailyField {
+        start: 0,
+        values: vec![None; dataset.calendar.len()],
+    };
+    let benchmark_needed = inputs.iter().any(|s| s.starts_with("banchmarkindex"));
+    let benchmark_open = if inputs.contains("banchmarkindexopen") {
+        dataset.field(benchmark, "open")?
+    } else {
+        empty()
+    };
+    let benchmark_close = if inputs.contains("banchmarkindexclose") {
+        dataset.field(benchmark, "close")?
+    } else {
+        empty()
+    };
+    let b_anchor = if benchmark_needed {
+        input_scales(
+            dataset.uses_supplier_prices(benchmark),
+            &dataset.field(benchmark, "factor")?,
+        )?
+        .0
+    } else {
+        1.
+    };
     let mut panel = Panel {
         instrument_id: Vec::new(),
         trade_date: Vec::new(),
@@ -391,6 +424,12 @@ pub(super) fn prepare_year(
     let mut rows = Vec::new();
     for (instrument, windows) in members {
         analytics_core::task::TaskContext::current().check()?;
+        if dataset
+            .checked_fields(instrument)
+            .is_some_and(|fields| fields.is_empty())
+        {
+            continue;
+        }
         if !windows.iter().any(|w| w.start < end && w.end >= warmup) {
             continue;
         }
@@ -400,7 +439,11 @@ pub(super) fn prepare_year(
         ] {
             raw.insert(
                 name,
-                dataset.research_field(instrument, name, allow_missing && name != "factor")?,
+                if raw_inputs.contains(name) {
+                    dataset.research_field(instrument, name, allow_missing && name != "factor")?
+                } else {
+                    empty()
+                },
             );
         }
         let (anchor, volume_scale, amount_scale) =
@@ -519,19 +562,26 @@ pub(super) fn prepare_year(
         .unwrap_or(cache)
         .join(".factor-shards-v1")
         .join(shard_signature.trim_start_matches("sha256:"));
-    if shared.join("manifest.json").is_file() {
-        let manifest: serde_json::Value =
-            serde_json::from_slice(&fs::read(shared.join("manifest.json"))?)?;
-        if manifest["schema_version"] != 1
-            || manifest["signature"] != shard_signature
-            || manifest["features"] != serde_json::to_value(ids)?
-            || manifest["rows"] != rows.len()
-            || manifest["sha256"] != file_hash(&shared.join("features.parquet"))?
-        {
-            return Err("factor shard content/identity mismatch".into());
+    type CachedFeatures = (Vec<f32>, BTreeMap<String, usize>);
+    let cached = (|| -> Result<Option<CachedFeatures>> {
+        if shared.join("manifest.json").is_file() {
+            let manifest: serde_json::Value =
+                serde_json::from_slice(&fs::read(shared.join("manifest.json"))?)?;
+            if manifest["schema_version"] != 1
+                || manifest["signature"] != shard_signature
+                || manifest["features"] != serde_json::to_value(ids)?
+                || manifest["rows"] != rows.len()
+                || manifest["sha256"] != file_hash(&shared.join("features.parquet"))?
+            {
+                return Err("factor shard content/identity mismatch".into());
+            }
+            let features = read_features(&shared.join("features.parquet"), ids, rows.len())?;
+            let finite_counts = serde_json::from_value(manifest["finite_counts"].clone())?;
+            return Ok(Some((features, finite_counts)));
         }
-        let features = read_features(&shared.join("features.parquet"), ids, rows.len())?;
-        let finite_counts = serde_json::from_value(manifest["finite_counts"].clone())?;
+        Ok(None)
+    })();
+    if let Ok(Some((features, finite_counts))) = cached {
         write_local(&feature_path, &features)?;
         save(
             meta_path,
@@ -616,6 +666,9 @@ pub(super) fn prepare_year(
         &serde_json::json!({"schema_version":1,"loaded_history_start":dataset.calendar[warmup],"recursive_seed_rule":"first_finite_observation","signature":shard_signature,"features":ids,"rows":meta.rows.len(),"finite_counts":meta.finite_counts,"sha256":file_hash(&staging.join("features.parquet"))?}),
     )?;
     analytics_core::task::TaskContext::current().check()?;
+    if shared.exists() {
+        fs::remove_dir_all(&shared)?;
+    }
     fs::rename(staging, &shared)?;
     save(
         cache.join(format!("{year}.receipt.json")),

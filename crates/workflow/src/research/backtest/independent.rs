@@ -858,9 +858,18 @@ fn preview_for_pool(
             _ => {}
         }
     }
-    let segments = c.segments(&plan.models, &plan.range, &dataset.calendar)?;
+    let mut effective_range = plan.range.clone();
+    effective_range.end = effective_range.end.min(
+        dataset
+            .last_valid_close_date(&plan.benchmark)?
+            .ok_or("benchmark has no valid close")?,
+    );
+    effective_range
+        .validate()
+        .map_err(|_| "no backtest trading dates after tail adjustment")?;
+    let segments = c.segments(&plan.models, &effective_range, &dataset.calendar)?;
     Ok(
-        json!({"schema_version":1,"catalogue":c,"segments":segments,"range":plan.range,"training_data_required":false}),
+        json!({"schema_version":1,"catalogue":c,"segments":segments,"range":plan.range,"effective_range":effective_range,"training_data_required":false}),
     )
 }
 /// Run a separately selected B universe using frozen models; never calls a trainer.
@@ -893,7 +902,7 @@ pub fn backtest(
     r.initial_cash_cny = plan.execution.initial_cash_cny;
     r.pool_exit_policy = plan.execution.pool_exit_policy;
     r.event_check_policy = plan.event_check_policy;
-    let folds = segments
+    let mut folds = segments
         .iter()
         .map(|s| {
             let m = &c.models[s.model_index];
@@ -922,6 +931,9 @@ pub fn backtest(
             }
         })
         .collect::<Vec<_>>();
+    if let Some(last) = folds.last_mut() {
+        last.requested.test.end = plan.range.end;
+    }
     r.schedule = Schedule::Manual {
         folds: folds.iter().map(|f| f.actual.clone()).collect(),
     };
@@ -1129,21 +1141,22 @@ pub fn execute(
                 .transpose()?;
             let dataset = DailyDataset::open(w.resolve(&m.path))?;
             let windows = plan.schedule.resolve(&dataset.calendar)?;
-            let registry = FactorRegistry::resolve(
-                plan.factor_set,
-                &plan.config.factor_refs,
-                &plan.config.factor_ids,
-            )?;
-            let warmup = analytics_factor::selection::warmup_sessions(
-                plan.factor_set,
-                &plan.config.factor_refs,
-            );
             if let Job::TrainingInputs {
                 prepare,
                 announcements,
                 ..
             } = job
+                && *prepare
             {
+                let registry = FactorRegistry::resolve(
+                    plan.factor_set,
+                    &plan.config.factor_refs,
+                    &plan.config.factor_ids,
+                )?;
+                let warmup = analytics_factor::selection::warmup_sessions(
+                    plan.factor_set,
+                    &plan.config.factor_refs,
+                );
                 let range = DateRange {
                     start: windows.iter().map(|f| f.train.start).min().unwrap(),
                     end: windows.iter().map(FitWindow::end).max().unwrap(),
@@ -1172,7 +1185,16 @@ pub fn execute(
             r.pool_signature = crate::signature(&frozen["pool"])?;
             r.universe_id = plan.pool_version.clone();
             r.corporate_actions = a.map(|v| w.resolve(v.path));
+            r.audit_only = matches!(job, Job::TrainingInputs { .. });
             train(&r, plan, context)?;
+            if r.audit_only {
+                let mut report: Value =
+                    serde_json::from_slice(&fs::read(out.join("input-check.json"))?)?;
+                report["training_data_required"] = true.into();
+                report["windows"] = serde_json::to_value(windows)?;
+                return Ok(report);
+            }
+
             Ok(serde_json::from_slice(&fs::read(
                 out.join("training.json"),
             )?)?)
@@ -1188,6 +1210,7 @@ pub fn execute(
                 announcements,
                 ..
             } = job
+                && *prepare
             {
                 let registry = FactorRegistry::resolve(
                     c.plan.factor_set,
@@ -1220,7 +1243,16 @@ pub fn execute(
             r.pool_signature = crate::signature(&frozen["pool"])?;
             r.universe_id = plan.pool_version.clone();
             r.corporate_actions = Some(w.resolve(a.path));
+            r.audit_only = matches!(job, Job::BacktestInputs { .. });
             backtest(&r, &source, plan, &frozen["selection"], context)?;
+            if r.audit_only {
+                let mut report: Value =
+                    serde_json::from_slice(&fs::read(out.join("input-check.json"))?)?;
+                report["training_data_required"] = false.into();
+                report["model_selection"] = frozen["selection"].clone();
+                return Ok(report);
+            }
+
             Ok(serde_json::from_slice(&fs::read(
                 out.join("summary.json"),
             )?)?)
@@ -1470,8 +1502,13 @@ pub(super) fn input_signature(
     )?);
     for id in symbols {
         analytics_core::task::TaskContext::current().check()?;
+        let scope = dataset.checked_days(&id, None);
+        if scope.as_ref().is_some_and(|days| days.is_empty()) {
+            continue;
+        }
         let identities = dates
             .iter()
+            .filter(|(day, _)| scope.as_ref().is_none_or(|days| days.contains(day)))
             .map(|(_, d)| dataset.exchange_symbol(&id, *d))
             .collect::<std::io::Result<Vec<_>>>()?;
         hasher.update(serde_json::to_vec(&(
@@ -1479,15 +1516,26 @@ pub(super) fn input_signature(
             dataset.uses_supplier_prices(&id),
             identities,
         ))?);
-        for field in [
-            "open", "high", "low", "close", "volume", "amount", "vwap", "factor",
-        ] {
-            let values = dataset.research_field(&id, field, field != "factor")?;
+        for field in dataset.checked_fields(&id).unwrap_or_else(|| {
+            vec![
+                "open".into(),
+                "high".into(),
+                "low".into(),
+                "close".into(),
+                "volume".into(),
+                "amount".into(),
+                "vwap".into(),
+                "factor".into(),
+            ]
+        }) {
+            let values = dataset.research_field(&id, &field, field != "factor")?;
+            let field_scope = dataset.checked_days(&id, Some(&field));
             let selected = dates
                 .iter()
-                .map(|(i, _)| values.get(*i))
+                .filter(|(i, _)| field_scope.as_ref().is_none_or(|days| days.contains(i)))
+                .map(|(i, _)| (*i, values.get(*i)))
                 .collect::<Vec<_>>();
-            hasher.update(serde_json::to_vec(&(field, selected))?);
+            hasher.update(serde_json::to_vec(&(&field, selected))?);
             if field == "factor" {
                 hasher.update(serde_json::to_vec(&values.values.iter().flatten().next())?);
             }

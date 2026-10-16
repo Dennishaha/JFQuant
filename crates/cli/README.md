@@ -1,4 +1,4 @@
-当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议24、采集协议13、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
+当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议26、采集协议13、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
 
 # analytics-cli / jfquant
 
@@ -75,7 +75,7 @@ jfquant data refresh --template workflow.json --market MARKET_ID --workers 3 --r
 DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli
 ```
 
-服务协议24；升级时先等待或取消旧版本任务，再停止旧服务。旧协议客户端不能连接新协议服务。采集协议13与公司行动格式7同步升级；特征顺序和公式版本未改变。
+服务协议26；升级时先等待或取消旧版本任务，再停止旧服务。旧协议客户端不能连接新协议服务。采集协议13与公司行动格式7同步升级；特征顺序和公式版本未改变。
 
 分区位于不同本地工作区时，可用`--sources-manifest sources.json`汇总覆盖，或`--reuse-shards-manifest sources.json`复用；JSON数组元素为当前工作区任务UUID字符串，或`{"workspace":"/absolute/workspace","task_id":"UUID"}`。只读验证原生任务、同一不可变基础数据/窗口/基准及证券子集；不修改来源工作区。尚有分区待检查的证券不被误列为缺失。复用仍由采集器重新验证全部身份及哈希。
 
@@ -94,7 +94,7 @@ DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli
 
 ## 单因子有效性批量测试
 
-`jfquant --workspace /path/to/workspace factors evaluate --request evaluation.json` 提交服务协议24
+`jfquant --workspace /path/to/workspace factors evaluate --request evaluation.json` 提交服务协议26
 的独立测试任务，后续沿用jobs查询、取消和结果读取。请求示例（路径相对工作区）：
 
 ```json
@@ -118,7 +118,7 @@ DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli
 [workflow](../workflow/README.md)。构建及验收：
 `DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli`。
 
-## 自定义公式与算子目录（协议24）
+## 自定义公式与算子目录（协议26）
 
 ```bash
 jfquant --workspace /path/to/workspace factors operators --query QLIB_MEAN
@@ -156,7 +156,7 @@ Preview返回异步任务ID，沿用jobs wait/results/cancel，结果明确为�
 
 ## 独立模型训练与 B 股票池回测
 
-新命令使用服务协议24；保留原 `research train/backtest/run` 的配置与执行方式。
+新命令使用服务协议26；保留原 `research train/backtest/run` 的配置与执行方式。
 新训练计划格式1没有测试日期；回测计划独立指定 B、日期和行情。
 App研究页“独立训练与跨池回测”可导入、编辑和导出相同 JSON。
 
@@ -193,3 +193,16 @@ jfquant jobs results BACKTEST_TASK_UUID
 `jfquant --workspace PATH workspace maintain` 输出只读哈希与引用清单；
 加 `--apply` 在服务停止且取得独占锁后归档旧任务及共享缓存，保留原始数据和证据。
 同一命令恢复中断事务。详情见 [workflow](../workflow/README.md#架构边界与离线维护)。
+
+## 组合数据检查（协议26）
+
+`jfquant factors check --request check.json` 提交完整原生检查；请求为
+`{"input":<EvaluationInput>,"horizon":5,"policy":{"strictness":"strict","min_valid_feature_ratio":0,"min_labeled_rows":1}}`。
+`input` 与 factors evaluate 共用，包含 factor_set、market_path、universe_path、universe_id、
+日期、有序 factor_ids/factor_refs、output_dir；工作区内输出由服务改为任务目录。
+policy 可省略（严格默认）。服务提交时冻结 expected_source_stamp，完整字节哈希由 worker 验证；
+可选 expected_input_hash 可显式绑定已知内容快照。
+使用 `jobs wait/results/logs/cancel`；阻断报告仍可读取 input-check.json，不能视作计算完成。
+`factors evaluate` 可选同一 policy，报告格式3附实际范围和计算收据，完整上下文相同时复用检查产物。
+research preview/check、fit-inputs 和 backtest-inputs 会执行实际因子和样本检查，无模型拟合或账户回测；
+补采选项仍属于准备数据阶段。三档策略、标签边界和基准截尾与正式执行共用。

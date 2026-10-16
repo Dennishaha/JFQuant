@@ -71,6 +71,7 @@ codesign --verify --deep --strict "$app"
 mkdir -p "$bundle_root/self-check"
 env -i HOME="$bundle_root/self-check-home" PATH=/usr/bin:/bin "$app/Contents/MacOS/analytics-desktop" --self-check "$bundle_root/self-check" > "$bundle_root/self-check.json"
 "$repo_root/crates/app/packaging/verify-cli.sh" "$app" "$bundle_root/cli-check"
+"$repo_root/crates/app/packaging/verify-input-check.sh" "$app" "$bundle_root/input-check-offline"
 # DMG contains only the app, install shortcut and source-controlled installation notes.
 stage="$bundle_root/dmg-root"
 if [ -d "$stage" ]; then rm -rf "$stage"; fi

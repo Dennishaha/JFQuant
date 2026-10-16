@@ -92,3 +92,7 @@ left as-of join；没有此前成员记录的行掩码为false，行情行仍保
 预热，以当日掩码做横截面统计，以市场日期而非“下一条有效行情”定位收益终点。
 原 `load_market_rows` 继续只返回成员行；两种入口均在worker中使用连接。
 验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow parquet_evaluation`。
+
+因子加载器对缺省可选行情列投影 NULL，所选真实依赖是否缺失由共享准入判断。
+`factor_expected_members` 按市场日历和历史成分生成预期证券/日期，能识别整行缺失，
+不会仅因行情行不存在就从覆盖率分母消失。方法及 DuckDB 连接由所属 worker 调用。

@@ -369,6 +369,11 @@ pub enum FactorCommand {
         #[arg(long)]
         id: String,
     },
+    /// Check selected factor inputs and actual samples without training or IC.
+    Check {
+        #[arg(long)]
+        request: PathBuf,
+    },
     /// Independent factor IC, coverage and quantile-return diagnostics.
     Evaluate {
         #[arg(long)]
@@ -1161,6 +1166,7 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
         Command::Factors(FactorCommand::ArchiveGroup {id}) => return client.call(Rpc::ArchiveFactorGroup{id}),
         Command::Factors(FactorCommand::Preview {definition}) => TaskRequest::PreviewFactor{draft:read(&client.root,&definition)?},
         Command::Factors(FactorCommand::Evaluate { request }) => TaskRequest::EvaluateFactors { request: Box::new(read(&client.root, &request)?) },
+        Command::Factors(FactorCommand::Check { request }) => TaskRequest::CheckFactors { request: Box::new(read(&client.root, &request)?) },
         Command::Factors(FactorCommand::Run { request }) => TaskRequest::Pipeline {
             request: Box::new(read(&client.root, &request)?),
         },

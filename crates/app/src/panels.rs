@@ -93,7 +93,7 @@ pub(crate) fn send_command(state: &mut AppState, worker: &WorkerHandle, command:
     }
 }
 
-fn primary_button(label: &str, accent: Color32) -> egui::Button<'static> {
+pub(crate) fn primary_button(label: &str, accent: Color32) -> egui::Button<'static> {
     egui::Button::new(RichText::new(label).color(Color32::WHITE)).fill(accent)
 }
 
@@ -603,6 +603,7 @@ fn factor_panel(
         ui.label("每日最少样本");
         ui.add(egui::DragValue::new(&mut state.factor.min_samples).range(3..=10000));
     });
+    crate::factor_checks::controls(ui, state, worker, cancel_slot, busy);
     if ui
         .add_enabled(
             !busy,
@@ -618,6 +619,7 @@ fn factor_panel(
                     input.output_dir = input.output_dir.join(task.to_string());
                 }
                 let request = analytics_workflow::factor_evaluation::EvaluationRequest {
+                    policy: state.factor.check_policy.clone(),
                     input: input.into(),
                     horizon: state.factor.horizon,
                     quantiles: state.factor.quantiles,
@@ -672,7 +674,7 @@ fn factor_panel(
     }
 }
 
-fn run_pipeline_request(
+pub(crate) fn run_pipeline_request(
     state: &AppState,
 ) -> Result<analytics_workflow::research::pipeline::PipelineRequest, String> {
     let factor = &state.factor;

@@ -1651,6 +1651,90 @@ fn factor_group_builtin_is_readonly_and_copy_can_be_saved() {
 }
 
 #[test]
+fn factor_input_check_submits_unsaved_selection_policy_and_cancellation() {
+    let mut h = Harness::new(Panel::Factor);
+    h.app.state.factor.check_policy.strictness =
+        analytics_core::research_quality::ResearchStrictness::AllowMissing;
+    h.app.state.factor.horizon = 3;
+    h.click("检查组合数据");
+    match h.commands.try_recv().unwrap() {
+        WorkerCommand::CheckFactors {
+            request, cancel, ..
+        } => {
+            assert_eq!(request.horizon, 3);
+            assert_eq!(request.input.factor_ids, ["alpha_001", "alpha_002"]);
+            assert!(request.policy.allows_missing());
+            assert!(request.expected_input_hash.is_none());
+            h.app
+                .cancel
+                .as_ref()
+                .unwrap()
+                .store(true, Ordering::Relaxed);
+            assert!(cancel.load(Ordering::Relaxed));
+        }
+        other => panic!("unexpected command {other:?}"),
+    }
+}
+
+#[test]
+fn factor_input_report_expires_after_context_or_source_changes() {
+    use analytics_workflow::input_check::{InputCheckPlan, InputCheckReport, PhaseRange};
+    let mut h = Harness::new(Panel::Factor);
+    let input: analytics_workflow::factor_evaluation::EvaluationInput =
+        panels::run_pipeline_request(&h.app.state).unwrap().into();
+    let registry =
+        FactorRegistry::resolve(input.factor_set, &input.factor_refs, &input.factor_ids).unwrap();
+    let context = analytics_workflow::input_check::factor_context(
+        &input,
+        h.app.state.factor.horizon,
+        &h.app.state.factor.check_policy,
+    );
+    let plan = InputCheckPlan::new(
+        input.factor_set,
+        &input.factor_refs,
+        &input.factor_ids,
+        &registry,
+        "factor_page",
+        context,
+        vec![PhaseRange {
+            phase: "factor_page".into(),
+            requested: input.date_range.clone(),
+            effective: input.date_range,
+        }],
+    )
+    .unwrap();
+    h.app.state.factor.input_check = Some(InputCheckReport {
+        ready: false,
+        schema_version: 1,
+        plan,
+        context_hash: "test".into(),
+        stages: vec![],
+        admission: serde_json::from_value(serde_json::json!({
+            "schema_version":5,"price_basis":"provider",
+            "policy":h.app.state.factor.check_policy,"decisions":[],"checks":[]
+        }))
+        .unwrap(),
+        factors: vec![],
+        samples: serde_json::json!({"source_stamp":"original"}),
+        dependency_ranges: serde_json::json!({}),
+        missing_counts: Default::default(),
+        missing_scope_counts: Default::default(),
+        warnings: vec![],
+        artifact: None,
+    });
+    // Control the freshness probe so this test needs no market files or native handle.
+    h.app.state.factor.check_probe_at = Some(std::time::Instant::now());
+    h.app.state.factor.check_source_stamp = Some("original".into());
+    h.frame(vec![]);
+    assert!(rendered_text(&h.frame(vec![])).contains("组合数据检查未通过"));
+    h.app.state.factor.horizon += 1;
+    assert!(rendered_text(&h.frame(vec![])).contains("组合数据报告已过期"));
+    h.app.state.factor.horizon -= 1;
+    h.app.state.factor.check_source_stamp = Some("changed".into());
+    assert!(rendered_text(&h.frame(vec![])).contains("组合数据报告已过期"));
+}
+
+#[test]
 fn factor_evaluation_button_submits_independent_cancellable_request() {
     let mut h = Harness::new(Panel::Factor);
     h.click("因子有效性测试");

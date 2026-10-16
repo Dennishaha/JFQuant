@@ -39,7 +39,8 @@ pub(super) fn replay(
     } = prepared;
     let request = &effective_request;
     let _predicting = mode.is_some_and(|m| m.predicting());
-    if (request.reuse_training.is_some() || request.reuse_predictions.is_some())
+    if !request.audit_only
+        && (request.reuse_training.is_some() || request.reuse_predictions.is_some())
         && let Some((signals, reports, selection)) =
             predictions::restore(request, &signature, &folds)?
     {

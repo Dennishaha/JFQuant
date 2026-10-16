@@ -188,6 +188,33 @@ impl Schedule {
         calendar: &[Date],
         warmup: usize,
     ) -> Result<Vec<ResolvedFold>> {
+        self.resolve_input_ranges(calendar, warmup, None, false)
+    }
+    /// Resolve task dates while clipping only prediction/test tails to valid data.
+    /// Original fold dates remain in `requested`; train/validation never clip.
+    pub fn resolve_for_input_check(
+        &self,
+        calendar: &[Date],
+        warmup: usize,
+        last_valid: Date,
+    ) -> Result<Vec<ResolvedFold>> {
+        self.resolve_input_ranges(calendar, warmup, Some(last_valid), false)
+    }
+    /// Resolve only fitting dependencies; unused future test dates need no data.
+    pub fn resolve_for_training(
+        &self,
+        calendar: &[Date],
+        warmup: usize,
+    ) -> Result<Vec<ResolvedFold>> {
+        self.resolve_input_ranges(calendar, warmup, None, true)
+    }
+    fn resolve_input_ranges(
+        &self,
+        calendar: &[Date],
+        warmup: usize,
+        tail: Option<Date>,
+        training_only: bool,
+    ) -> Result<Vec<ResolvedFold>> {
         self.validate()?;
         if calendar.is_empty() || calendar.windows(2).any(|w| w[0] >= w[1]) {
             return Err("invalid trading calendar".into());
@@ -220,7 +247,7 @@ impl Schedule {
                 until,
             } => {
                 let stop = until.unwrap_or(last);
-                if stop > last {
+                if stop > last && tail.is_none() && !training_only {
                     return Err("explicit rolling end exceeds data coverage".into());
                 }
                 let mut out = Vec::new();
@@ -238,7 +265,7 @@ impl Schedule {
                         Err(_) if step.unit == StepUnit::TradingDays => break,
                         Err(e) => return Err(e),
                     };
-                    if start > stop {
+                    if start > stop.min(tail.unwrap_or(last)) {
                         break;
                     }
                     let mut f = Fold {
@@ -256,12 +283,18 @@ impl Schedule {
                     }
                     out.push(f);
                 }
+                if training_only && out.is_empty() {
+                    out.push(first.clone());
+                }
                 if out.len() == 10000 {
                     return Err("rolling schedule exceeds 10000 folds".into());
                 }
                 out
             }
         };
+        if let Some(last) = tail {
+            requested.retain(|f| f.test.start <= last);
+        }
         requested.sort_by_key(|f| f.test.start);
         if requested.is_empty() {
             return Err("no test folds within data".into());
@@ -273,7 +306,18 @@ impl Schedule {
                 let actual = Fold {
                     train: range(&f.train)?,
                     validation: f.validation.as_ref().map(range).transpose()?,
-                    test: range(&f.test)?,
+                    test: if training_only && f.test.start > last {
+                        f.test.clone()
+                    } else {
+                        range(&DateRange {
+                            start: f.test.start,
+                            end: f.test.end.min(if training_only {
+                                last
+                            } else {
+                                tail.unwrap_or(f.test.end)
+                            }),
+                        })?
+                    },
                 };
                 actual.validate()?;
                 let i = calendar.partition_point(|d| *d < actual.train.start);

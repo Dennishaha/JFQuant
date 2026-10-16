@@ -26,12 +26,15 @@ use std::{
 };
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 25;
+pub const PROTOCOL_VERSION: u32 = 26;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TaskRequest {
     PreviewFactor {
         draft: crate::custom_factors::FactorDraft,
+    },
+    CheckFactors {
+        request: Box<crate::input_check::CheckRequest>,
     },
     EvaluateFactors {
         request: Box<crate::factor_evaluation::EvaluationRequest>,
@@ -79,9 +82,10 @@ impl TaskRequest {
             Self::Describe { .. } => TaskKind::Describe,
             Self::Query { .. } | Self::QueryNext { .. } => TaskKind::Query,
             Self::Export { .. } => TaskKind::Export,
-            Self::PreviewFactor { .. } | Self::EvaluateFactors { .. } | Self::Pipeline { .. } => {
-                TaskKind::Pipeline
-            }
+            Self::PreviewFactor { .. }
+            | Self::EvaluateFactors { .. }
+            | Self::CheckFactors { .. }
+            | Self::Pipeline { .. } => TaskKind::Pipeline,
             Self::Train { .. } => TaskKind::Training,
         }
     }
@@ -95,6 +99,7 @@ impl TaskRequest {
             Self::Query { .. } | Self::QueryNext { .. } => "执行查询".into(),
             Self::Export { .. } => "导出查询结果".into(),
             Self::PreviewFactor { .. } => "自定义因子合成预览".into(),
+            Self::CheckFactors { .. } => "检查组合数据".into(),
             Self::EvaluateFactors { .. } => "因子有效性测试".into(),
             Self::Pipeline { .. } => "运行因子流水线".into(),
             Self::Train { .. } => "训练模型".into(),
@@ -127,6 +132,11 @@ impl TaskRequest {
             Self::PreviewFactor { draft } => WorkerCommand::PreviewFactor {
                 task,
                 draft,
+                cancel,
+            },
+            Self::CheckFactors { request } => WorkerCommand::CheckFactors {
+                task,
+                request: *request,
                 cancel,
             },
             Self::EvaluateFactors { request } => WorkerCommand::EvaluateFactors {
@@ -376,11 +386,20 @@ impl Server {
                         *query_id = Some(Uuid::new_v4())
                     }
                 }
+                if let TaskRequest::CheckFactors { request: check } = &mut request {
+                    check.expected_source_stamp = Some(
+                        crate::input_check::source_stamp(
+                            &self.workspace.resolve(&check.input.market_path),
+                            &self.workspace.resolve(&check.input.universe_path),
+                        )
+                        .map_err(failure)?,
+                    );
+                }
                 let frozen = match &request {
                     TaskRequest::Workflow { request } => crate::snapshot(&self.workspace, request)
                         .map_err(|e| ServiceError::new("invalid_request", e))?,
                     _ => {
-                        json!({"request":request,"app_version":env!("CARGO_PKG_VERSION"),"formula_version":match &request { TaskRequest::Pipeline {request} => analytics_factor::FactorRegistry::resolve(request.factor_set,&request.factor_refs,&request.factor_ids).and_then(|r|r.selection_version(&request.factor_ids)).map_err(failure)?, TaskRequest::EvaluateFactors {request} => analytics_factor::FactorRegistry::resolve(request.input.factor_set,&request.input.factor_refs,&request.input.factor_ids).and_then(|r|r.selection_version(&request.input.factor_ids)).map_err(failure)?, _=>analytics_factor::FORMULA_VERSION.to_string() }})
+                        json!({"request":request,"app_version":env!("CARGO_PKG_VERSION"),"formula_version":match &request { TaskRequest::Pipeline {request} => analytics_factor::FactorRegistry::resolve(request.factor_set,&request.factor_refs,&request.factor_ids).and_then(|r|r.selection_version(&request.factor_ids)).map_err(failure)?, TaskRequest::EvaluateFactors {request} => analytics_factor::FactorRegistry::resolve(request.input.factor_set,&request.input.factor_refs,&request.input.factor_ids).and_then(|r|r.selection_version(&request.input.factor_ids)).map_err(failure)?,TaskRequest::CheckFactors {request} => analytics_factor::FactorRegistry::resolve(request.input.factor_set,&request.input.factor_refs,&request.input.factor_ids).and_then(|r|r.selection_version(&request.input.factor_ids)).map_err(failure)?, _=>analytics_factor::FORMULA_VERSION.to_string() }})
                     }
                 };
                 let record = self
@@ -1010,6 +1029,14 @@ pub fn bridge(
                         WorkerCommand::PreviewFactor { draft, cancel, .. } => {
                             (TaskRequest::PreviewFactor { draft }, Some(cancel))
                         }
+                        WorkerCommand::CheckFactors {
+                            request, cancel, ..
+                        } => (
+                            TaskRequest::CheckFactors {
+                                request: Box::new(request),
+                            },
+                            Some(cancel),
+                        ),
                         WorkerCommand::EvaluateFactors {
                             request, cancel, ..
                         } => (

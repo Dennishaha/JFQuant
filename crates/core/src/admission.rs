@@ -107,6 +107,12 @@ impl AdmissionReport {
                         && c.code == "provider_adjustment_unreconciled")
                     || (c.status == CheckStatus::Failed
                         && c.kind == ProblemKind::Missing
+                        && c.disposition == ProblemDisposition::ExcludeSecurity
+                        && self.policy.strictness
+                            == crate::research_quality::ResearchStrictness::QualifiedOnly
+                        && c.category == "market")
+                    || (c.status == CheckStatus::Failed
+                        && c.kind == ProblemKind::Missing
                         && c.disposition == ProblemDisposition::KeepNull
                         && self.policy.allows_missing())
             })

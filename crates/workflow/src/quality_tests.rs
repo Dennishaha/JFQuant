@@ -33,11 +33,34 @@ fn set_qlib_point(root: &Path, code: &str, field: &str, index: usize, value: f32
     fs::write(path, bytes).unwrap();
 }
 
+fn require_amount(t: &mut ResearchTemplate) {
+    use analytics_factor::selection::{CustomFactorDefinition, FactorRef};
+    let def = CustomFactorDefinition::new(
+        "custom_amount_dependency".into(),
+        "amount dependency".into(),
+        String::new(),
+        "GTJA_IF(CLOSE > 0, CLOSE, AMOUNT)".into(),
+        1,
+    )
+    .unwrap();
+    t.config.factor_refs = analytics_factor::selection::frozen_refs(
+        t.factor_set,
+        &t.config.factor_refs,
+        &t.config.factor_ids,
+    );
+    t.config.factor_ids.push(def.id.clone());
+    t.config.factor_refs.push(FactorRef::Custom {
+        definition: Box::new(def),
+    });
+    t.formula_version = t.resolved_formula_version().unwrap();
+}
+
 #[test]
 fn three_policies_distinguish_missing_input_null_propagation_and_security_exclusion() {
     let temp = tempfile::tempdir().unwrap();
     let w = Workspace::open(temp.path()).unwrap();
     let (m, a, mut t) = demo::create(&w).unwrap();
+    require_amount(&mut t);
     let root = w.resolve(m.path);
     let absent = root.join("features/sh600000/amount.day.bin");
     fs::remove_file(&absent).unwrap();
@@ -87,6 +110,7 @@ fn future_missing_observation_changes_only_future_qualification() {
     let temp = tempfile::tempdir().unwrap();
     let w = Workspace::open(temp.path()).unwrap();
     let (m, a, mut t) = demo::create(&w).unwrap();
+    require_amount(&mut t);
     t.quality_policy.strictness = ResearchStrictness::QualifiedOnly;
     let before = research_requirements_with_actions(&w, &t, &m.id, Some(&a.id)).unwrap();
     let root = w.resolve(m.path);
@@ -118,13 +142,14 @@ fn damaged_fields_and_coefficient_conflicts_block_all_modes_before_fit() {
         let temp = tempfile::tempdir().unwrap();
         let w = Workspace::open(temp.path()).unwrap();
         let (m, a, mut t) = demo::create(&w).unwrap();
+        require_amount(&mut t);
         let root = w.resolve(m.path);
         if case == "truncated" {
             fs::write(root.join("features/sh600000/amount.day.bin"), [1, 2, 3]).unwrap();
         } else if case == "coefficient" {
             set_qlib_point(&root, "sh600000", "factor", 5, 0.2);
         } else {
-            set_qlib_point(&root, "sh600000", "volume", 5, -1.);
+            set_qlib_point(&root, "sh600000", "volume", 25, -1.);
         }
 
         let m = w.register(&root).unwrap();
@@ -147,6 +172,7 @@ fn qualified_unresolved_candidates_do_not_change_original_membership_and_empty_p
     let temp = tempfile::tempdir().unwrap();
     let w = Workspace::open(temp.path()).unwrap();
     let (m, a, mut t) = demo::create(&w).unwrap();
+    require_amount(&mut t);
     let root = w.resolve(m.path);
     let path = root.join("instruments/csi500.txt");
     let original = fs::read_to_string(&path).unwrap() + "SHT00018\t2007-01-02\t2010-01-12\n";
@@ -283,6 +309,7 @@ fn missing_later_source_alias_does_not_erase_earlier_qualified_history() {
     let temp = tempfile::tempdir().unwrap();
     let w = Workspace::open(temp.path()).unwrap();
     let (m, a, mut t) = demo::create(&w).unwrap();
+    require_amount(&mut t);
     t.quality_policy.strictness = ResearchStrictness::QualifiedOnly;
     let root = w.resolve(&m.path);
     let next = root.join("features/sh600002");
@@ -352,6 +379,17 @@ fn missing_later_source_alias_does_not_erase_earlier_qualified_history() {
         })
         .unwrap();
     assert!(dataset.field(&id, "amount").is_ok());
+    // A later alias must be validated under the logical security's dated reads;
+    // stale observations from the former source must not become dependencies.
+    dataset.restrict_reads(range).unwrap();
+    dataset.restrict_input_checks(std::collections::BTreeMap::from([(
+        id.clone(),
+        std::collections::BTreeMap::from([("high".into(), std::collections::BTreeSet::from([34]))]),
+    )]));
+    set_qlib_point(&root, "sh600000", "high", 34, -1.);
+    assert!(dataset.field(&id, "high").is_ok());
+    set_qlib_point(&root, "sh600002", "high", 34, -1.);
+    assert!(dataset.research_field(&id, "high", true).is_err());
 }
 
 #[test]
@@ -530,4 +568,237 @@ fn alpha158_verified_qlib_and_parquet_keep_features_fees_and_accounts_equal() {
         q["execution"]["resolved_folds"],
         p["execution"]["resolved_folds"]
     );
+}
+
+#[test]
+fn native_check_ignores_unused_fields_phase_gaps_and_pre_backtest_benchmark() {
+    use analytics_core::{
+        DateRange,
+        schedule::{Fold, Schedule},
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let w = Workspace::open(temp.path()).unwrap();
+    let (m, a, mut t) = demo::create(&w).unwrap();
+    let root = w.resolve(m.path);
+    let r = |a: &str, b: &str| DateRange {
+        start: a.parse().unwrap(),
+        end: b.parse().unwrap(),
+    };
+    t.schedule = Schedule::Single {
+        fold: Fold {
+            train: r("2007-01-02", "2007-01-05"),
+            validation: Some(r("2008-01-09", "2008-01-12")),
+            test: r("2009-01-09", "2009-01-12"),
+        },
+    };
+    let m = w.register(&root).unwrap();
+    let (before, result) = execute_quality(&w, &m, &a, &t, true);
+    result.unwrap();
+    let before: crate::input_check::InputCheckReport = serde_json::from_slice(
+        &fs::read(w.resolve(before.output).join("input-check.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(before.ready(), "{:?}", before.admission.checks);
+    fs::write(
+        root.join("features/sh600000/amount.day.bin"),
+        b"unused malformed field",
+    )
+    .unwrap();
+    set_qlib_point(&root, "sh600000", "high", 9, -1.);
+    for day in 0..22 {
+        set_qlib_point(&root, "sh000905", "close", day, f32::NAN);
+    }
+    let m = w.register(&root).unwrap();
+    let (after, result) = execute_quality(&w, &m, &a, &t, true);
+    result.unwrap();
+    let after: crate::input_check::InputCheckReport = serde_json::from_slice(
+        &fs::read(w.resolve(after.output).join("input-check.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(after.ready(), "{:?}", after.admission.checks);
+    assert_eq!(before.missing_counts, after.missing_counts);
+    assert_eq!(
+        serde_json::to_value(before.factors).unwrap(),
+        serde_json::to_value(after.factors).unwrap()
+    );
+}
+
+#[test]
+fn complete_native_check_is_reused_by_training_without_running_a_trainer() {
+    let temp = tempfile::tempdir().unwrap();
+    let w = Workspace::open(temp.path()).unwrap();
+    let (m, a, t) = demo::create(&w).unwrap();
+    let request = WorkflowRequest::Independent {
+        request: Box::new(
+            crate::research::backtest::independent::Job::TrainingInputs {
+                plan: Box::new(
+                    crate::research::backtest::independent::TrainingPlan::from_template(&t),
+                ),
+                market: m.id.clone(),
+                actions: Some(a.id.clone()),
+                prepare: false,
+                announcements: false,
+            },
+        ),
+    };
+    let run = w
+        .begin(Uuid::new_v4(), "check", snapshot(&w, &request).unwrap())
+        .unwrap();
+    let out = execute(&w, &request, &run, &TaskContext::default()).unwrap();
+    assert_eq!(out.details["ready"], true);
+    assert_eq!(out.details["stages"][3]["status"], "passed");
+    assert!(!w.resolve(&run.output).join("fold-0000/model.txt").exists());
+    let request = WorkflowRequest::TrainResearch {
+        template: Box::new(t),
+        market: m.id,
+        actions: Some(a.id),
+    };
+    let run = w
+        .begin(Uuid::new_v4(), "train", snapshot(&w, &request).unwrap())
+        .unwrap();
+    execute(&w, &request, &run, &TaskContext::default()).unwrap();
+    let receipt: Value = serde_json::from_slice(
+        &fs::read(
+            w.resolve(&run.output)
+                .join("factor-cache/2007.receipt.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(receipt["cache_hit"], true);
+}
+
+#[test]
+fn benchmark_valid_tail_clips_prediction_only_and_internal_holes_block() {
+    let temp = tempfile::tempdir().unwrap();
+    let w = Workspace::open(temp.path()).unwrap();
+    let (m, a, t) = demo::create(&w).unwrap();
+    let root = w.resolve(m.path);
+    for day in 42..44 {
+        set_qlib_point(&root, "sh000905", "close", day, f32::NAN);
+    }
+    let m = w.register(&root).unwrap();
+    let (run, result) = execute_quality(&w, &m, &a, &t, true);
+    result.unwrap();
+    let report: crate::input_check::InputCheckReport =
+        serde_json::from_slice(&fs::read(w.resolve(&run.output).join("input-check.json")).unwrap())
+            .unwrap();
+    assert!(report.ready());
+    let last = report.plan.phases.last().unwrap();
+    assert_eq!(last.effective.end.to_string(), "2010-01-10");
+    assert!(last.requested.end > last.effective.end);
+    assert_eq!(
+        report.plan.phases[0].effective.start.to_string(),
+        "2007-01-02"
+    );
+    set_qlib_point(&root, "sh000905", "close", 40, f32::NAN);
+    let m = w.register(&root).unwrap();
+    let (run, result) = execute_quality(&w, &m, &a, &t, true);
+    result.unwrap();
+    let report: crate::input_check::InputCheckReport =
+        serde_json::from_slice(&fs::read(w.resolve(&run.output).join("input-check.json")).unwrap())
+            .unwrap();
+    assert!(!report.ready());
+    assert_eq!(
+        report.stages[2].status,
+        analytics_core::admission::CheckStatus::NotRun
+    );
+}
+
+#[test]
+fn fit_check_requires_neither_an_unused_benchmark_nor_unrelated_former_members() {
+    use crate::research::backtest::independent::{Job, TrainingPlan};
+    use analytics_core::{
+        DateRange,
+        schedule::{Fold, Schedule},
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let w = Workspace::open(temp.path()).unwrap();
+    let (m, a, mut t) = demo::create(&w).unwrap();
+    let root = w.resolve(m.path);
+    let range = |a: &str, b: &str| DateRange {
+        start: a.parse().unwrap(),
+        end: b.parse().unwrap(),
+    };
+    t.schedule = Schedule::Single {
+        fold: Fold {
+            train: range("2008-01-03", "2008-01-12"),
+            validation: Some(range("2009-01-03", "2009-01-12")),
+            test: range("2010-01-02", "2010-01-12"),
+        },
+    };
+    let pool = root.join("instruments/csi500.txt");
+    fs::write(
+        &pool,
+        fs::read_to_string(&pool).unwrap() + "SHT00018\t2007-01-02\t2007-01-03\n",
+    )
+    .unwrap();
+    fs::remove_dir_all(root.join("features/sh000905")).unwrap();
+    let m = w.register(&root).unwrap();
+    let request = WorkflowRequest::Independent {
+        request: Box::new(Job::TrainingInputs {
+            plan: Box::new(TrainingPlan::from_template(&t)),
+            market: m.id,
+            actions: Some(a.id),
+            prepare: false,
+            announcements: false,
+        }),
+    };
+    let run = w
+        .begin(Uuid::new_v4(), "check", snapshot(&w, &request).unwrap())
+        .unwrap();
+    let report = execute(&w, &request, &run, &TaskContext::default())
+        .unwrap()
+        .details;
+    assert_eq!(report["ready"], true, "{report}");
+    assert!(
+        report["dependency_ranges"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .all(|k| !k.starts_with("SH000905/") && !k.starts_with("SHT00018/"))
+    );
+}
+
+#[test]
+fn legacy_fit_entry_ignores_a_future_unused_test_window() {
+    use analytics_core::{
+        DateRange,
+        schedule::{Fold, Schedule},
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let w = Workspace::open(temp.path()).unwrap();
+    let (m, a, mut t) = demo::create(&w).unwrap();
+    let range = |a: &str, b: &str| DateRange {
+        start: a.parse().unwrap(),
+        end: b.parse().unwrap(),
+    };
+    t.schedule = Schedule::Single {
+        fold: Fold {
+            train: range("2008-01-03", "2008-01-12"),
+            validation: Some(range("2009-01-03", "2009-01-12")),
+            test: range("2030-01-02", "2030-01-12"),
+        },
+    };
+    let request = WorkflowRequest::TrainResearch {
+        template: Box::new(t),
+        market: m.id,
+        actions: Some(a.id),
+    };
+    let run = w
+        .begin(Uuid::new_v4(), "fit", snapshot(&w, &request).unwrap())
+        .unwrap();
+    execute(&w, &request, &run, &TaskContext::default()).unwrap();
+    let report: crate::input_check::InputCheckReport =
+        serde_json::from_slice(&fs::read(w.resolve(&run.output).join("input-check.json")).unwrap())
+            .unwrap();
+    assert!(report.ready());
+    assert!(
+        report
+            .plan
+            .phases
+            .iter()
+            .all(|p| p.phase == "train" || p.phase == "validation")
+    );
+    assert!(w.resolve(&run.output).join("fold-0000/model.txt").is_file());
 }

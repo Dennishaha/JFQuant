@@ -137,3 +137,10 @@ cargo clippy -p analytics-factor --all-targets -- -D warnings
 
 验收包括原GTJA/Alpha158全量golden、原AST无损往返、严格语法拒绝、跨体系嵌套和递归元数据。
 `testdata/custom_operator_golden.json`为独立手算小序列，解释SMA状态与Qlib缺失处理，不能由执行器输出覆盖。
+
+## 输入依赖窗口
+
+`dependencies::resolve(&FactorExpr)` 从实际 AST 返回每字段的可分离观察窗口，包含递归种子和
+横截面成员上下文的位置。嵌套 Delay、Delta、滚动和 Qlib 算子按本身规则传播，不以组合最大
+lookback 扩展全部字段。Unsupported 明确报错。该元数据不改变算子数值、null 或递归初始化。
+验收：`cargo test -p analytics-factor dependencies`，并保持既有两套 catalogue golden。

@@ -78,6 +78,7 @@ pub struct DailyDataset {
     kind: DailyKind,
     source_map: analytics_core::source_map::SourceMap,
     read_range: Option<DateRange>,
+    input_scope: Option<BTreeMap<String, BTreeMap<String, std::collections::BTreeSet<usize>>>>,
     view: Option<crate::market_view::MarketView>,
     field_cache: std::cell::RefCell<BTreeMap<(String, String), DailyField>>,
     bar_cache: std::cell::RefCell<BTreeMap<String, Arc<Vec<DailyBar>>>>,
@@ -116,6 +117,95 @@ impl DailyDataset {
         range.validate().map_err(invalid)?;
         self.read_range = Some(range);
         Ok(())
+    }
+    /// Restrict value validation to real per-field dependencies, preserving loaded
+    /// observations and normalization anchors for the existing executor.
+    pub fn restrict_input_checks(
+        &mut self,
+        scope: BTreeMap<String, BTreeMap<String, std::collections::BTreeSet<usize>>>,
+    ) {
+        self.input_scope = Some(scope);
+    }
+    /// Frozen required field names, when task-scoped validation is installed.
+    pub fn checked_fields(&self, id: &str) -> Option<Vec<String>> {
+        self.input_scope.as_ref().map(|s| {
+            s.get(id)
+                .map(|m| m.keys().cloned().collect())
+                .unwrap_or_default()
+        })
+    }
+    /// Actual validation dates for a security/field, or every used field when omitted.
+    pub fn checked_days(
+        &self,
+        id: &str,
+        field: Option<&str>,
+    ) -> Option<std::collections::BTreeSet<usize>> {
+        self.input_scope.as_ref().map(|scope| {
+            scope
+                .get(id)
+                .map(|fields| {
+                    fields
+                        .iter()
+                        .filter(|(name, _)| field.is_none_or(|f| name.as_str() == f))
+                        .flat_map(|(_, days)| days.iter().copied())
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+    }
+    fn checks_observation(&self, id: &str, name: &str, day: usize) -> bool {
+        self.input_scope.as_ref().map_or_else(
+            || {
+                self.read_range
+                    .as_ref()
+                    .is_none_or(|r| self.calendar.get(day).is_some_and(|d| r.contains(*d)))
+            },
+            |s| {
+                s.get(id)
+                    .and_then(|m| m.get(name))
+                    .is_some_and(|d| d.contains(&day))
+            },
+        )
+    }
+    /// Last positive finite close with a usable price basis, independent of the
+    /// index maximum date. This does not fill holes inside the requested interval.
+    pub fn last_valid_close_date(&self, id: &str) -> io::Result<Option<Date>> {
+        let (close, factor) = match &self.kind {
+            DailyKind::Qlib(q) if !self.needs_binding(id) => {
+                (q.field(id, "close")?, Some(q.field(id, "factor")?))
+            }
+            DailyKind::Parquet(_) => {
+                let bars = read_bars_checked(
+                    &self.root.join("bars").join(format!("{id}.parquet")),
+                    &|_, _| false,
+                )?;
+                let adjustment = self.adjustment_record(id)?;
+                return Ok(bars
+                    .iter()
+                    .rev()
+                    .find(|b| {
+                        b.close.is_some_and(|v| v.is_finite() && v > 0.)
+                            && self.calendar.binary_search(&b.trade_date).is_ok()
+                            && (self.uses_supplier_prices(id)
+                                || adjustment
+                                    .on(b.trade_date)
+                                    .ok()
+                                    .flatten()
+                                    .is_some_and(|v| v.is_finite() && v > 0.))
+                    })
+                    .map(|b| b.trade_date));
+            }
+            _ => (self.research_field(id, "close", false)?, None),
+        };
+        Ok((0..self.calendar.len())
+            .rev()
+            .find(|&day| {
+                close.get(day).is_some_and(|v| v.is_finite() && v > 0.)
+                    && factor
+                        .as_ref()
+                        .is_none_or(|f| f.get(day).is_some_and(|v| v.is_finite() && v > 0.))
+            })
+            .map(|day| self.calendar[day]))
     }
     /// Resolve only execution-date market rules.
     pub fn exchange_symbol(&self, id: &str, date: Date) -> io::Result<String> {
@@ -191,13 +281,7 @@ impl DailyDataset {
             .values
             .iter()
             .enumerate()
-            .filter(|(i, _)| {
-                self.read_range.as_ref().is_none_or(|r| {
-                    self.calendar
-                        .get(field.start + *i)
-                        .is_some_and(|d| r.contains(*d))
-                })
-            })
+            .filter(|(i, _)| self.checks_observation(id, name, field.start + *i))
             .filter_map(|(_, v)| v.as_ref())
             .any(|value| match name {
                 "open" | "high" | "low" | "close" | "vwap" | "factor" => *value <= 0.,
@@ -212,6 +296,42 @@ impl DailyDataset {
         Ok(())
     }
     fn unbound(&self) -> io::Result<Self> {
+        // Validation follows the dated source binding, while loaded values and
+        // each source's original normalization anchor remain unchanged.
+        let input_scope = self.input_scope.as_ref().map(|scope| {
+            let mut direct: BTreeMap<String, BTreeMap<String, std::collections::BTreeSet<usize>>> =
+                BTreeMap::new();
+            for (id, fields) in scope {
+                if self.needs_binding(id) {
+                    if let Some(exception) = self.source_map.exceptions.get(id) {
+                        for locator in exception.locators.iter().filter(|l| l.provider == "qlib") {
+                            for (field, days) in fields {
+                                direct
+                                    .entry(locator.symbol.clone())
+                                    .or_default()
+                                    .entry(field.clone())
+                                    .or_default()
+                                    .extend(days.iter().copied().filter(|&day| {
+                                        self.calendar
+                                            .get(day)
+                                            .is_some_and(|d| locator.coverage.contains(*d))
+                                    }));
+                            }
+                        }
+                    }
+                } else {
+                    for (field, days) in fields {
+                        direct
+                            .entry(id.clone())
+                            .or_default()
+                            .entry(field.clone())
+                            .or_default()
+                            .extend(days);
+                    }
+                }
+            }
+            direct
+        });
         Ok(Self {
             root: self.root.clone(),
             calendar: self.calendar.clone(),
@@ -222,6 +342,7 @@ impl DailyDataset {
             view: self.view.clone(),
             source_map: Default::default(),
             read_range: self.read_range.clone(),
+            input_scope,
             field_cache: Default::default(),
             bar_cache: Default::default(),
             adjustment_cache: Default::default(),
@@ -259,7 +380,14 @@ impl DailyDataset {
                 }
             }
         }
-        Ok(DailyField { start: 0, values })
+        let field = DailyField { start: 0, values };
+        let name = match name {
+            "__raw_volume" => "volume",
+            "__factors" => "factor",
+            n => n.strip_prefix("__raw_").unwrap_or(n),
+        };
+        self.validate_qlib_values(&field, id, name)?;
+        Ok(field)
     }
 
     /// Open the current canonical format or the supported Qlib binary format.
@@ -348,6 +476,7 @@ impl DailyDataset {
                 root,
                 source_map: source_map.clone(),
                 read_range: None,
+                input_scope: None,
                 view: None,
                 field_cache: Default::default(),
                 bar_cache: Default::default(),
@@ -363,6 +492,7 @@ impl DailyDataset {
                 root,
                 source_map: source_map.clone(),
                 read_range: None,
+                input_scope: None,
                 view: None,
                 field_cache: Default::default(),
                 bar_cache: Default::default(),
@@ -489,8 +619,16 @@ impl DailyDataset {
         if let Some(bars) = self.bar_cache.borrow().get(id) {
             return Ok(bars.clone());
         }
-        let bars = Arc::new(read_bars(
+        let bars = Arc::new(read_bars_checked(
             &self.root.join("bars").join(format!("{id}.parquet")),
+            &|name, date| {
+                self.input_scope.is_none()
+                    || self
+                        .calendar
+                        .binary_search(&date)
+                        .ok()
+                        .is_some_and(|day| self.checks_observation(id, name, day))
+            },
         )?);
         #[cfg(test)]
         self.physical_reads.set(self.physical_reads.get() + 1);
@@ -540,7 +678,15 @@ impl DailyDataset {
             ));
         }
         let base = coefficient(&anchor.factor)?;
-        for date in self.calendar.iter().filter(|d| **d >= anchor.trade_date) {
+        for (day, date) in self
+            .calendar
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| **d >= anchor.trade_date)
+        {
+            if !self.checks_observation(id, "factor", day) {
+                continue;
+            }
             let scale = adjustment
                 .on(*date)?
                 .ok_or_else(|| invalid(format!("{id} {date}: adjustment coverage missing")))?
@@ -556,20 +702,37 @@ impl DailyDataset {
             if self.calendar.binary_search(&b.trade_date).is_err() {
                 return Err(invalid("observation outside trading calendar"));
             }
+            if self.input_scope.as_ref().is_some_and(|s| {
+                s.get(id).is_none_or(|m| {
+                    !m.values()
+                        .any(|ds| ds.contains(&self.calendar.binary_search(&b.trade_date).unwrap()))
+                })
+            }) {
+                continue;
+            }
             let scale = adjustment.on(b.trade_date)?.ok_or_else(|| {
                 invalid(format!(
                     "{id} {}: adjustment coverage missing",
                     b.trade_date
                 ))
             })? / base;
-            if [b.open, b.high, b.low, b.close]
-                .iter()
-                .flatten()
-                .any(|p| !(p * scale).is_finite() || p * scale <= 0.)
-                || b.volume.is_some_and(|v| !(v / scale).is_finite())
-                || b.amount
-                    .zip(b.volume)
-                    .is_some_and(|(a, v)| v > 0. && !(a / v * scale).is_finite())
+            let day = self.calendar.binary_search(&b.trade_date).unwrap();
+            if [
+                ("open", b.open),
+                ("high", b.high),
+                ("low", b.low),
+                ("close", b.close),
+            ]
+            .iter()
+            .filter(|(name, _)| self.checks_observation(id, name, day))
+            .filter_map(|(_, p)| *p)
+            .any(|p| !(p * scale).is_finite() || p * scale <= 0.)
+                || (self.checks_observation(id, "volume", day)
+                    && b.volume.is_some_and(|v| !(v / scale).is_finite()))
+                || (self.checks_observation(id, "vwap", day)
+                    && b.amount
+                        .zip(b.volume)
+                        .is_some_and(|(a, v)| v > 0. && !(a / v * scale).is_finite()))
             {
                 return Err(invalid(
                     "normalized research price/volume/VWAP cannot be represented",
@@ -602,7 +765,7 @@ impl DailyDataset {
             }
             let raw_close = self.raw_field(id, "close")?;
             for date in &self.calendar {
-                if self.read_range.as_ref().is_none_or(|r| r.contains(*date))
+                if self.checks_observation(id, "factor", self.calendar.binary_search(date).unwrap())
                     && raw_close
                         .get(self.calendar.binary_search(date).unwrap())
                         .is_some()
@@ -619,13 +782,7 @@ impl DailyDataset {
                 .values
                 .iter()
                 .enumerate()
-                .filter(|(i, _)| {
-                    self.read_range.as_ref().is_none_or(|r| {
-                        self.calendar
-                            .get(values.start + *i)
-                            .is_some_and(|d| r.contains(*d))
-                    })
-                })
+                .filter(|(i, _)| self.checks_observation(id, "factor", values.start + *i))
                 .filter_map(|(_, v)| *v)
                 .any(|f| f <= 0.)
                 || !values.values.iter().flatten().any(|f| *f > 0.)
@@ -1104,11 +1261,10 @@ impl DailyDataset {
                     .calendar
                     .binary_search(&b.trade_date)
                     .map_err(|_| invalid("date outside calendar"))?;
-                let scale = inputs
-                    .adjustment
-                    .on(b.trade_date)?
-                    .ok_or_else(|| invalid("adjustment coverage missing"))?
-                    / base;
+                let scale = inputs.adjustment.on(b.trade_date)?.map(|v| v / base);
+                let Some(scale) = scale else {
+                    continue;
+                };
                 let value = match name {
                     "open" => b.open.map(|p| p * scale),
                     "high" => b.high.map(|p| p * scale),
@@ -1245,6 +1401,12 @@ pub fn write_bars(path: &Path, bars: &[DailyBar]) -> io::Result<()> {
 }
 /// Read and validate canonical schema, identities, date order, nullable prices and units.
 pub fn read_bars(path: &Path) -> io::Result<Vec<DailyBar>> {
+    read_bars_checked(path, &|_, _| true)
+}
+fn read_bars_checked(
+    path: &Path,
+    checked: &impl Fn(&str, Date) -> bool,
+) -> io::Result<Vec<DailyBar>> {
     let reader = ParquetRecordBatchReaderBuilder::try_new(fs::File::open(path)?)
         .map_err(invalid)?
         .build()
@@ -1300,7 +1462,21 @@ pub fn read_bars(path: &Path) -> io::Result<Vec<DailyBar>> {
             for (j, f) in fields.iter().enumerate() {
                 if !f.is_null(i) {
                     let n = f.value(i);
-                    if !n.is_finite() || (j < 4 && n <= 0.0) || (j >= 8 && n < 0.0) {
+                    let name = [
+                        "open",
+                        "high",
+                        "low",
+                        "close",
+                        "adj_open",
+                        "adj_high",
+                        "adj_low",
+                        "adj_close",
+                        "volume",
+                        "amount",
+                    ][j];
+                    if checked(name, date)
+                        && (!n.is_finite() || (j < 4 && n <= 0.0) || (j >= 8 && n < 0.0))
+                    {
                         return Err(invalid("invalid price/volume/amount"));
                     }
                     v[j] = Some(n);
@@ -1322,7 +1498,27 @@ pub fn read_bars(path: &Path) -> io::Result<Vec<DailyBar>> {
             });
         }
     }
-    validate_bars(&out)?;
+    let mut validated = out.clone();
+    for b in &mut validated {
+        let date = b.trade_date;
+        for (name, value) in [
+            ("open", &mut b.open),
+            ("high", &mut b.high),
+            ("low", &mut b.low),
+            ("close", &mut b.close),
+            ("adj_open", &mut b.adj_open),
+            ("adj_high", &mut b.adj_high),
+            ("adj_low", &mut b.adj_low),
+            ("adj_close", &mut b.adj_close),
+            ("volume", &mut b.volume),
+            ("amount", &mut b.amount),
+        ] {
+            if !checked(name, date) {
+                *value = None;
+            }
+        }
+    }
+    validate_bars(&validated)?;
     Ok(out)
 }
 

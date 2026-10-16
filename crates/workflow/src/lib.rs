@@ -10,6 +10,7 @@ pub mod custom_factors;
 pub mod demo;
 pub mod factor_evaluation;
 pub mod factor_groups;
+pub mod input_check;
 pub mod maintenance;
 /// Immutable date-effective stock pools.
 pub mod pools;

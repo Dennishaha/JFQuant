@@ -169,3 +169,12 @@ GP29确认停牌日且缺少原始日线/成交量为零时，在日频账户适
 `collector/process`、`collector/publication`。见 [采集执行边界](src/collector/README.md)。
 采集依赖由 `collectors/requirements.in` 和对应哈希锁拥有；研究依赖由 workflow 拥有。
 打包同时安装两组锁，采集指纹只包含采集依赖。
+
+## 任务范围验证
+
+DailyDataset::restrict_input_checks 安装按证券/字段/日历位置划分的验证范围；加载的历史及固定
+归一化锚点保持原语义。Qlib 和规范 Parquet 的值检查只使用实际依赖，结构/身份错误仍拒绝。
+last_valid_close_date 用最后一个有效收盘及价格依据判断尾部，索引最大日期不代表可用尾部。
+checked_fields 和 checked_days 供签名阶段复用已冻结的真实字段及日期集；来源别名按各自
+有效窗口映射到实际证券。无 scope 的既有读取仍执行完整验证。
+验收包含范围外坏值/缺口、未使用字段、基准训练前年份、历史依赖及 native 合成 smoke。

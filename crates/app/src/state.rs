@@ -179,6 +179,11 @@ pub struct FactorPanel {
     pub quantiles: usize,
     pub min_samples: usize,
     pub evaluation: Option<analytics_workflow::factor_evaluation::EvaluationReport>,
+    pub input_check: Option<analytics_workflow::input_check::InputCheckReport>,
+    pub check_probe: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
+    pub check_source_stamp: Option<String>,
+    pub check_probe_at: Option<std::time::Instant>,
+    pub check_policy: analytics_core::research_quality::ResearchQualityPolicy,
 
     /// Independently selected factor family.
     pub factor_set: analytics_core::research_quality::FactorSet,
@@ -227,6 +232,11 @@ impl Default for FactorPanel {
             quantiles: 5,
             min_samples: 30,
             evaluation: None,
+            input_check: None,
+            check_probe: None,
+            check_source_stamp: None,
+            check_probe_at: None,
+            check_policy: Default::default(),
 
             factor_set: Default::default(),
             market_path: "data/market".into(),
@@ -570,6 +580,17 @@ pub fn apply_event(state: &mut AppState, event: &WorkerEvent) {
             }
             state.factor.preview = Some(preview.clone());
             state.factor.error = None;
+        }
+        WorkerEvent::FactorsChecked { task, report } => {
+            if !is_active(state, task) {
+                return;
+            }
+            state.factor.input_check = Some(report.clone());
+            state.factor.check_probe = None;
+            state.factor.check_probe_at = None;
+            state.factor.check_source_stamp = None;
+            state.factor.error = None;
+            state.push_message("组合数据检查完成".into());
         }
         WorkerEvent::FactorsEvaluated { task, report } => {
             if !is_active(state, task) {

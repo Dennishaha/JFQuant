@@ -71,6 +71,27 @@ pub(super) fn qualify_with_registry(
     factor_ids: &[String],
     registry: &FactorRegistry,
 ) -> Result<QualitySnapshot> {
+    qualify_scoped(dataset, pool, policy, range, factor_ids, registry, None)
+}
+
+pub(crate) fn qualify_scoped(
+    dataset: &DailyDataset,
+    pool: &PoolMembership,
+    policy: &ResearchQualityPolicy,
+    range: &DateRange,
+    factor_ids: &[String],
+    registry: &FactorRegistry,
+    plan: Option<&crate::input_check::InputCheckPlan>,
+) -> Result<QualitySnapshot> {
+    let required = plan.map(|p| {
+        crate::input_check::daily::requirements(
+            p,
+            &dataset.calendar,
+            pool,
+            plan.and_then(|p| p.context["benchmark"].as_str())
+                .unwrap_or(""),
+        )
+    });
     policy.validate()?;
     let dependencies: BTreeMap<_, _> = factor_ids
         .iter()
@@ -92,7 +113,19 @@ pub(super) fn qualify_with_registry(
         analytics_core::task::TaskContext::current().check()?;
         let data: Vec<_> = fields
             .iter()
-            .map(|f| dataset.research_field(id, f, policy.strictness != ResearchStrictness::Strict))
+            .map(|f| {
+                if required
+                    .as_ref()
+                    .is_some_and(|n| n.get(id).is_none_or(|m| !m.contains_key(*f)))
+                {
+                    Ok(analytics_storage::qlib::DailyField {
+                        start: 0,
+                        values: vec![None; dataset.calendar.len()],
+                    })
+                } else {
+                    dataset.research_field(id, f, policy.strictness != ResearchStrictness::Strict)
+                }
+            })
             .collect();
         let damage: Vec<_> = data
             .iter()
@@ -113,11 +146,25 @@ pub(super) fn qualify_with_registry(
                 analytics_core::task::TaskContext::current().check()?;
             }
             let date = dataset.calendar[day];
-            if !windows.iter().any(|r| r.contains(date)) {
+            let member = windows.iter().any(|r| r.contains(date));
+            if required.as_ref().is_some_and(|n| {
+                n.get(id)
+                    .is_none_or(|m| !m.values().any(|ds| ds.contains(&day)))
+            }) || (!member && required.is_none())
+            {
                 continue;
             }
+
             let mut missing = 0u16;
             for (i, r) in data.iter().enumerate() {
+                if required.as_ref().is_some_and(|n| {
+                    n.get(id)
+                        .and_then(|m| m.get(fields[i]))
+                        .is_none_or(|ds| !ds.contains(&day))
+                }) {
+                    continue;
+                }
+
                 if supplier_prices && matches!(fields[i], "vwap" | "factor") {
                     continue;
                 }
@@ -136,11 +183,18 @@ pub(super) fn qualify_with_registry(
                 .is_some_and(|e| !e.coverage.contains(date));
             if (missing == 0
                 || (policy.strictness == ResearchStrictness::Strict
-                    && data.iter().all(|r| r.is_ok())))
+                    && data.iter().enumerate().all(|(i, r)| {
+                        r.is_ok()
+                            || required.as_ref().is_some_and(|n| {
+                                n.get(id).is_none_or(|m| !m.contains_key(fields[i]))
+                            })
+                    })))
                 && damage.is_empty()
                 && !source_problem
             {
-                retained.push(date);
+                if member {
+                    retained.push(date);
+                }
                 continue;
             }
             let blocking = !damage.is_empty()
@@ -227,7 +281,7 @@ pub(super) fn qualify_with_registry(
                 },
                 &dataset.calendar,
             );
-            if disposition != Handling::ExcludeSecurity {
+            if member && disposition != Handling::ExcludeSecurity {
                 retained.push(date);
             }
         }

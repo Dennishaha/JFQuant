@@ -41,7 +41,14 @@ pub(super) fn samples(
     let predicting = mode.is_some_and(|m| m.predicting());
     let cache = request.output.join(".factor-staging");
     fs::create_dir_all(&cache)?;
-    for year in history_start.year()..=needed_end.year() {
+    let check_plan: crate::input_check::InputCheckPlan =
+        serde_json::from_slice(&fs::read(request.output.join("input-check-plan.json"))?)?;
+    let years: BTreeSet<_> = check_plan
+        .phases
+        .iter()
+        .flat_map(|p| p.effective.start.year()..=p.effective.end.year())
+        .collect();
+    for year in years {
         context.report(format!("因子年度 {year}"))?;
         data::prepare_year(
             data::YearInputs {
@@ -127,7 +134,7 @@ pub(super) fn samples(
             }
         }
     }
-    if !request.train_only && !request.audit_only {
+    if !request.train_only {
         for (index, fold) in folds.iter().enumerate() {
             let mask = data::prediction_mask(
                 &cache,
@@ -214,6 +221,14 @@ pub(super) fn samples(
         };
     }
     save(request.output.join("admission.json"), &admission)?;
+    input_report::samples(
+        request,
+        &cache,
+        &dataset.calendar,
+        &admission,
+        &feature_issues,
+        &execution["sample_selection"],
+    )?;
     if !feature_issues.is_empty() || !admission.ready() {
         save(
             request.output.join("execution_readiness.json"),

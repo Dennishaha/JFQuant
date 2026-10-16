@@ -99,7 +99,7 @@ for event_check in provider audited; do
   [ "$(plutil -extract results.execution.event_check_policy raw -o - "$check_root/event-$event_check.json")" = "$event_check" ]
 done
 # Exercise real date controls and absence of a validation set through the same service.
-run_cli research preview --template "$recipe" --market "$market" \
+run_cli research preview --template "$recipe" --market "$market" --actions "$actions" \
   --train-start 2007-01-02 --train-end 2008-01-12 \
   --test-start 2009-01-05 --test-end 2009-01-12 --no-validation > "$check_root/date-preview-submission.json"
 preview_id="$(plutil -extract task_id raw -o - "$check_root/date-preview-submission.json")"
@@ -120,6 +120,39 @@ run_cli query export --sql "SELECT 'SH600000' AS instrument_id, 'csi500' AS univ
 cat > "$check_root/pipeline-request.json" <<JSON
 {"factor_set":"gtja191","market_path":"$pipeline_dir/market.parquet","universe_path":"$pipeline_dir/universe.parquet","universe_id":"csi500","date_range":{"start":"2020-01-01","end":"2020-04-30"},"factor_ids":["alpha_002","alpha_001"],"output_dir":"$pipeline_dir/results","training":{"parameters":{"num_iterations":"100","seed":"17","min_data_in_leaf":"10"},"early_stopping_rounds":8}}
 JSON
+# Native combination checks use unsaved mixed refs and the same whole-context
+# artifact as diagnostics. No model or Python research process is started here.
+cat > "$check_root/check-draft.json" <<JSON
+{"name":"组合检查烟雾因子","description":"packaged acceptance","formula":"CLOSE / GTJA_DELAY(CLOSE, 3) - 1"}
+JSON
+run_cli factors save --definition "$check_root/check-draft.json" > "$check_root/check-factor.json"
+run_cli factors list --factor-set alpha158 > "$check_root/check-alpha158.json"
+run_cli factors list --factor-set gtja191 > "$check_root/check-gtja191.json"
+"$app/Contents/Resources/python/bin/python3" -I -B - "$check_root" <<'PYCOMBINATION'
+import json,pathlib,sys
+root=pathlib.Path(sys.argv[1]); base=json.loads((root/"pipeline-request.json").read_text());base.pop("training")
+custom=json.loads((root/"check-factor.json").read_text())["saved_factor"]
+def builtin(file, family, identifier):
+    value=json.loads((root/file).read_text())
+    spec=next(s for s in value["factors"] if s["id"]==identifier)
+    return {"source":"builtin","factor_set":family,"id":identifier,"formula_version":spec["version"]}
+base["factor_refs"]=[{"source":"custom","definition":custom},builtin("check-alpha158.json","alpha158","alpha158_001_KMID"),builtin("check-gtja191.json","gtja191","alpha_002")]
+base["factor_ids"]=[custom["id"],"alpha158_001_KMID","alpha_002"]
+(root/"combination-check.json").write_text(json.dumps({"input":base,"horizon":5}))
+(root/"combination-evaluate.json").write_text(json.dumps({"input":base,"horizon":5,"quantiles":2,"min_samples":3}))
+PYCOMBINATION
+for iteration in 1 2; do
+  run_cli factors check --request "$check_root/combination-check.json" > "$check_root/check-$iteration-submit.json"
+  check_id="$(plutil -extract task_id raw -o - "$check_root/check-$iteration-submit.json")"
+  run_cli jobs wait "$check_id" --timeout 60 > "$check_root/check-$iteration.json"
+  [ "$(plutil -extract results.ready raw -o - "$check_root/check-$iteration.json")" = true ]
+  [ ! -f "$check_root/workspace/.jfquant/runs/$check_id/model.txt" ]
+done
+[ "$(plutil -extract results.artifact.cache_hit raw -o - "$check_root/check-2.json")" = true ]
+run_cli factors evaluate --request "$check_root/combination-evaluate.json" > "$check_root/check-evaluate-submit.json"
+evaluation_id="$(plutil -extract task_id raw -o - "$check_root/check-evaluate-submit.json")"
+run_cli jobs wait "$evaluation_id" --timeout 60 > "$check_root/check-evaluate.json"
+[ "$(plutil -extract results.computation_receipt.cache_hit raw -o - "$check_root/check-evaluate.json")" = true ]
 run_cli factors run --request "$check_root/pipeline-request.json" > "$check_root/pipeline-submission.json"
 pipeline_id="$(plutil -extract task_id raw -o - "$check_root/pipeline-submission.json")"
 run_cli jobs wait "$pipeline_id" --timeout 60 > "$check_root/pipeline.json"

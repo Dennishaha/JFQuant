@@ -35,7 +35,7 @@ use std::{
     path::{Path, PathBuf},
     sync::mpsc,
 };
-const SUPPORTED_RESEARCH_INPUTS: [&str; 15] = [
+pub(crate) const SUPPORTED_RESEARCH_INPUTS: [&str; 15] = [
     "open",
     "high",
     "low",
@@ -1224,6 +1224,12 @@ pub fn preview_samples_with_policy(
     let mut issues = BTreeMap::new();
     for (id, windows) in &pool.intervals {
         analytics_core::task::TaskContext::current().check()?;
+        if dataset
+            .checked_fields(id)
+            .is_some_and(|fields| fields.is_empty())
+        {
+            continue;
+        }
         let fields = dataset
             .research_field(id, "open", policy.allows_missing())
             .and_then(|o| {

@@ -1,24 +1,23 @@
 //! Independent cross-sectional diagnostics; no model fit or trading simulation.
 #![allow(missing_docs)]
 use crate::research::pipeline::{
-    Cancellation, PipelineError, PipelineEvent, PipelineRequest, Result, panel_from_rows,
-    snapshot_hash,
+    Cancellation, PipelineError, PipelineEvent, PipelineRequest, Result, snapshot_hash,
 };
 use analytics_core::{Date, DateRange};
+#[cfg(test)]
 use analytics_engine::DuckDbEngine;
-use analytics_factor::{FactorExecutor, FactorRegistry, FactorRunRequest, InMemoryFactorExecutor};
+
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, HashMap},
-    sync::{
-        atomic::Ordering,
-        mpsc::{Sender, channel},
-    },
+    collections::BTreeMap,
+    sync::{atomic::Ordering, mpsc::Sender},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EvaluationRequest {
+    #[serde(default)]
+    pub policy: analytics_core::research_quality::ResearchQualityPolicy,
     pub input: EvaluationInput,
     pub horizon: usize,
     pub quantiles: usize,
@@ -79,6 +78,10 @@ pub struct FactorDiagnostic {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvaluationReport {
+    #[serde(default)]
+    pub computation_receipt: Option<crate::input_check::cache::Receipt>,
+    #[serde(default)]
+    pub execution_range: Option<DateRange>,
     pub schema_version: u32,
     pub request: EvaluationRequest,
     pub formula_version: String,
@@ -227,121 +230,44 @@ pub fn run(
     cancel: Cancellation,
 ) -> Result<EvaluationReport> {
     let input = &request.input;
-    input
-        .date_range
-        .validate()
-        .map_err(|e| PipelineError::InvalidInput(e.to_string()))?;
-    if !(1..=252).contains(&request.horizon)
-        || !(2..=10).contains(&request.quantiles)
-        || request.min_samples < request.quantiles.max(3)
-        || input.factor_ids.is_empty()
-    {
+    if !(2..=10).contains(&request.quantiles) || request.min_samples < request.quantiles.max(3) {
         return Err(PipelineError::InvalidInput(
-            "需选择因子；周期1—252日、分层2—10组、最少样本不低于分层数及3".into(),
+            "分层2—10组、最少样本不低于分层数及3".into(),
         ));
     }
-    check(&cancel)?;
-    let hash = snapshot_hash(&input.market_path, &input.universe_path)?;
-    let _ = progress.send(PipelineEvent::LoadingMarket);
-    let mut engine = DuckDbEngine::open_in_memory()?;
-    let (rows, members) = engine.load_factor_research_rows(
-        &input.market_path,
-        &input.universe_path,
-        &input.universe_id,
-        &DateRange {
-            start: "1900-01-01".parse().unwrap(),
-            end: input.date_range.end,
-        },
-    )?;
-    if rows.is_empty() {
-        return Err(PipelineError::InvalidInput("没有行情数据".into()));
-    }
-    check(&cancel)?;
-    let _ = progress.send(PipelineEvent::MarketLoaded { rows: rows.len() });
-    let mut panel = panel_from_rows(&rows);
-    let eligible: Vec<_> = rows
-        .iter()
-        .zip(&members)
-        .map(|(r, m)| {
-            *m && r.is_trading.unwrap_or(true) && r.listing_date.is_none_or(|d| d <= r.trade_date)
-        })
-        .collect();
-    panel.columns.insert(
-        "__universe_member".into(),
-        eligible
-            .iter()
-            .map(|m| Some(if *m { 1. } else { 0. }))
-            .collect(),
-    );
-    let registry =
-        FactorRegistry::resolve(input.factor_set, &input.factor_refs, &input.factor_ids)?;
-    let mut missing_inputs = std::collections::BTreeSet::new();
-    for id in &input.factor_ids {
-        let spec = registry
-            .get(id)
-            .ok_or_else(|| PipelineError::InvalidInput(format!("unknown factor {id}")))?;
-        for col in &spec.input_columns {
-            if !panel.columns.contains_key(col) {
-                missing_inputs.insert(col.clone());
-            }
-            panel
-                .columns
-                .entry(col.clone())
-                .or_insert_with(|| vec![None; rows.len()]);
-        }
-    }
-    let formula_version = registry.selection_version(&input.factor_ids)?;
-    let (tx, rx) = channel();
-    let forward = std::thread::spawn(move || {
-        for event in rx {
-            let _ = progress.send(PipelineEvent::Factors(event));
-        }
-    });
-    let computed = InMemoryFactorExecutor { registry, panel }.compute(
-        FactorRunRequest {
-            date_range: DateRange {
-                start: rows.first().unwrap().trade_date,
-                end: input.date_range.end,
-            },
-            universe_id: input.universe_id.clone(),
-            factor_ids: input.factor_ids.clone(),
-            formula_version: formula_version.clone(),
-        },
-        tx,
+    let mut prepared =
+        crate::input_check::parquet::prepare(input, request.horizon, &progress, &cancel)?;
+    let check_request = crate::input_check::CheckRequest {
+        expected_input_hash: None,
+        expected_source_stamp: None,
+        input: input.clone(),
+        horizon: request.horizon,
+        policy: request.policy.clone(),
+    };
+    let (availability, artifact) = crate::input_check::parquet::run_prepared(
+        &check_request,
+        &mut prepared,
+        progress,
         cancel.clone(),
-    );
-    let _ = forward.join();
-    let artifact = computed?;
-    let calendar: Vec<_> = rows
-        .iter()
-        .map(|r| r.trade_date)
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    let dates: HashMap<_, _> = calendar.iter().enumerate().map(|(i, d)| (*d, i)).collect();
-    let prices: HashMap<_, _> = rows
-        .iter()
-        .filter(|r| r.is_trading.unwrap_or(true))
-        .map(|r| ((r.instrument_id.as_str(), r.trade_date), r.adj_close))
-        .collect();
-    let mut labels = vec![None; rows.len()];
+    )?;
+    if !availability.ready() {
+        return Err(PipelineError::InvalidInput(
+            "data_not_ready: input check failed; see input-check.json".into(),
+        ));
+    }
+    let artifact = artifact
+        .ok_or_else(|| PipelineError::InvalidInput("factor computation did not complete".into()))?;
+    let execution_range = availability.plan.phases[0].effective.clone();
+    let rows = &prepared.rows;
+    let eligible = &prepared.eligible;
+    let labels = &prepared.labels;
+    let hash = prepared.input_hash.clone();
+    let missing_inputs = &prepared.absent;
+    let formula_version = prepared.registry.selection_version(&input.factor_ids)?;
     let mut days: BTreeMap<Date, Vec<usize>> = BTreeMap::new();
     for (i, r) in rows.iter().enumerate() {
-        if !input.date_range.contains(r.trade_date) || !eligible[i] {
-            continue;
-        }
-        days.entry(r.trade_date).or_default().push(i);
-        if let Some(end) = calendar.get(dates[&r.trade_date] + request.horizon) {
-            labels[i] = r
-                .adj_close
-                .zip(
-                    prices
-                        .get(&(r.instrument_id.as_str(), *end))
-                        .copied()
-                        .flatten(),
-                )
-                .and_then(|(a, b)| (a > 0. && b > 0.).then_some(b / a - 1.))
-                .filter(|x| x.is_finite());
+        if execution_range.contains(r.trade_date) && eligible[i] {
+            days.entry(r.trade_date).or_default().push(i);
         }
     }
     if days.is_empty() {
@@ -354,7 +280,7 @@ pub fn run(
         factors.push(diagnose(
             id,
             &artifact.values[id],
-            &labels,
+            labels,
             &days,
             request,
             &cancel,
@@ -368,7 +294,7 @@ pub fn run(
     }
     let feature_schema_hash = crate::signature(&(formula_version.as_str(), &input.factor_ids))
         .map_err(|e| PipelineError::InvalidInput(e.to_string()))?;
-    let mut report = EvaluationReport { feature_schema_hash, schema_version: 2, request: request.clone(), formula_version, input_hash: hash, factor_manifest: serde_json::from_str(&artifact.manifest_json)?, warnings: vec![
+    let mut report = EvaluationReport { computation_receipt:availability.artifact,execution_range:Some(execution_range),feature_schema_hash, schema_version: 3, request: request.clone(), formula_version, input_hash: hash, factor_manifest: serde_json::from_str(&artifact.manifest_json)?, warnings: vec![
         "收益口径：当日复权收盘至未来H个市场交易日复权收盘；复权价缺失时沿用加载器的原价回退。仅统计诊断，不含费用、成交限制或行业/市值中性化。".into(),
         "日期历取行情中所有日期；缺失终点、停牌终点和区间尾部保留空值，不顺延。日均分层收益可重叠，不作为可交易净值。".into(),
         "使用文件内全部前置历史预热；短历史正常输出空值，完全缺失的行情行不会补齐。RankIC IR为均值/样本标准差，不年化，不判定显著性。".into(),
@@ -376,7 +302,11 @@ pub fn run(
     if !missing_inputs.is_empty() {
         report.warnings.push(format!(
             "输入行情不含这些因子依赖，相关结果保留空值：{}",
-            missing_inputs.into_iter().collect::<Vec<_>>().join(", ")
+            missing_inputs
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
     std::fs::create_dir_all(&input.output_dir)?;
@@ -389,8 +319,10 @@ pub fn run(
 mod tests {
     use super::*;
     use crate::research::pipeline::cancellation;
+    use std::sync::mpsc::channel;
     fn request() -> EvaluationRequest {
         EvaluationRequest {
+            policy: Default::default(),
             input: PipelineRequest {
                 factor_refs: Vec::new(),
                 factor_set: Default::default(),
@@ -512,7 +444,7 @@ mod tests {
         let records = workspace.runs().unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].status, crate::RunStatus::Succeeded);
-        assert_eq!(workspace.results(&records[0]).unwrap()["schema_version"], 2);
+        assert_eq!(workspace.results(&records[0]).unwrap()["schema_version"], 3);
         let (tx, _) = channel();
         let flag = cancellation();
         flag.store(true, Ordering::Relaxed);

@@ -48,8 +48,23 @@ pub(super) fn run(
     mode: Option<&independent::Execution>,
     context: &TaskContext,
 ) -> Result<()> {
-    let Some(prepared) = prepare(request, mode, context)? else {
-        return Ok(());
+    let prepared = match prepare(request, mode, context) {
+        Ok(Some(prepared)) => prepared,
+        Ok(None) => {
+            if !request.output.join("input-check.json").exists() {
+                let reason = fs::read(request.output.join("execution_readiness.json"))
+                    .ok()
+                    .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                    .and_then(|v| v["reason"].as_str().map(str::to_owned))
+                    .unwrap_or_else(|| "输入前提不满足".into());
+                input_report::unresolved(request, &reason)?;
+            }
+            return Ok(());
+        }
+        Err(error) => {
+            let _ = input_report::unresolved(request, &error.to_string());
+            return Err(error);
+        }
     };
     let signed = sign(prepared, mode, context)?;
     let Some(signed) = replay(signed, mode, context)? else {
@@ -74,3 +89,5 @@ mod fit_predict;
 use fit_predict::fit_predict;
 mod publish;
 use publish::publish;
+
+mod input_report;

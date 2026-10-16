@@ -17,7 +17,20 @@ pub(super) fn execute(
             market,
             actions,
         } => {
-            details = research_requirements_with_actions(w, template, market, actions.as_deref())?;
+            let m = version(w, market, "market")?;
+            let a = actions
+                .as_deref()
+                .map(|id| version(w, id, "actions"))
+                .transpose()?;
+            let r = research_request(w, run, template, &m, a.as_ref(), true)?;
+            crate::research::backtest::run_with_context(&r, context)?;
+            details = serde_json::from_slice(&fs::read(
+                w.resolve(&run.output).join("input-check.json"),
+            )?)?;
+            let readiness: serde_json::Value = serde_json::from_slice(&fs::read(
+                w.resolve(&run.output).join("execution_readiness.json"),
+            )?)?;
+            details["resolved_folds"] = readiness["resolved_folds"].clone();
         }
         WorkflowRequest::PrepareResearchData {
             actions,

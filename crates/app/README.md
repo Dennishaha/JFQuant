@@ -1,4 +1,4 @@
-当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议25、采集协议13、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
+当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议26、采集协议13、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
 
 # analytics-desktop
 
@@ -42,7 +42,7 @@ DUCKDB_DOWNLOAD_LIB=1 cargo nextest run -p analytics-desktop
 当前结果对未模拟特殊事件显示“回测完成，含未模拟事件”，并保留未解决普通问题的阻断状态。
 核对规则、格式6与复现命令见storage/workflow组件README。验收包含公共任务、结果警告与旧格式隔离。
 
-原生刷新现在以3个证券工作线程获取行情和公司行动，沿用监督进程、检查点、取消及完整发布校验。后端`RefreshRequest`允许1—8线程及显式跨任务分片复用；公共`RefreshCoverage`只读RPC可读取进度、历史成员覆盖及候选可用池，报告不自动授权训练或改变股票池。CLI命令及完整验收见[工作流README](../workflow/README.md)。服务协议25。
+原生刷新现在以3个证券工作线程获取行情和公司行动，沿用监督进程、检查点、取消及完整发布校验。后端`RefreshRequest`允许1—8线程及显式跨任务分片复用；公共`RefreshCoverage`只读RPC可读取进度、历史成员覆盖及候选可用池，报告不自动授权训练或改变股票池。CLI命令及完整验收见[工作流README](../workflow/README.md)。服务协议26。
 
 “更新行动”按钮使用同一Rust动作分片流程，保持当前登记行情，重新获取事件；不读废弃动作版本作为补采输入。
 
@@ -59,7 +59,7 @@ Packaged CLI acceptance also invokes `research verify --task <UUID>` after the t
 
 因子页提供只读Alpha158/GTJA191组，以及复制、改名、编辑说明、筛选、保存、删除自定义组；
 “应用到研究配置”只替换因子选择，保留日期和股票池。修改内置组必须先复制。
-“因子有效性测试”独立发送服务协议25的EvaluateFactors任务，支持进度和取消；默认5日、5分层、
+“因子有效性测试”独立发送服务协议26的EvaluateFactors任务，支持进度和取消；默认5日、5分层、
 30个日内有效样本。报告展示覆盖率、配对率、有效天数、IC、RankIC、RankIC IR、正RankIC比例、
 高减低收益，展开查看每日统计与分层收益，可导出JSON及逐项加入自定义选择后保存。
 结果使用冻结参数，即使表单后来改变也不会改写报告；模型训练仍保留原入口。
@@ -77,7 +77,7 @@ Packaged CLI acceptance also invokes `research verify --task <UUID>` after the t
 界面同时显示库中最新修订和组内固定修订。保存组或应用到研究后，训练、报告和旧模型均使用冻结定义。
 归档因子及删除组保留历史；原始158/191仍只读。
 
-因子库读写通过协议24共享服务，UI异步同步；计算和预览通过worker任务，支持取消。
+因子库读写通过协议26共享服务，UI异步同步；计算和预览通过worker任务，支持取消。
 验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-desktop`。
 
 ## 独立训练与跨池回测
@@ -93,7 +93,7 @@ Packaged CLI acceptance also invokes `research verify --task <UUID>` after the t
 
 A/B可重叠，横截面计算互相隔离；B不参与验证或早停。首日没有合法模型则拒绝回测。
 账户跨模型连续运行；报告显示曾见/未见标的及同一账户贡献，预测可独立重放。
-旧“年度研究/仅训练/已有模型回测”入口保持原配置语义。服务协议25，结果19仅读取当前格式。
+旧“年度研究/仅训练/已有模型回测”入口保持原配置语义。服务协议26，结果19仅读取当前格式。
 
 ```bash
 DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-desktop independent_training_and_backtest_editors
@@ -109,3 +109,20 @@ NAV 由后台 `views` 读取并缓存；渲染线程只消费普通数据，过�
 ```bash
 DUCKDB_DOWNLOAD_LIB=1 cargo nextest run -p analytics-desktop
 ```
+
+## 组合数据检查
+
+因子页“检查组合数据”使用当前未保存的有序选择、文件、股票池、日期和未来交易日周期。
+可选原有三档策略，默认严格。后台显示依赖/输入/因子/样本阶段，结果展示逐因子有效率、
+标签配对数、空值连续区间、任务/历史缺失计数及明确的全空因子告警。
+通过只代表本页上下文可计算；训练还要求训练标签、样本掩码及最少样本门槛。
+选择、公式修订、日期、数据或策略改变会使旧报告过期；文件变化由后台轻量探针提示。
+检查与正式任务均由安装包内 Rust worker 执行，取消与报告随任务持久化，不依赖源码目录或外部 Python。
+`factor_checks.rs` 负责控件/新鲜度；`input_check` 的两个适配器负责判断与计算。
+安装验收：`crates/app/packaging/package-macos.sh`，包含离线混合组合检查与结果复用 smoke。
+
+仅验证原生组合检查可运行：
+`crates/app/packaging/verify-input-check.sh /绝对路径/JFQuant.app /绝对路径/验收输出`。
+脚本在新目录以 `env -i` 和系统 PATH 启动安装包，使用原生 SQL 生成2030年行情、
+混合固定修订及历史成员，检查两次并验证正式诊断缓存命中和停止服务后的离线结果。
+此项不调用任何 Python、编译器或源码模块，也可对只读挂载 DMG 中的 App 执行。

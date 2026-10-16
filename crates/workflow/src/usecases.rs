@@ -306,12 +306,46 @@ pub fn research_requirements_with_actions(
         rs.retain(|r| r.end >= lo && r.start <= hi);
         !rs.is_empty()
     });
-    let quality = crate::research::backtest::quality::qualify(
+    let registry = t.factor_registry()?;
+    let ids = if t.config.factor_ids.is_empty() {
+        registry
+            .all()
+            .filter(|s| {
+                !matches!(
+                    s.expression,
+                    analytics_factor::FactorExpr::Unsupported { .. }
+                ) && s.input_columns.iter().all(|c| {
+                    crate::research::backtest::SUPPORTED_RESEARCH_INPUTS.contains(&c.as_str())
+                })
+            })
+            .map(|s| s.id.clone())
+            .collect()
+    } else {
+        t.config.factor_ids.clone()
+    };
+    let check_plan = crate::input_check::InputCheckPlan::new(
+        t.factor_set,
+        &t.config.factor_refs,
+        &ids,
+        &registry,
+        "preparation",
+        json!({"benchmark":benchmark,"seed":"research-annual-756-v1"}),
+        crate::input_check::daily::phases(&folds, false, false),
+    )?;
+    dataset.restrict_input_checks(crate::input_check::daily::requirements(
+        &check_plan,
+        &dataset.calendar,
+        &preview_pool,
+        &benchmark,
+    ));
+    let quality = crate::research::backtest::quality::qualify_scoped(
         &dataset,
         &preview_pool,
         &t.quality_policy,
         &analytics_core::DateRange { start: lo, end: hi },
-        &t.config.factor_ids,
+        &ids,
+        &registry,
+        Some(&check_plan),
     )?;
     let sample_readiness = crate::research::backtest::preview_samples_with_policy(
         &dataset,
@@ -320,7 +354,7 @@ pub fn research_requirements_with_actions(
         &t.quality_policy,
     )?;
     Ok(
-        json!({"quality":quality,"dependencies":dependencies,"successor_check":successor_check,"resolved_folds":folds,"sample_readiness":sample_readiness,"securities":symbols,"history_start":lo,"execution_end":hi,"pool":frozen,"schema_version":3,"source_map":dataset.source_map(),"benchmark":benchmark,"unknown_cross_section_before":pool.coverage.start}),
+        json!({"check_plan":check_plan,"complete_check":false,"quality":quality,"dependencies":dependencies,"successor_check":successor_check,"resolved_folds":folds,"sample_readiness":sample_readiness,"securities":symbols,"history_start":lo,"execution_end":hi,"pool":frozen,"schema_version":3,"source_map":dataset.source_map(),"benchmark":benchmark,"unknown_cross_section_before":pool.coverage.start}),
     )
 }
 use crate::{demo, preparation, refresh};

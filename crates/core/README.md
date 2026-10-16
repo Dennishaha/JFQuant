@@ -59,3 +59,10 @@ RUSTDOCFLAGS="-D warnings" cargo doc -p analytics-core --no-deps
 配股在普通调仓前处理既有交收，再执行一次认购，随后更新当天生效的获配、退款与上市状态；同日认购与获配不会延迟到下一交易日。验收：`cargo test -p analytics-core rights`。
 
 依赖升级：账户 Decimal 固定为 1.43.0，与原生 AKQuant 补丁一致；`hash::Hex` 固定小写双位十六进制输出，保留旧 SHA-256 字符串（包括前导零）。验收：`cargo test -p analytics-core`。
+
+## 模型格式3的因子来源
+
+ModelManifest继续读取格式2，并在格式3保留有序factor_refs和factor_definitions数据快照；
+避免类型化读取/序列化时丢失自定义修订和算子收据。core不依赖因子执行器，具体版本和AST校验
+由factor/workflow执行；格式3训练schema哈希同时绑定特征名称、类型、顺序和固定定义。
+验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow custom_factors`及CLI混合因子集成测试。

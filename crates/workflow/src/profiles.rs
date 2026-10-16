@@ -13,6 +13,8 @@ pub struct FactorProfile {
     pub formula_version: String,
     pub price_basis: PriceBasis,
     pub factor_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub factor_refs: Vec<analytics_factor::selection::FactorRef>,
 }
 /// Standalone instrument selection; dynamic constituents remain an immutable pool version.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,16 +51,21 @@ impl FactorProfile {
     /// Capture current ordered features and their source contract.
     pub fn from_template(t: &ResearchTemplate) -> Self {
         Self {
-            schema_version: 1,
+            schema_version: if t.config.factor_refs.is_empty() {
+                1
+            } else {
+                2
+            },
             factor_set: t.factor_set,
             formula_version: t.formula_version.clone(),
             price_basis: t.price_basis,
             factor_ids: t.config.factor_ids.clone(),
+            factor_refs: t.config.factor_refs.clone(),
         }
     }
     /// Apply and validate with the common template rules.
     pub fn apply(&self, t: &mut ResearchTemplate) -> Result<()> {
-        if self.schema_version != 1 {
+        if !matches!(self.schema_version, 1 | 2) {
             return Err("unsupported_factor_profile_format".into());
         }
         let mut candidate = t.clone();
@@ -66,6 +73,7 @@ impl FactorProfile {
         candidate.formula_version = self.formula_version.clone();
         candidate.price_basis = self.price_basis;
         candidate.config.factor_ids = self.factor_ids.clone();
+        candidate.config.factor_refs = self.factor_refs.clone();
         candidate.validate()?;
         *t = candidate;
         Ok(())
@@ -79,7 +87,9 @@ impl FactorProfile {
     /// Save a validated reusable profile atomically.
     pub fn write(&self, path: &Path) -> Result<()> {
         self.apply(&mut ResearchTemplate::default())?;
-        atomic_json(path, self)
+        let mut current = self.clone();
+        current.schema_version = 2;
+        atomic_json(path, &current)
     }
 }
 impl TargetProfile {
@@ -147,10 +157,11 @@ impl WorkflowDocument {
         t.formula_version = f.formula_version;
         t.price_basis = f.price_basis;
         t.config.factor_ids = f.factor_ids;
+        t.config.factor_refs = f.factor_refs;
         t.pool_version = u.pool_version;
         t.benchmark = u.benchmark;
         t.pool_exit_policy = u.pool_exit_policy;
-        if f.schema_version != 1 || u.schema_version != 1 {
+        if !matches!(f.schema_version, 1 | 2) || u.schema_version != 1 {
             return Err("unsupported profile format".into());
         }
         t.validate()?;
@@ -170,7 +181,8 @@ impl WorkflowDocument {
     /// Persist profiles before atomically publishing their workflow reference.
     pub fn write(t: &ResearchTemplate, path: &Path) -> Result<()> {
         t.validate()?;
-        let f = FactorProfile::from_template(t);
+        let mut f = FactorProfile::from_template(t);
+        f.schema_version = 2;
         let u = TargetProfile::from_template(t);
         let fp = PathBuf::from(format!("factors/{}.json", &signature(&f)?[7..]));
         let up = PathBuf::from(format!("targets/{}.json", &signature(&u)?[7..]));

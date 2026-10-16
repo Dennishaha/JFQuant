@@ -340,7 +340,7 @@ pub struct FeatureSpec {
 /// can be tied back to the exact training configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelManifest {
-    /// Manifest schema version (currently 1).
+    /// Model format 2 (legacy numerical schema) or 3 (frozen factor provenance).
     pub schema_version: u32,
     /// Unique model identifier.
     pub model_id: Uuid,
@@ -348,9 +348,9 @@ pub struct ModelManifest {
     pub features: Vec<FeatureSpec>,
     /// Objective used for training.
     pub objective: String,
-    /// Hash over feature names and count.
+    /// Format 2 hashes feature names/count; format 3 also binds types, order and definitions.
     pub training_schema_hash: String,
-    /// Alpha191 formula catalog version.
+    /// Builtin catalog version or ordered mixed-definition signature.
     pub formula_version: Option<String>,
     /// Universe used for training.
     pub universe_id: Option<String>,
@@ -358,6 +358,12 @@ pub struct ModelManifest {
     pub date_range: Option<DateRange>,
     /// Hash of the input Parquet snapshot.
     pub input_snapshot_hash: Option<String>,
+    /// Version-specific, data-only factor references; validated by analytics-factor/workflow.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub factor_refs: Vec<serde_json::Value>,
+    /// Ordered source/compiled operator receipts, preserved on manifest round trips.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub factor_definitions: Vec<serde_json::Value>,
 }
 
 /// LightGBM objective family.

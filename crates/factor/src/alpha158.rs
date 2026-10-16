@@ -9,6 +9,7 @@ pub const FORMULA_VERSION: &str = "qlib-alpha158-b87a2c2+jfquant-units-v1";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(missing_docs)]
 pub enum Expr {
+    Unified(Box<crate::operators::Expression>),
     Input(String),
     Constant(f64),
     Binary {
@@ -25,6 +26,10 @@ impl Expr {
     /// Input dependencies, derived once from the pinned syntax tree.
     pub fn inputs(&self) -> BTreeSet<String> {
         match self {
+            Self::Unified(e) => e
+                .compile()
+                .map(|c| c.inputs.into_iter().collect())
+                .unwrap_or_default(),
             Self::Input(s) => BTreeSet::from([s.clone()]),
             Self::Constant(_) => BTreeSet::new(),
             Self::Binary { left, right, .. } => {
@@ -33,9 +38,21 @@ impl Expr {
             Self::Call { args, .. } => args.iter().flat_map(Self::inputs).collect(),
         }
     }
+    /// Recursive history can be introduced by a cross-system custom argument.
+    pub fn requires_recursive_state(&self) -> bool {
+        match self {
+            Self::Unified(e) => e.compile().is_ok_and(|c| c.requires_recursive_state),
+            Self::Binary { left, right, .. } => {
+                left.requires_recursive_state() || right.requires_recursive_state()
+            }
+            Self::Call { args, .. } => args.iter().any(Self::requires_recursive_state),
+            _ => false,
+        }
+    }
     /// Number of historical observations including nested delays.
     pub fn lookback(&self) -> usize {
         match self {
+            Self::Unified(e) => e.compile().map(|c| c.lookback as usize).unwrap_or(1),
             Self::Input(_) | Self::Constant(_) => 1,
             Self::Binary { left, right, .. } => left.lookback().max(right.lookback()),
             Self::Call { name, args } => {
@@ -92,32 +109,24 @@ pub fn version(set: analytics_core::research_quality::FactorSet) -> &'static str
         analytics_core::research_quality::FactorSet::Alpha158 => FORMULA_VERSION,
     }
 }
-#[derive(Deserialize)]
-struct Catalogue {
-    features: Vec<Definition>,
-}
-#[derive(Deserialize)]
-struct Definition {
-    name: String,
-    formula: String,
-    expression: Expr,
-}
 pub(super) fn registry() -> FactorRegistry {
-    let catalog: Catalogue =
-        serde_json::from_str(include_str!("../testdata/alpha158_formulas.json"))
-            .expect("compiled Alpha158 catalogue");
+    let catalog =
+        super::formulas::catalogue(include_str!("../catalogs/alpha158.json"), FORMULA_VERSION);
     let specs = catalog
         .features
         .into_iter()
         .enumerate()
         .map(|(i, f)| {
-            let id = format!("alpha158_{:03}_{}", i + 1, f.name);
+            let id = f.id;
+            assert_eq!(id, format!("alpha158_{:03}_{}", i + 1, f.name));
+            assert_eq!(f.syntax, "qlib");
+            let expression = f.expression.expect("compiled Qlib AST");
             let spec = FactorSpec {
                 id: id.clone(),
-                lookback: f.expression.lookback() as u32,
+                lookback: expression.lookback() as u32,
                 requires_recursive_state: false,
-                input_columns: f.expression.inputs().into_iter().collect(),
-                expression: FactorExpr::Alpha158(f.expression),
+                input_columns: expression.inputs().into_iter().collect(),
+                expression: FactorExpr::Alpha158(expression),
                 version: FORMULA_VERSION.into(),
                 formula: f.formula,
             };
@@ -140,6 +149,7 @@ fn rolling_std(values: impl Iterator<Item = f64>) -> f64 {
 pub(super) fn evaluate(expr: &Expr, panel: &EvaluationPanel<'_>) -> Result<Vec<Option<f64>>> {
     let n = panel.instrument_id.len();
     match expr {
+        Expr::Unified(e) => crate::evaluate(&e.lower()?, panel),
         Expr::Input(name) => panel
             .columns
             .get(name)

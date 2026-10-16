@@ -138,6 +138,35 @@ mod duckdb_backend {
             universe_id: &str,
             date_range: &DateRange,
         ) -> Result<Vec<MarketRow>> {
+            let (rows, members) =
+                self.load_factor_rows(market_path, universe_path, universe_id, date_range, false)?;
+            Ok(rows
+                .into_iter()
+                .zip(members)
+                .filter_map(|(r, member)| member.then_some(r))
+                .collect())
+        }
+
+        /// Preserve price history outside membership for factor warmup and forward labels.
+        /// The returned mask represents membership on each row's date.
+        pub fn load_factor_research_rows(
+            &mut self,
+            market_path: &Path,
+            universe_path: &Path,
+            universe_id: &str,
+            date_range: &DateRange,
+        ) -> Result<(Vec<MarketRow>, Vec<bool>)> {
+            self.load_factor_rows(market_path, universe_path, universe_id, date_range, true)
+        }
+
+        fn load_factor_rows(
+            &mut self,
+            market_path: &Path,
+            universe_path: &Path,
+            universe_id: &str,
+            date_range: &DateRange,
+            preserve_history: bool,
+        ) -> Result<(Vec<MarketRow>, Vec<bool>)> {
             date_range
                 .validate()
                 .map_err(|error| EngineError::InvalidRequest(error.to_string()))?;
@@ -149,7 +178,7 @@ mod duckdb_backend {
                         row_number() OVER (PARTITION BY m.instrument_id, m.trade_date
                             ORDER BY u.trade_date DESC) AS membership_rank
                     FROM read_parquet('{market}', union_by_name=true) m
-                    JOIN read_parquet('{universe}', union_by_name=true) u
+                    LEFT JOIN read_parquet('{universe}', union_by_name=true) u
                       ON u.instrument_id = m.instrument_id
                      AND u.universe_id = ?
                      AND u.trade_date <= m.trade_date
@@ -159,10 +188,15 @@ mod duckdb_backend {
                     open, high, low, close, volume, amount,
                     COALESCE(adj_open, open), COALESCE(adj_high, high),
                     COALESCE(adj_low, low), COALESCE(adj_close, close),
-                    is_trading, CAST(listing_date AS VARCHAR)
+                    is_trading, CAST(listing_date AS VARCHAR), COALESCE(is_member, false)
                 FROM joined
-                WHERE membership_rank = 1 AND is_member
+                WHERE membership_rank = 1 {member_filter}
                 ORDER BY trade_date, instrument_id",
+                member_filter = if preserve_history {
+                    ""
+                } else {
+                    "AND is_member"
+                },
                 market = escape_sql_literal(&market),
                 universe = escape_sql_literal(&universe),
             );
@@ -176,6 +210,7 @@ mod duckdb_backend {
                 .query(duckdb::params![universe_id, start, end])
                 .map_err(|error| EngineError::DuckDb(error.to_string()))?;
             let mut output = Vec::new();
+            let mut members = Vec::new();
             while let Some(row) = rows
                 .next()
                 .map_err(|error| EngineError::DuckDb(error.to_string()))?
@@ -188,6 +223,7 @@ mod duckdb_backend {
                 }
                 let trade_date = parse_date(get!(1, String))?;
                 let listing_date = get!(13, Option<String>).map(parse_date).transpose()?;
+                members.push(get!(14, bool));
                 output.push(MarketRow {
                     instrument_id: get!(0, String),
                     trade_date,
@@ -205,7 +241,7 @@ mod duckdb_backend {
                     listing_date,
                 });
             }
-            Ok(output)
+            Ok((output, members))
         }
 
         fn csv_or_parquet_copy(request: &ExportRequest) -> String {

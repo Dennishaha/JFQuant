@@ -974,6 +974,21 @@ pub fn research_panel(
             state.platform.template.config.factor_ids.len()
         ),
         |ui| {
+            if !state.platform.template.config.factor_refs.is_empty() {
+                ui.label("已固定混合因子及其修订；请在因子页编辑后重新应用。");
+                for r in &state.platform.template.config.factor_refs {
+                    ui.monospace(match r {
+                        analytics_factor::selection::FactorRef::Builtin {
+                            factor_set, id, ..
+                        } => format!("{} · {id}", factor_set.label()),
+                        analytics_factor::selection::FactorRef::Custom { definition } => format!(
+                            "{} · {} · 修订{}",
+                            definition.name, definition.id, definition.revision
+                        ),
+                    });
+                }
+                return;
+            }
             ui.text_edit_singleline(&mut state.platform.filter);
             let quarantined = analytics_factor::audit::quarantined_ids();
             egui::ScrollArea::vertical()

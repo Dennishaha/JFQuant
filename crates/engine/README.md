@@ -84,3 +84,11 @@ flowchart LR
 ```
 
 验收：nextest覆盖来源日期边界、三档掩码、训练／回测分离及模型保留；Clippy、Rustdoc、格式、组件文档和包内CLI共同检查。生成数据、模型、运行记录和安装包不提交。另一台Apple Silicon/macOS14实机验收继续待完成。
+
+## 保留成员外历史的研究加载
+
+`DuckDbEngine::load_factor_research_rows`返回 `(Vec<MarketRow>, Vec<bool>)`，对历史成员做
+left as-of join；没有此前成员记录的行掩码为false，行情行仍保留。因子有效性测试用全部历史
+预热，以当日掩码做横截面统计，以市场日期而非“下一条有效行情”定位收益终点。
+原 `load_market_rows` 继续只返回成员行；两种入口均在worker中使用连接。
+验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow parquet_evaluation`。

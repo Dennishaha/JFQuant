@@ -496,6 +496,7 @@ mod tests {
                 WorkerCommand::RunPipeline {
                     task: pipeline,
                     request: PipelineRequest {
+                        factor_refs: Vec::new(),
                         factor_set: Default::default(),
                         market_path: dir.path().join("missing-market.parquet"),
                         universe_path: dir.path().join("missing-universe.parquet"),
@@ -810,6 +811,7 @@ mod tests {
                 task,
                 cancel,
                 request: PipelineRequest {
+                    factor_refs: Vec::new(),
                     factor_set: Default::default(),
                     market_path: dir.path().join("missing"),
                     universe_path: dir.path().join("missing"),
@@ -925,6 +927,7 @@ mod tests {
                 task,
                 cancel: analytics_workflow::research::pipeline::cancellation(),
                 request: PipelineRequest {
+                    factor_refs: Vec::new(),
                     factor_set: Default::default(),
                     market_path: market,
                     universe_path: universe,

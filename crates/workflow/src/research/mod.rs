@@ -313,6 +313,8 @@ impl Trainer for LightGbmTrainer {
             universe_id: Some(request.universe_id.clone()),
             date_range: Some(request.date_range.clone()),
             input_snapshot_hash: None,
+            factor_refs: Vec::new(),
+            factor_definitions: Vec::new(),
         };
         let mut value = serde_json::to_value(manifest)?;
         value["runtime"] = serde_json::json!({"worker":worker::runtime_signature(),"dependencies":worker::dependency_signature(),"lightgbm":"4.7.0"});
@@ -348,7 +350,7 @@ impl Predictor for LightGbmPredictor {
         let model = fs::canonicalize(&self.model_path)?;
         let folder = model.parent().unwrap();
         let manifest = load_manifest(folder.join("manifest.json"))?;
-        if manifest.schema_version != 2 || manifest.features.len() != columns {
+        if !matches!(manifest.schema_version, 2 | 3) || manifest.features.len() != columns {
             return Err(MlError::InvalidData(
                 "unsupported model format/feature count; retrain using Python worker".into(),
             ));
@@ -420,7 +422,43 @@ impl Predictor for LightGbmPredictor {
 
 /// Loads and deserializes a model manifest from JSON.
 pub fn load_manifest(path: impl AsRef<Path>) -> Result<ModelManifest> {
-    Ok(serde_json::from_slice(&fs::read(path)?)?)
+    let raw: serde_json::Value = serde_json::from_slice(&fs::read(path)?)?;
+    if raw["schema_version"] == 3 {
+        let check = || -> std::result::Result<(), Box<dyn std::error::Error>> {
+            let refs: Vec<analytics_factor::selection::FactorRef> =
+                serde_json::from_value(raw["factor_refs"].clone())?;
+            let ids: Vec<String> = raw["features"]
+                .as_array()
+                .ok_or("model feature array missing")?
+                .iter()
+                .map(|f| {
+                    f["name"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .ok_or("invalid feature name")
+                })
+                .collect::<std::result::Result<_, _>>()?;
+            if refs.is_empty() {
+                return Err("model frozen definitions missing".into());
+            }
+            let registry =
+                analytics_factor::FactorRegistry::resolve(Default::default(), &refs, &ids)?;
+            if raw["factor_definitions"] != registry.manifest_definitions(&ids)? {
+                return Err("model formula/operator receipt mismatch".into());
+            }
+            if raw["training_schema_hash"]
+                != analytics_factor::selection::hash(&(&raw["features"], &raw["factor_refs"]))?
+            {
+                return Err("model feature schema hash mismatch".into());
+            }
+            if raw["formula_version"] != registry.selection_version(&ids)? {
+                return Err("model factor provenance mismatch".into());
+            }
+            Ok(())
+        };
+        check().map_err(|e| MlError::InvalidData(e.to_string()))?;
+    }
+    Ok(serde_json::from_value(raw)?)
 }
 
 #[cfg(test)]

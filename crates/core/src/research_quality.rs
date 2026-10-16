@@ -22,7 +22,7 @@ impl PriceBasis {
     }
 }
 
-/// One independently versioned feature family per run.
+/// Legacy builtin catalogue selector; mixed runs carry per-factor frozen references.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FactorSet {

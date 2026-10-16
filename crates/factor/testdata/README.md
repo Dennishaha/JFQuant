@@ -63,7 +63,7 @@ flowchart LR
 
 ## Alpha158的独立全列参考
 
-为什么另建参考：GTJA的rolling/null语义不能替代固定Qlib定义。alpha158_formulas.json保存固定loader的来源URL/哈希、158项顺序及数据AST；alpha158_expected.json包含85日×3证券全部158列，覆盖短窗口、缺失、零量、常量和并列。reference_alpha158.py用独立Pandas/NumPy实现固定语义，**未直接调用Qlib**，不能把它标为Qlib实际执行输出。运行时不依赖这个脚本或Qlib。
+为什么另建参考：GTJA的rolling/null语义不能替代固定Qlib定义。../catalogs/alpha158.json保存固定loader的来源URL/哈希、158项顺序及数据AST；alpha158_expected.json包含85日×3证券全部158列，覆盖短窗口、缺失、零量、常量和并列。reference_alpha158.py用独立Pandas/NumPy实现固定语义，**未直接调用Qlib**，不能把它标为Qlib实际执行输出。运行时不依赖这个脚本或Qlib。
 
 ```mermaid
 flowchart LR
@@ -77,3 +77,7 @@ flowchart LR
 ```
 
 开发重现：`target/collector-build/python/bin/python3 -I crates/factor/testdata/reference_alpha158.py target/alpha158-expected.json`，再`cmp crates/factor/testdata/alpha158_expected.json target/alpha158-expected.json`，最后`cargo nextest run -p analytics-factor`。输出不一致必须解释公式/算子或数值依赖变化，不能直接覆盖夹具让测试变绿。GTJA现有golden和公式v4保持。
+
+`custom_operator_golden.json`为手算的5行合成序列，覆盖GTJA延迟/递归SMA嵌套在Qlib滚动均值中的
+结果与null位置。`operators::tests`同时校验递归历史元数据、严格语法拒绝，以及两套原AST经统一注册表
+无损往返。正式因子目录已移动到`../catalogs/`，本目录只保留独立数值夹具和参考脚本。

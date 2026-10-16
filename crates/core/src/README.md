@@ -43,3 +43,6 @@ RUSTDOCFLAGS="-D warnings" cargo doc -p analytics-core --no-deps
 
 测试覆盖日期、分页、manifest、股票池、来源映射、原始条款和取消边界。
 实际成交、费用与连续账户行为在 workflow/research 组件验收。
+
+ModelManifest新增可选数据快照factor_refs/factor_definitions以保留格式3来源信息；旧格式2缺省为空，
+不补造定义。具体AST和算子收据由workflow调用factor验证，保持core无执行器依赖。

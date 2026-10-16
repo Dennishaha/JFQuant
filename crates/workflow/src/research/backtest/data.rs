@@ -348,7 +348,13 @@ pub(super) fn prepare_year(
     if first >= end {
         return Err(format!("no trading dates in {year}").into());
     }
-    let warmup = first.saturating_sub(756);
+    let lookback = ids
+        .iter()
+        .filter_map(|id| registry.get(id))
+        .map(|s| s.lookback as usize)
+        .max()
+        .unwrap_or(1);
+    let warmup = first.saturating_sub(756.max(lookback));
     let benchmark_open = dataset.field(benchmark, "open")?;
     let benchmark_close = dataset.field(benchmark, "close")?;
     let benchmark_factor = dataset.field(benchmark, "factor")?;
@@ -562,7 +568,7 @@ pub(super) fn prepare_year(
         },
         universe_id: universe_id.into(),
         factor_ids: ids.to_vec(),
-        formula_version: registry.all().next().unwrap().version.clone(),
+        formula_version: registry.selection_version(ids)?,
     };
     let start = std::time::Instant::now();
     let mut column = 0;
@@ -607,7 +613,7 @@ pub(super) fn prepare_year(
     write_features(&staging.join("features.parquet"), ids, &features)?;
     save(
         staging.join("manifest.json"),
-        &serde_json::json!({"schema_version":1,"signature":shard_signature,"features":ids,"rows":meta.rows.len(),"finite_counts":meta.finite_counts,"sha256":file_hash(&staging.join("features.parquet"))?}),
+        &serde_json::json!({"schema_version":1,"loaded_history_start":dataset.calendar[warmup],"recursive_seed_rule":"first_finite_observation","signature":shard_signature,"features":ids,"rows":meta.rows.len(),"finite_counts":meta.finite_counts,"sha256":file_hash(&staging.join("features.parquet"))?}),
     )?;
     analytics_core::task::TaskContext::current().check()?;
     fs::rename(staging, &shared)?;

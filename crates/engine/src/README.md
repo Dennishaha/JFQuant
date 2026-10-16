@@ -61,3 +61,6 @@ flowchart LR
 ```
 
 验收：nextest覆盖来源日期边界、三档掩码、训练／回测分离及模型保留；Clippy、Rustdoc、格式、组件文档和包内CLI共同检查。生成数据、模型、运行记录和安装包不提交。另一台Apple Silicon/macOS14实机验收继续待完成。
+
+`load_factor_research_rows`以left as-of join保留成员外行情，并返回逐行成员掩码；旧入口
+`load_market_rows`仍过滤非成员。独立因子测试借此保留入池前预热和出池后收益终点，连接不跨线程。

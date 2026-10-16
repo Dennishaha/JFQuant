@@ -7,6 +7,8 @@
 //! panel, and a bottom status bar with a collapsible message log.
 #![warn(missing_docs)]
 
+mod custom_factors;
+mod factor_groups;
 mod panels;
 mod platform;
 mod quality_ui;

@@ -331,6 +331,42 @@ pub enum FileFormat {
 }
 #[derive(Debug, Subcommand)]
 pub enum FactorCommand {
+    /// Search the unified, read-only operator catalogue.
+    Operators {
+        #[arg(long, default_value = "")]
+        query: String,
+    },
+    /// List custom factors and builtin/custom groups.
+    Library,
+    Validate {
+        #[arg(long)]
+        definition: PathBuf,
+    },
+    Save {
+        #[arg(long)]
+        definition: PathBuf,
+    },
+    Archive {
+        #[arg(long)]
+        id: String,
+    },
+    Preview {
+        #[arg(long)]
+        definition: PathBuf,
+    },
+    SaveGroup {
+        #[arg(long)]
+        definition: PathBuf,
+    },
+    ArchiveGroup {
+        #[arg(long)]
+        id: String,
+    },
+    /// Independent factor IC, coverage and quantile-return diagnostics.
+    Evaluate {
+        #[arg(long)]
+        request: PathBuf,
+    },
     List {
         #[arg(long, value_enum, default_value = "gtja191")]
         factor_set: FactorSetValue,
@@ -1036,6 +1072,15 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
                 },
             }
         }
+        Command::Factors(FactorCommand::Operators {query}) => return client.call(Rpc::Operators{query}),
+        Command::Factors(FactorCommand::Library) => return client.call(Rpc::FactorLibrary),
+        Command::Factors(FactorCommand::Validate {definition}) => return client.call(Rpc::ValidateFactor{draft:read(&client.root,&definition)?}),
+        Command::Factors(FactorCommand::Save {definition}) => return client.call(Rpc::SaveFactor{draft:read(&client.root,&definition)?}),
+        Command::Factors(FactorCommand::Archive {id}) => return client.call(Rpc::ArchiveFactor{id}),
+        Command::Factors(FactorCommand::SaveGroup {definition}) => return client.call(Rpc::SaveFactorGroup{group:Box::new(read(&client.root,&definition)?)}),
+        Command::Factors(FactorCommand::ArchiveGroup {id}) => return client.call(Rpc::ArchiveFactorGroup{id}),
+        Command::Factors(FactorCommand::Preview {definition}) => TaskRequest::PreviewFactor{draft:read(&client.root,&definition)?},
+        Command::Factors(FactorCommand::Evaluate { request }) => TaskRequest::EvaluateFactors { request: Box::new(read(&client.root, &request)?) },
         Command::Factors(FactorCommand::Run { request }) => TaskRequest::Pipeline {
             request: Box::new(read(&client.root, &request)?),
         },

@@ -96,4 +96,44 @@ flowchart LR
   F --> V
 ```
 
-Alpha158派生定义保留[固定Qlib MIT许可](QLIB_LICENSE.txt)，打包时随App的Resources/Licenses分发；公式源提交及哈希见testdata/alpha158_formulas.json。
+Alpha158派生定义保留[固定Qlib MIT许可](QLIB_LICENSE.txt)，打包时随App的Resources/Licenses分发；公式源提交及哈希见catalogs/alpha158.json。
+
+## 自定义因子与统一算子（2026-10-16）
+
+`operators::{OperatorRegistry,OperatorSpec,Expression,CompiledExpression,compile_formula}` 是统一入口。
+注册表集中定义语义ID、参数类型、别名、输出类型、窗口/空值/历史规则、版本、示例和Rust内核绑定。
+GTJA原始公式的历史修复由legacy parser完成，结果经统一注册表校验；新公式严格解析，不自动补括号或修复拼写。
+旧GTJA AST与Qlib AST均转换为显式算子调用，再调用保留原数值语义的Rust内核；跨体系子表达式可互相嵌套。
+
+`catalogs/{gtja191,alpha158}.json` 使用共同目录格式1并编译期嵌入，保存有序ID、名称、原文、syntax、可选源AST、
+来源及原公式版本。191原字符串逐项迁移，158原AST逐项保留；既有golden不更新。目录原文与AST不是用户可覆盖配置。
+
+用户公式示例：`CLOSE / GTJA_DELAY(CLOSE,20) - 1`；跨体系示例：`QLIB_MEAN(GTJA_SMA(CLOSE,3,1),2)`。
+输入限OPEN/HIGH/LOW/CLOSE/VOLUME/AMOUNT/VWAP/RET；算子必须使用GTJA_或QLIB_前缀，大小写不敏感。
+支持算术、比较、逻辑和括号；普通运算符沿用GTJA空值传播。窗口必须为1—10000的整数常量，
+概率在[0,1]，数值必须有限；公式上限16384字节、用户表达式24层；拒绝未来窗口、脚本和因子引用。
+`GTJA_RANK(X)`为当日成员横截面排名，`QLIB_RANK(X,N)`为平均并列的滚动排名；
+`GTJA_MIN/MAX`为逐元素比较，滚动用GTJA_TSMIN/TSMAX；`GTJA_SUMIF(X,COND,N)`在统一语法中明确条件在窗口之前。
+
+`selection::{CustomFactorDefinition,FactorRef}` 保存自定义修订的原文、AST、输入、历史依赖、算子版本和定义哈希。
+`FactorRegistry::resolve`验证有序引用并支持混合；`selection_version`对混合定义和顺序生成签名，纯内置保留原版本。
+格式2因子manifest记录逐因子原文与编译收据、载入历史起点和递归种子规则；正常缺失仍输出null。
+
+```mermaid
+flowchart LR
+  B[两套只读JSON目录] --> A[统一显式算子AST]
+  U[严格用户公式] --> A
+  R[统一OperatorRegistry] --> A
+  A --> K[保留各体系语义的Rust内核]
+  F[固定修订的有序FactorRef] --> K
+  K --> O[nullable列 / 原文与算子版本收据]
+```
+
+```bash
+cargo test -p analytics-factor
+cargo test --doc -p analytics-factor
+cargo clippy -p analytics-factor --all-targets -- -D warnings
+```
+
+验收包括原GTJA/Alpha158全量golden、原AST无损往返、严格语法拒绝、跨体系嵌套和递归元数据。
+`testdata/custom_operator_golden.json`为独立手算小序列，解释SMA状态与Qlib缺失处理，不能由执行器输出覆盖。

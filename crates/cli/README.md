@@ -1,4 +1,4 @@
-当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议21、采集协议13、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
+当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议23、采集协议13、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
 
 # analytics-cli / jfquant
 
@@ -75,7 +75,7 @@ jfquant data refresh --template workflow.json --market MARKET_ID --workers 3 --r
 DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli
 ```
 
-服务协议21；升级时先等待或取消旧版本任务，再停止旧服务。旧协议客户端不能连接新协议服务。采集协议13与公司行动格式7同步升级；特征顺序和公式版本未改变。
+服务协议23；升级时先等待或取消旧版本任务，再停止旧服务。旧协议客户端不能连接新协议服务。采集协议13与公司行动格式7同步升级；特征顺序和公式版本未改变。
 
 分区位于不同本地工作区时，可用`--sources-manifest sources.json`汇总覆盖，或`--reuse-shards-manifest sources.json`复用；JSON数组元素为当前工作区任务UUID字符串，或`{"workspace":"/absolute/workspace","task_id":"UUID"}`。只读验证原生任务、同一不可变基础数据/窗口/基准及证券子集；不修改来源工作区。尚有分区待检查的证券不被误列为缺失。复用仍由采集器重新验证全部身份及哈希。
 
@@ -91,3 +91,65 @@ DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli
 已发布预测对照入口：`jfquant research replay-predictions --source SUCCESSFUL_BACKTEST_UUID --actions ACTION_VERSION --participation abandon --attempt first_day --insufficient-cash partial`。可选 participate、last_day、all_or_abandon、stop；默认放弃认购；主动选择参与时，默认首日一次、现金内部分认购。该入口验证原任务及预测身份，不加载旧模型，不重训。参与认购时，实际持仓条款不全则停止并输出字段缺口。
 
 依赖升级后的 `research verify` 保持旧 SHA-256 身份核验；`research replay-predictions` 可复用旧环境发布的预测并记录新执行环境，旧模型直接复用仍受依赖签名检查。默认配股策略继续为 abandon。
+
+## 单因子有效性批量测试
+
+`jfquant --workspace /path/to/workspace factors evaluate --request evaluation.json` 提交服务协议23
+的独立测试任务，后续沿用jobs查询、取消和结果读取。请求示例（路径相对工作区）：
+
+```json
+{
+  "input": {
+    "factor_set": "alpha158",
+    "market_path": "data/market",
+    "universe_path": "data/universe",
+    "universe_id": "csi500",
+    "date_range": {"start": "2020-01-01", "end": "2025-12-31"},
+    "factor_ids": ["alpha158_001_KMID"],
+    "output_dir": ".jfquant/runs"
+  },
+  "horizon": 5,
+  "quantiles": 5,
+  "min_samples": 30
+}
+```
+
+服务会把输出固定在本次任务目录；无需训练参数。报告的统计口径和null规则见
+[workflow](../workflow/README.md)。构建及验收：
+`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli`。
+
+## 自定义公式与算子目录（协议23）
+
+```bash
+jfquant --workspace /path/to/workspace factors operators --query QLIB_MEAN
+jfquant --workspace /path/to/workspace factors library
+jfquant --workspace /path/to/workspace factors validate --definition draft.json
+jfquant --workspace /path/to/workspace factors save --definition draft.json
+jfquant --workspace /path/to/workspace factors preview --definition draft.json
+jfquant --workspace /path/to/workspace factors archive --id custom_<UUID>
+jfquant --workspace /path/to/workspace factors save-group --definition group.json
+jfquant --workspace /path/to/workspace factors archive-group --id <组UUID>
+```
+
+`draft.json`示例：
+
+```json
+{
+  "id": null,
+  "expected_revision": null,
+  "name": "20日动量",
+  "description": "复权收盘价的20条观测变化",
+  "formula": "CLOSE / GTJA_DELAY(CLOSE,20) - 1"
+}
+```
+
+保存返回`saved_factor`和最新库列表。修改时使用返回ID和expected_revision；保存产生新修订。
+Preview返回异步任务ID，沿用jobs wait/results/cancel，结果明确为合成样本。
+
+混合评估/流水线请求在input/PipelineRequest中增加`factor_refs`；每项为
+`{"source":"builtin","factor_set":"alpha158","id":"alpha158_001_KMID","formula_version":"qlib-alpha158-b87a2c2+jfquant-units-v1"}`
+或`{"source":"custom","definition":<saved_factor对象>}`。其ID顺序必须与factor_ids完全一致。
+自定义组的profile使用格式2及同样的factor_refs；请保留完整保存响应中的定义与哈希。
+旧factor_set/factor_ids请求继续支持，原始因子目录不可通过库接口覆盖。
+
+验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli custom_formula_library_mixed_evaluation_training_and_revision_receipts`。

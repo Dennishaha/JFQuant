@@ -1,4 +1,4 @@
-当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议21、采集协议13、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
+当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议23、采集协议13、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
 
 # analytics-workflow
 
@@ -213,3 +213,89 @@ flowchart LR
 BacktestPredictions 接收成功原生回测任务、行动版本和 rights::Policy；冻结原任务及预测文件哈希，核验特征/市场身份后只执行账户。研究执行协议2、结果格式17及配股账本v2；旧结果16和账本v1保持只读核验。参见研究worker README。
 
 依赖升级保持服务和研究协议不变；Decimal 1.43.0 同步原生引擎，sha2 0.11.1 使用固定旧格式摘要。Python 哈希锁和原生源码锁共同隔离研究环境；旧结果只读核验与预测复用继续保留。
+
+## 因子组与独立有效性测试（2026-10-16）
+
+`factor_groups::{FactorGroup,list}` 管理工作区 `.jfquant/factor-groups/<UUID>.json`（格式2，兼容格式1读取）。
+Alpha158、GTJA191由代码生成只读内置组，分组持久化接口拒绝内置ID；自定义组支持158/191及自定义因子混合，保存名称、说明及原有 `FactorProfile`（家族、公式版本、价格口径、有序因子ID）。
+原始公式不变；GTJA191默认178项，12项隔离、Alpha030缺少三因子输入。空组、重复ID、
+跨家族ID及过期公式版本拒绝保存。编辑或删除分组不改变已冻结的任务和模型。
+
+`factor_evaluation::{EvaluationInput,EvaluationRequest,run,EvaluationReport}` 独立计算，无模型训练。
+服务协议23增加 `TaskRequest::EvaluateFactors`、`WorkerCommand::EvaluateFactors` 和
+`WorkerEvent::FactorsEvaluated`，复用任务进度、取消、记录及错误处理。每次任务输出
+`factor-evaluation.json`、`artifacts.json`、事件payload；完整报告保留请求、输入文件哈希、
+公式版本、有序特征的schema哈希、执行器manifest及逐日统计。输入计算前后哈希不一致拒绝发布。
+
+```mermaid
+flowchart LR
+  G[只读原始组 / 自定义子集] --> Q[冻结有序因子及测试参数]
+  P[行情全部前置历史 + 历史成分] --> F[worker内因子计算 / 当日成分掩码]
+  Q --> F
+  F --> D[覆盖率 / 逐日IC / RankIC / 分层收益]
+  D --> R[版本化报告与任务记录]
+  R --> S[人工选择并另存自定义组]
+```
+
+默认未来5个市场交易日、5分层、每日至少30对有效样本。IC是Pearson，RankIC使用平均并列名次；
+RankIC IR为日均值/样本标准差，不年化。每日等权计算后跨日等权平均；覆盖率分母为测试区间
+当日有效成员行数，另列有标签的配对覆盖率。常量、不足样本、零标准差及空桶显示null。
+并列值不按证券代码强行拆组；高减低固定为最高桶减最低桶，不自动根据测试结果翻转方向。
+
+价格使用规范行情的复权OHLC（沿用加载器缺失复权字段时回退原价的行为），收益为t日收盘至
+t+H日收盘。日期历来自行情文件日期并集；不取测试结束之后的数据；终点缺失或不交易则标签null，
+不跳到下一有效价格。成员历史只影响当日横截面，入池前历史保留用于预热，出池后行情仍可用于
+标签。使用1900年起文件内全部历史，滚动窗口沿用每证券观测行语义，完全缺行不会自动补交易日；
+历史不足或缺依赖字段保留null并报告。分层收益是重叠H日收益的诊断均值，不是策略净值；
+不含交易费用、行业/市值中性化或统计显著性判断。
+
+```bash
+DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow factor_
+DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-desktop
+DUCKDB_DOWNLOAD_LIB=1 cargo clippy -p analytics-workflow -p analytics-desktop -p analytics-cli --all-targets -- -D warnings
+```
+
+验收包含手算正负相关、并列/常量/空值、最少样本、入池预热、尾部无标签、旧加载器兼容、取消、
+内置保护、自定义组保存删除及真实egui按钮交互。统计设计参考[Alphalens](https://quantopian.github.io/alphalens/)，
+运行时不引入该库。文件均为工作区产物，不提交生成数据。
+
+## 自定义修订、混合选择与统一算子服务
+
+`custom_factors`保存`.jfquant/factors/custom_<UUID>/<revision>.json`（定义格式1）；每次保存新修订，
+要求expected_revision匹配，临时文件写入并fsync后以不覆盖方式发布。归档写`archived.json`，旧修订仍可解析；
+任务从提交时内嵌的定义执行，不跟随因子库最新版本。组格式2及FactorProfile格式2增加有序factor_refs，
+组内可混合两套内置因子和自定义修订；旧格式1仍读取，保存用格式2。旧纯内置配置保持等价签名。
+
+协议23新增RPC：Operators、FactorLibrary、ValidateFactor、SaveFactor、ArchiveFactor、SaveFactorGroup、
+ArchiveFactorGroup；App/CLI共用处理函数。PreviewFactor是worker异步任务，输出标记为合成数据的样本预览，
+不把预览当市场有效性结论。其他计算继续使用EvaluateFactors/Pipeline/TrainResearch/BacktestResearch。
+
+PipelineRequest、EvaluationInput和ResearchConfig可携带factor_refs；缺省仍解析旧factor_set和factor_ids。
+当有显式引用时，引用顺序必须与factor_ids完全一致。最大历史需求逐因子合并，递归自定义项至少预热756条；
+缓存记录实际载入起点和首个有限值的种子规则。多体系计算共享同一价格口径和当日成员掩码。
+
+格式2因子缓存manifest、格式2评估报告、格式3模型manifest及带引用的格式4训练描述逐项记录定义、算子版本、
+顺序与哈希；研究结果格式18，仍接受16/17读取。旧模型格式2和训练描述3按旧字段验证，不补造自定义定义。
+新模型每次读取验证冻结定义、算子收据及训练schema哈希。因子定义或顺序改变会改变签名；缓存重训前检查
+来源/顺序及已记录的缓存文件哈希，避免训练后才发现来源不一致。修改或归档因子库不会破坏旧模型。
+
+```mermaid
+flowchart LR
+  UI[App编辑器 / CLI] --> RPC[协议23共享因子库接口]
+  RPC --> V[不可变公式修订 / 混合组]
+  V --> S[提交时冻结FactorRef顺序及定义]
+  S --> W[worker编译及因子计算]
+  W --> E[评估报告]
+  W --> T[缓存 / 模型 / 训练描述]
+  T --> B[冻结模型回测]
+```
+
+```bash
+DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-factor -p analytics-workflow -p analytics-cli -p analytics-desktop
+DUCKDB_DOWNLOAD_LIB=1 cargo clippy -p analytics-factor -p analytics-workflow -p analytics-cli -p analytics-desktop --all-targets -- -D warnings
+cargo test --doc -p analytics-factor -p analytics-workflow -p analytics-cli
+cargo fmt --all -- --check
+```
+
+验收覆盖20日动量创建、修订冲突和篡改拒绝、归档后引用保留、跨体系混合评估/训练、原模型在库修改后继续回测、
+CLI独立进程和真实egui按钮。仅使用临时合成数据，生成行情、模型和任务文件不提交。

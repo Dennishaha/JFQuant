@@ -850,6 +850,7 @@ fn standard_pipeline_json_preserves_feature_order_and_persistent_artifacts() {
         "universe.parquet",
     ]);
     let request = analytics_workflow::research::pipeline::PipelineRequest {
+        factor_refs: Vec::new(),
         factor_set: Default::default(),
         market_path: "market.parquet".into(),
         universe_path: "universe.parquet".into(),
@@ -1325,4 +1326,139 @@ fn retired_action_commands_are_not_public_cli_interfaces() {
     for command in ["supplement", "retry"] {
         assert!(analytics_cli::Cli::try_parse_from(["jfquant", "data", command]).is_err());
     }
+}
+
+#[test]
+fn custom_formula_library_mixed_evaluation_training_and_revision_receipts() {
+    use analytics_core::research_quality::FactorSet;
+    use analytics_factor::selection::{CustomFactorDefinition, FactorRef};
+    let s = Sandbox::new();
+    let write = |name: &str, value: &Value| {
+        std::fs::write(s.client.root.join(name), serde_json::to_vec(value).unwrap()).unwrap()
+    };
+    write(
+        "factor.json",
+        &json!({"name":"20日动量","description":"CLI acceptance","formula":"CLOSE / GTJA_DELAY(CLOSE,20) - 1","id":null,"expected_revision":null}),
+    );
+    assert!(
+        !s.json(&["factors", "operators", "--query", "QLIB_MEAN"])["operators"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        s.json(&["factors", "validate", "--definition", "factor.json"])["compiled"]["lookback"],
+        21
+    );
+    let first = s.json(&["factors", "save", "--definition", "factor.json"]);
+    let saved: CustomFactorDefinition =
+        serde_json::from_value(first["saved_factor"].clone()).unwrap();
+    let preview = s.json(&["factors", "preview", "--definition", "factor.json"]);
+    let id = preview["task_id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(
+        s.client.wait(id, Some(15)).unwrap()["record"]["status"],
+        "succeeded"
+    );
+    let market = "SELECT 'SH' || (600000+s)::VARCHAR AS instrument_id, DATE '2020-01-01' + d::INTEGER AS trade_date, (10.0+s+d*.01)::DOUBLE AS open, (open+1)::DOUBLE AS high, (open-1)::DOUBLE AS low, (open+.1+s*.01)::DOUBLE AS close, (1000.0+d)::DOUBLE AS volume, (volume*close)::DOUBLE AS amount, open AS adj_open, high AS adj_high, low AS adj_low, close AS adj_close, true AS is_trading, DATE '2000-01-01' AS listing_date FROM range(6) a(s) CROSS JOIN range(120) b(d)";
+    let universe = "SELECT 'SH' || (600000+s)::VARCHAR AS instrument_id,'csi500' AS universe_id,DATE '2000-01-01' AS trade_date,true AS is_member FROM range(6) a(s)";
+    s.json(&[
+        "query",
+        "export",
+        "--sql",
+        market,
+        "--output",
+        "market.parquet",
+    ]);
+    s.json(&[
+        "query",
+        "export",
+        "--sql",
+        universe,
+        "--output",
+        "universe.parquet",
+    ]);
+    let refs = vec![
+        FactorRef::Custom {
+            definition: Box::new(saved.clone()),
+        },
+        FactorRef::builtin(FactorSet::Alpha158, "alpha158_001_KMID"),
+        FactorRef::builtin(FactorSet::Gtja191, "alpha_002"),
+    ];
+    let ids: Vec<String> = refs.iter().map(|r| r.id().to_owned()).collect();
+    let input = analytics_workflow::research::pipeline::PipelineRequest {
+        factor_refs: refs.clone(),
+        factor_set: FactorSet::Gtja191,
+        market_path: "market.parquet".into(),
+        universe_path: "universe.parquet".into(),
+        universe_id: "csi500".into(),
+        date_range: analytics_core::DateRange {
+            start: "2020-01-01".parse().unwrap(),
+            end: "2020-04-30".parse().unwrap(),
+        },
+        factor_ids: ids.clone(),
+        output_dir: "unused".into(),
+        training: Default::default(),
+    };
+    let evaluation = analytics_workflow::factor_evaluation::EvaluationRequest {
+        input: input.clone().into(),
+        horizon: 5,
+        quantiles: 3,
+        min_samples: 3,
+    };
+    write(
+        "evaluation.json",
+        &serde_json::to_value(evaluation).unwrap(),
+    );
+    let eval = s.json(&["factors", "evaluate", "--request", "evaluation.json"]);
+    let eval_id = eval["task_id"].as_str().unwrap().parse().unwrap();
+    let result = s.client.wait(eval_id, Some(15)).unwrap();
+    assert_eq!(result["record"]["status"], "succeeded");
+    let report: Value = serde_json::from_slice(
+        &std::fs::read(
+            s.client
+                .root
+                .join(format!(".jfquant/runs/{eval_id}/factor-evaluation.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(report["factors"][0]["factor_id"], saved.id);
+    assert_eq!(report["factors"].as_array().unwrap().len(), 3);
+    write("pipeline.json", &serde_json::to_value(input).unwrap());
+    let train = s.json(&["factors", "run", "--request", "pipeline.json"]);
+    let train_id = train["task_id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(
+        s.client.wait(train_id, Some(15)).unwrap()["record"]["status"],
+        "succeeded"
+    );
+    let manifest = s
+        .client
+        .root
+        .join(format!(".jfquant/runs/{train_id}/manifest.json"));
+    let before = std::fs::read(&manifest).unwrap();
+    let m: Value = serde_json::from_slice(&before).unwrap();
+    assert_eq!(
+        m["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["name"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>(),
+        ids
+    );
+    assert_eq!(m["factor_refs"][0]["definition"]["revision"], 1);
+    analytics_workflow::research::load_manifest(&manifest).unwrap();
+    write(
+        "factor.json",
+        &json!({"id":saved.id,"expected_revision":1,"name":"10日动量","description":"new revision","formula":"CLOSE / GTJA_DELAY(CLOSE,10) - 1"}),
+    );
+    assert_eq!(
+        s.json(&["factors", "save", "--definition", "factor.json"])["saved_factor"]["revision"],
+        2
+    );
+    s.json(&["factors", "archive", "--id", &saved.id]);
+    analytics_workflow::research::load_manifest(&manifest).unwrap();
+    assert_eq!(std::fs::read(manifest).unwrap(), before);
+    let library = s.json(&["factors", "library"]);
+    assert_eq!(library["factors"][0]["archived"], true);
 }

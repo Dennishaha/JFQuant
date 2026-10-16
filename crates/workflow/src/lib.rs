@@ -5,8 +5,11 @@
 pub mod backend;
 /// Acquisition progress, historical coverage and explicit availability-pool proposals.
 pub mod coverage;
+pub mod custom_factors;
 /// Explicit synthetic demo generator.
 pub mod demo;
+pub mod factor_evaluation;
+pub mod factor_groups;
 /// Immutable date-effective stock pools.
 pub mod pools;
 /// Independently validated acquisition checkpoints.
@@ -195,6 +198,7 @@ impl ResearchTemplate {
     pub fn select_factor_set(&mut self, set: analytics_core::research_quality::FactorSet) {
         self.factor_set = set;
         self.formula_version = analytics_factor::alpha158::version(set).into();
+        self.config.factor_refs.clear();
         self.config.factor_ids = analytics_factor::FactorRegistry::for_set(set)
             .all()
             .filter(|s| {
@@ -229,11 +233,32 @@ impl ResearchTemplate {
             })?,
         )
     }
+    /// Resolve a frozen mixed selection, retaining the legacy builtin path.
+    pub fn factor_registry(&self) -> Result<analytics_factor::FactorRegistry> {
+        Ok(analytics_factor::FactorRegistry::resolve(
+            self.factor_set,
+            &self.config.factor_refs,
+            &self.config.factor_ids,
+        )?)
+    }
+    /// Exact selected definition version used in task and model signatures.
+    pub fn resolved_formula_version(&self) -> Result<String> {
+        if self.config.factor_refs.is_empty() {
+            return Ok(analytics_factor::alpha158::version(self.factor_set).into());
+        }
+        Ok(self
+            .factor_registry()?
+            .selection_version(&self.config.factor_ids)?)
+    }
+    /// Maximum per-factor history, including recursive seed history.
+    pub fn warmup_sessions(&self) -> usize {
+        analytics_factor::selection::warmup_sessions(self.factor_set, &self.config.factor_refs)
+    }
     /// Validate before saving or starting a task.
     pub fn validate(&self) -> Result<()> {
         if self.schema_version != 10
             || self.id.trim().is_empty()
-            || self.formula_version != analytics_factor::alpha158::version(self.factor_set)
+            || self.formula_version != self.resolved_formula_version()?
             || self.name.trim().is_empty()
         {
             return Err("unsupported recipe identity/version".into());
@@ -259,7 +284,7 @@ impl ResearchTemplate {
         self.config.validate()?;
         self.quality_policy.validate()?;
         self.market_rules.validate()?;
-        let registry = analytics_factor::FactorRegistry::for_set(self.factor_set);
+        let registry = self.factor_registry()?;
         let mut seen = BTreeSet::new();
         if self.config.factor_ids.is_empty() {
             return Err("select at least one factor".into());
@@ -1892,7 +1917,7 @@ pub fn research_requirements_with_actions(
         analytics_storage::daily::DailyDataset::open(w.resolve(selected_market.path))?;
     let folds = t
         .schedule
-        .resolve_with_warmup(&dataset.calendar, t.factor_set.warmup_sessions())?;
+        .resolve_with_warmup(&dataset.calendar, t.warmup_sessions())?;
     let (pool, frozen) = w.resolve_pool(&t.pool_version, market)?;
     let lo = folds
         .iter()

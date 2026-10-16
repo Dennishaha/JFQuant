@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 HERE = Path(__file__).resolve().parent
-catalog = json.loads((HERE / "alpha158_formulas.json").read_text())
+catalog = json.loads((HERE.parent / "catalogs" / "alpha158.json").read_text())
 days, stocks = 85, 3
 inputs = {k: [] for k in ("open", "high", "low", "close", "volume", "vwap")}
 for t in range(days):

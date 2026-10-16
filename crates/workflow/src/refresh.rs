@@ -444,7 +444,7 @@ pub fn plan(w: &Workspace, request: &RefreshRequest, policy: &SourcePolicy) -> R
     let pos = d.calendar.partition_point(|d| *d < first);
     let lo = *d
         .calendar
-        .get(pos.saturating_sub(request.template.factor_set.warmup_sessions()))
+        .get(pos.saturating_sub(request.template.warmup_sessions()))
         .ok_or("warmup_calendar_missing")?;
     let end = request
         .end

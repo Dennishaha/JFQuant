@@ -65,6 +65,9 @@ pub struct PipelineRequest {
     pub date_range: DateRange,
     /// Alpha191 factor IDs such as `alpha_001`.
     pub factor_ids: Vec<String>,
+    /// Frozen definitions for mixed selections; legacy builtin requests omit these.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub factor_refs: Vec<analytics_factor::selection::FactorRef>,
     /// Output directory for the factor cache, model, and predictions.
     pub output_dir: PathBuf,
     /// Model parameters and early stopping.
@@ -173,19 +176,37 @@ pub fn run_factor_pipeline(
 
     let _ = progress.send(PipelineEvent::LoadingMarket);
     let mut engine = DuckDbEngine::open_in_memory()?;
-    let rows = engine.load_market_rows(
-        &request.market_path,
-        &request.universe_path,
-        &request.universe_id,
-        &request.date_range,
-    )?;
-    let rows: Vec<_> = rows
-        .into_iter()
-        .filter(|row| row.is_trading.unwrap_or(true))
-        .filter(|row| {
-            row.listing_date
-                .map(|listed| listed <= row.trade_date)
-                .unwrap_or(true)
+    let (rows, members) = if request.factor_refs.is_empty() {
+        let rows = engine.load_market_rows(
+            &request.market_path,
+            &request.universe_path,
+            &request.universe_id,
+            &request.date_range,
+        )?;
+        let rows: Vec<_> = rows
+            .into_iter()
+            .filter(|r| {
+                r.is_trading.unwrap_or(true) && r.listing_date.is_none_or(|d| d <= r.trade_date)
+            })
+            .collect();
+        let members = vec![true; rows.len()];
+        (rows, members)
+    } else {
+        engine.load_factor_research_rows(
+            &request.market_path,
+            &request.universe_path,
+            &request.universe_id,
+            &DateRange {
+                start: "1900-01-01".parse().unwrap(),
+                end: request.date_range.end,
+            },
+        )?
+    };
+    let eligible: Vec<_> = rows
+        .iter()
+        .zip(&members)
+        .map(|(r, m)| {
+            *m && r.is_trading.unwrap_or(true) && r.listing_date.is_none_or(|d| d <= r.trade_date)
         })
         .collect();
     if rows.is_empty() {
@@ -197,7 +218,20 @@ pub fn run_factor_pipeline(
     check_cancel(&cancel)?;
 
     let mut panel = panel_from_rows(&rows);
-    let registry = FactorRegistry::for_set(request.factor_set);
+    if !request.factor_refs.is_empty() {
+        panel.columns.insert(
+            "__universe_member".into(),
+            eligible
+                .iter()
+                .map(|m| Some(if *m { 1. } else { 0. }))
+                .collect(),
+        );
+    }
+    let registry = FactorRegistry::resolve(
+        request.factor_set,
+        &request.factor_refs,
+        &request.factor_ids,
+    )?;
     for id in &request.factor_ids {
         let spec = registry
             .get(id)
@@ -210,17 +244,18 @@ pub fn run_factor_pipeline(
                 .or_insert_with(|| vec![None; panel_len]);
         }
     }
+    let formula_version = registry.selection_version(&request.factor_ids)?;
     let executor = InMemoryFactorExecutor {
         registry,
         panel: panel.clone(),
     };
     let factor_progress = forward_events(&progress, PipelineEvent::Factors);
-    let factor_artifact = executor.compute(
+    let mut factor_artifact = executor.compute(
         FactorRunRequest {
             date_range: request.date_range.clone(),
             universe_id: request.universe_id.clone(),
             factor_ids: request.factor_ids.clone(),
-            formula_version: analytics_factor::alpha158::version(request.factor_set).into(),
+            formula_version: formula_version.clone(),
         },
         factor_progress,
         cancel.clone(),
@@ -232,7 +267,36 @@ pub fn run_factor_pipeline(
         .columns
         .get("adj_close")
         .ok_or_else(|| PipelineError::InvalidInput("adj_close missing".into()))?;
-    let labels = next_return_labels(&panel.instrument_id, &panel.trade_date, adjusted_close)?;
+    let mut labels = next_return_labels(&panel.instrument_id, &panel.trade_date, adjusted_close)?;
+    if !request.factor_refs.is_empty() {
+        let selected: Vec<_> = panel
+            .trade_date
+            .iter()
+            .enumerate()
+            .filter_map(|(i, d)| (request.date_range.contains(*d) && eligible[i]).then_some(i))
+            .collect();
+        if selected.is_empty() {
+            return Err(PipelineError::InvalidInput(
+                "requested dates contain no eligible members".into(),
+            ));
+        }
+        labels = selected.iter().map(|&i| labels[i]).collect();
+        for values in factor_artifact.values.values_mut() {
+            *values = selected.iter().map(|&i| values[i]).collect();
+        }
+        for values in panel.columns.values_mut() {
+            *values = selected.iter().map(|&i| values[i]).collect();
+        }
+        panel.instrument_id = selected
+            .iter()
+            .map(|&i| panel.instrument_id[i].clone())
+            .collect();
+        panel.trade_date = selected.iter().map(|&i| panel.trade_date[i]).collect();
+        factor_artifact.rows = selected.len();
+        let mut manifest: serde_json::Value = serde_json::from_str(&factor_artifact.manifest_json)?;
+        manifest["rows"] = selected.len().into();
+        factor_artifact.manifest_json = serde_json::to_string(&manifest)?;
+    }
     let factor_cache = request.output_dir.join("factors.parquet");
     factor_artifact.write_parquet_with_labels(
         &factor_cache,
@@ -271,9 +335,23 @@ pub fn run_factor_pipeline(
     .and_then(|mut artifact| {
         let mut manifest: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&artifact.training.manifest_path)?)?;
-        manifest["formula_version"] =
-            analytics_factor::alpha158::version(request.factor_set).into();
+        manifest["schema_version"] = 3.into();
+        manifest["factor_definitions"] = serde_json::from_str::<serde_json::Value>(
+            &factor_artifact.manifest_json,
+        )?["factor_definitions"]
+            .clone();
+        manifest["formula_version"] = formula_version.into();
         manifest["factor_set"] = serde_json::to_value(request.factor_set)?;
+        manifest["factor_refs"] = serde_json::to_value(analytics_factor::selection::frozen_refs(
+            request.factor_set,
+            &request.factor_refs,
+            &request.factor_ids,
+        ))?;
+        manifest["training_schema_hash"] =
+            analytics_factor::selection::hash(&(&manifest["features"], &manifest["factor_refs"]))?
+                .into();
+        manifest["factor_definition_signature"] =
+            analytics_factor::selection::hash(&request.factor_refs)?.into();
         std::fs::write(
             &artifact.training.manifest_path,
             serde_json::to_vec_pretty(&manifest)?,
@@ -446,6 +524,38 @@ pub fn train_from_factor_cache(
         &cache.trade_dates,
         &split_bounds,
     );
+    let source_path = cache_path.with_file_name("factor_run_manifest.json");
+    let source_provenance = if source_path.is_file() {
+        let source: serde_json::Value = serde_json::from_slice(&std::fs::read(&source_path)?)?;
+        let family = serde_json::from_value(source["factor_set"].clone())?;
+        let refs: Vec<analytics_factor::selection::FactorRef> = source
+            .get("factor_refs")
+            .map(|v| serde_json::from_value(v.clone()))
+            .transpose()?
+            .unwrap_or_default();
+        let registry = FactorRegistry::resolve(family, &refs, &cache.factor_ids)?;
+        if source["formula_version"] != registry.selection_version(&cache.factor_ids)?
+            || source["factor_ids"] != serde_json::to_value(&cache.factor_ids)?
+        {
+            return Err(PipelineError::InvalidInput(
+                "factor cache provenance/order mismatch".into(),
+            ));
+        }
+        if let Some(expected) = source.get("factor_cache_sha256") {
+            let actual = format!(
+                "sha256:{:x}",
+                analytics_core::hash::Hex(Sha256::digest(std::fs::read(cache_path)?))
+            );
+            if expected != &actual {
+                return Err(PipelineError::InvalidInput(
+                    "factor cache content changed".into(),
+                ));
+            }
+        }
+        Some(source)
+    } else {
+        None
+    };
     finish_training(
         &prepared,
         &cache.factor_ids,
@@ -459,7 +569,6 @@ pub fn train_from_factor_cache(
         cancel,
     )
     .and_then(|artifact| {
-        let source_path = cache_path.with_file_name("factor_run_manifest.json");
         let mut manifest: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&artifact.training.manifest_path)?)?;
         manifest["factor_cache_sha256"] = format!(
@@ -467,19 +576,26 @@ pub fn train_from_factor_cache(
             analytics_core::hash::Hex(Sha256::digest(std::fs::read(cache_path)?))
         )
         .into();
-        if source_path.is_file() {
-            let source: serde_json::Value = serde_json::from_slice(&std::fs::read(&source_path)?)?;
-            let family: analytics_core::research_quality::FactorSet =
-                serde_json::from_value(source["factor_set"].clone())?;
-            if source["formula_version"] != analytics_factor::alpha158::version(family)
-                || source["factor_ids"] != serde_json::to_value(&cache.factor_ids)?
-            {
-                return Err(PipelineError::InvalidInput(
-                    "factor cache provenance/order mismatch".into(),
-                ));
+        if let Some(source) = source_provenance {
+            if source.get("factor_refs").is_some() {
+                manifest["schema_version"] = 3.into();
+                manifest["factor_refs"] = source["factor_refs"].clone();
+                let family = serde_json::from_value(source["factor_set"].clone())?;
+                let refs: Vec<analytics_factor::selection::FactorRef> =
+                    serde_json::from_value(source["factor_refs"].clone())?;
+                manifest["factor_definitions"] =
+                    FactorRegistry::resolve(family, &refs, &cache.factor_ids)?
+                        .manifest_definitions(&cache.factor_ids)?;
             }
             manifest["formula_version"] = source["formula_version"].clone();
             manifest["factor_set"] = source["factor_set"].clone();
+            if manifest["schema_version"] == 3 {
+                manifest["training_schema_hash"] = analytics_factor::selection::hash(&(
+                    &manifest["features"],
+                    &manifest["factor_refs"],
+                ))?
+                .into();
+            }
             manifest["factor_provenance"] = source;
         }
         std::fs::write(
@@ -703,16 +819,31 @@ fn write_factor_manifest(
     input_snapshot_hash: &str,
 ) -> Result<PathBuf> {
     let mut value: serde_json::Value = serde_json::from_str(&artifact.manifest_json)?;
+    value["schema_version"] = 2.into();
+    value["factor_refs"] = serde_json::to_value(analytics_factor::selection::frozen_refs(
+        request.factor_set,
+        &request.factor_refs,
+        &request.factor_ids,
+    ))?;
     value["factor_set"] = serde_json::to_value(request.factor_set)?;
     value["market_path"] = request.market_path.to_string_lossy().to_string().into();
     value["universe_path"] = request.universe_path.to_string_lossy().to_string().into();
     value["universe_id"] = request.universe_id.clone().into();
     value["date_range"] = serde_json::to_value(&request.date_range)?;
     value["factor_cache"] = cache.to_string_lossy().to_string().into();
+    value["factor_cache_sha256"] = format!(
+        "sha256:{:x}",
+        analytics_core::hash::Hex(Sha256::digest(std::fs::read(cache)?))
+    )
+    .into();
     value["input_snapshot_hash"] = input_snapshot_hash.into();
     value["price_mode"] = "adjusted_price".into();
     value["missing_value_rule"] = "preserve_null".into();
-    let registry = FactorRegistry::for_set(request.factor_set);
+    let registry = FactorRegistry::resolve(
+        request.factor_set,
+        &request.factor_refs,
+        &request.factor_ids,
+    )?;
     value["max_lookback"] = request
         .factor_ids
         .iter()
@@ -1052,6 +1183,7 @@ mod tests {
             std::thread::spawn(move || while rx.recv().is_ok() {});
             let artifact = run_factor_pipeline(
                 &PipelineRequest {
+                    factor_refs: Vec::new(),
                     factor_set: family,
                     market_path: market,
                     universe_path: universe,

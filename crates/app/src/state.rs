@@ -162,6 +162,24 @@ impl QueryPanel {
 /// State of the Alpha191 factor panel.
 #[derive(Debug)]
 pub struct FactorPanel {
+    pub factor_refs: Vec<analytics_factor::selection::FactorRef>,
+    pub custom_factors: Vec<analytics_workflow::custom_factors::FactorEntry>,
+    pub draft: analytics_workflow::custom_factors::FactorDraft,
+    pub operator_filter: String,
+    pub compiled: Option<analytics_factor::operators::CompiledExpression>,
+    pub compiled_source: String,
+    pub preview: Option<analytics_workflow::custom_factors::FormulaPreview>,
+    pub library_root: Option<std::path::PathBuf>,
+    pub library_reply: Option<std::sync::mpsc::Receiver<Result<serde_json::Value, String>>>,
+    /// Named group library and current editable copy.
+    pub groups: Vec<analytics_workflow::factor_groups::FactorGroup>,
+    pub group: Option<analytics_workflow::factor_groups::FactorGroup>,
+    pub group_root: Option<std::path::PathBuf>,
+    pub horizon: usize,
+    pub quantiles: usize,
+    pub min_samples: usize,
+    pub evaluation: Option<analytics_workflow::factor_evaluation::EvaluationReport>,
+
     /// Independently selected factor family.
     pub factor_set: analytics_core::research_quality::FactorSet,
     /// Market Parquet root.
@@ -189,6 +207,27 @@ pub struct FactorPanel {
 impl Default for FactorPanel {
     fn default() -> Self {
         Self {
+            factor_refs: Vec::new(),
+            custom_factors: Vec::new(),
+            draft: analytics_workflow::custom_factors::FactorDraft {
+                name: "20日动量".into(),
+                formula: "CLOSE / GTJA_DELAY(CLOSE, 20) - 1".into(),
+                ..Default::default()
+            },
+            operator_filter: String::new(),
+            compiled: None,
+            compiled_source: String::new(),
+            preview: None,
+            library_root: None,
+            library_reply: None,
+            groups: Vec::new(),
+            group: None,
+            group_root: None,
+            horizon: 5,
+            quantiles: 5,
+            min_samples: 30,
+            evaluation: None,
+
             factor_set: Default::default(),
             market_path: "data/market".into(),
             universe_path: "data/universe".into(),
@@ -212,9 +251,56 @@ impl FactorPanel {
         parse_date_range(&self.date_start, &self.date_end)
     }
 
-    /// Selected factor IDs in stable ascending order.
+    /// Preserve saved feature order; append new selections in canonical registry order.
     pub fn selected_ids(&self) -> Vec<String> {
-        self.selected.iter().cloned().collect()
+        let mut ids = Vec::new();
+        for r in &self.factor_refs {
+            if self.selected.contains(r.id()) && !ids.iter().any(|id| id == r.id()) {
+                ids.push(r.id().to_string());
+            }
+        }
+        if let Some(g) = &self.group {
+            for id in &g.profile.factor_ids {
+                if self.selected.contains(id) && !ids.contains(id) {
+                    ids.push(id.clone());
+                }
+            }
+        }
+        for id in &self.selected {
+            if !ids.contains(id) {
+                ids.push(id.clone());
+            }
+        }
+        ids
+    }
+    /// Freeze selected revisions; existing selections keep their pinned definitions.
+    pub fn selected_refs(&self) -> Result<Vec<analytics_factor::selection::FactorRef>, String> {
+        use analytics_factor::selection::FactorRef;
+        self.selected_ids()
+            .iter()
+            .map(|id| {
+                if let Some(r) = self.factor_refs.iter().find(|r| r.id() == id) {
+                    return Ok(r.clone());
+                }
+                if let Some(e) = self
+                    .custom_factors
+                    .iter()
+                    .find(|e| &e.definition.id == id && !e.archived)
+                {
+                    return Ok(FactorRef::Custom {
+                        definition: Box::new(e.definition.clone()),
+                    });
+                }
+                let family = if id.starts_with("alpha158_") {
+                    analytics_core::research_quality::FactorSet::Alpha158
+                } else {
+                    analytics_core::research_quality::FactorSet::Gtja191
+                };
+                let r = FactorRef::builtin(family, id);
+                r.spec().map_err(|e| e.to_string())?;
+                Ok(r)
+            })
+            .collect()
     }
 
     /// Whether a registry entry matches the current filter text.
@@ -477,6 +563,21 @@ pub fn apply_event(state: &mut AppState, event: &WorkerEvent) {
                 return;
             }
             state.push_message(format!("导出完成：{}", destination.display()));
+        }
+        WorkerEvent::FactorPreviewed { task, preview } => {
+            if !is_active(state, task) {
+                return;
+            }
+            state.factor.preview = Some(preview.clone());
+            state.factor.error = None;
+        }
+        WorkerEvent::FactorsEvaluated { task, report } => {
+            if !is_active(state, task) {
+                return;
+            }
+            state.factor.evaluation = Some(report.clone());
+            state.factor.error = None;
+            state.push_message("因子有效性测试完成".into());
         }
         WorkerEvent::PipelineFinished { task, summary } => {
             if !is_active(state, task) {

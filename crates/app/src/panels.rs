@@ -48,7 +48,13 @@ pub fn render(
             dataset_panel(ui, state, worker)
         }
         Panel::Query => query_panel(ui, state, worker),
-        Panel::Factor => factor_panel(ui, state, worker, cancel_slot, registry),
+        Panel::Factor => {
+            ScrollArea::vertical()
+                .id_salt("factor_workbench")
+                .show(ui, |ui| {
+                    factor_panel(ui, state, worker, cancel_slot, registry);
+                });
+        }
         Panel::Model => model_panel(ui, state, worker, cancel_slot),
         Panel::Research => {
             crate::platform::research_panel(ui, state, worker, cancel_slot, registry)
@@ -425,23 +431,34 @@ fn factor_panel(
 ) {
     theme::section_heading(
         ui,
-        "因子流水线",
-        "行情 × 股票池 as-of 连接 → 因子计算 → 70/15/15 拆分 → LightGBM 训练与预测。",
+        "因子组与有效性测试",
+        "管理158/191因子子集，独立检验覆盖率、IC和分层收益，也可运行建模流水线。",
     );
-    let previous = state.factor.factor_set;
-    egui::ComboBox::from_id_salt("pipeline_factor_set")
-        .selected_text(previous.label())
-        .show_ui(ui, |ui| {
-            for family in [
-                analytics_core::research_quality::FactorSet::Gtja191,
-                analytics_core::research_quality::FactorSet::Alpha158,
-            ] {
-                ui.selectable_value(&mut state.factor.factor_set, family, format!("{family:?}"));
-            }
-        });
-    if previous != state.factor.factor_set {
-        state.factor.selected.clear();
-    }
+    crate::factor_groups::controls(ui, state);
+    let readonly = state
+        .factor
+        .group
+        .as_ref()
+        .is_some_and(analytics_workflow::factor_groups::FactorGroup::is_builtin);
+    ui.add_enabled_ui(!readonly, |ui| {
+        let previous = state.factor.factor_set;
+        egui::ComboBox::from_id_salt("pipeline_factor_set")
+            .selected_text(previous.label())
+            .show_ui(ui, |ui| {
+                for family in [
+                    analytics_core::research_quality::FactorSet::Gtja191,
+                    analytics_core::research_quality::FactorSet::Alpha158,
+                ] {
+                    ui.selectable_value(
+                        &mut state.factor.factor_set,
+                        family,
+                        format!("{family:?}"),
+                    );
+                }
+            });
+        // Family selects the visible builtin catalogue; mixed selections are retained.
+    });
+    crate::custom_factors::editor(ui, state, worker, cancel_slot);
     let registry = FactorRegistry::for_set(state.factor.factor_set);
     ui.add_space(8.0);
     egui::Grid::new("factor_form")
@@ -481,9 +498,11 @@ fn factor_panel(
 
     ui.horizontal(|ui| {
         ui.label(format!(
-            "因子选择（已选 {} / {} 可执行，{} 项隔离）",
+            "因子选择（已选 {} / {} 可用，{} 项隔离）",
             state.factor.selected.len(),
-            registry.len() - registry.unsupported_ids().len(),
+            registry.len()
+                - registry.unsupported_ids().len()
+                - usize::from(registry.get("alpha_030").is_some()),
             registry.unsupported_ids().len()
         ));
         ui.add(
@@ -491,9 +510,13 @@ fn factor_panel(
                 .desired_width(200.0)
                 .hint_text("按 ID 或公式检索"),
         );
-        if ui.button("全选筛选结果").clicked() {
+        if ui
+            .add_enabled(!readonly, egui::Button::new("全选筛选结果"))
+            .clicked()
+        {
             for spec in registry.all() {
                 if state.factor.matches_filter(&spec.id, &spec.formula)
+                    && spec.id != "alpha_030"
                     && !matches!(
                         spec.expression,
                         analytics_factor::FactorExpr::Unsupported { .. }
@@ -503,7 +526,10 @@ fn factor_panel(
                 }
             }
         }
-        if ui.button("清空").clicked() {
+        if ui
+            .add_enabled(!readonly, egui::Button::new("清空"))
+            .clicked()
+        {
             state.factor.selected.clear();
         }
     });
@@ -517,16 +543,17 @@ fn factor_panel(
                         continue;
                     }
                     let mut checked = state.factor.selected.contains(&spec.id);
-                    let unsupported = matches!(
-                        spec.expression,
-                        analytics_factor::FactorExpr::Unsupported { .. }
-                    );
+                    let unsupported = spec.id == "alpha_030"
+                        || matches!(
+                            spec.expression,
+                            analytics_factor::FactorExpr::Unsupported { .. }
+                        );
                     if unsupported {
                         state.factor.selected.remove(&spec.id);
                         checked = false;
                     }
                     let response = ui.add_enabled(
-                        !unsupported,
+                        !unsupported && !readonly,
                         egui::Checkbox::new(
                             &mut checked,
                             egui::RichText::new(&spec.id).monospace(),
@@ -539,7 +566,13 @@ fn factor_panel(
                             state.factor.selected.remove(&spec.id);
                         }
                     }
-                    if let analytics_factor::FactorExpr::Unsupported { formula: reason } =
+                    if spec.id == "alpha_030" {
+                        ui.label(
+                            egui::RichText::new("缺少MKT/SMB/HML输入，暂不可选")
+                                .small()
+                                .weak(),
+                        );
+                    } else if let analytics_factor::FactorExpr::Unsupported { formula: reason } =
                         &spec.expression
                     {
                         ui.label(
@@ -558,6 +591,51 @@ fn factor_panel(
     ui.add_space(8.0);
 
     let busy = state.busy() || state.worker_error.is_some();
+    ui.horizontal(|ui| {
+        ui.label("未来交易日");
+        ui.add(egui::DragValue::new(&mut state.factor.horizon).range(1..=252));
+        ui.label("分层数");
+        ui.add(egui::DragValue::new(&mut state.factor.quantiles).range(2..=10));
+        ui.label("每日最少样本");
+        ui.add(egui::DragValue::new(&mut state.factor.min_samples).range(3..=10000));
+    });
+    if ui
+        .add_enabled(
+            !busy,
+            primary_button("因子有效性测试", theme::semantic(ui.ctx()).accent),
+        )
+        .clicked()
+    {
+        match run_pipeline_request(state) {
+            Ok(mut input) => {
+                // Standalone runs also get a fresh destination; never overwrite previous diagnostics.
+                let task = Uuid::new_v4();
+                if state.platform.workspace.is_none() {
+                    input.output_dir = input.output_dir.join(task.to_string());
+                }
+                let request = analytics_workflow::factor_evaluation::EvaluationRequest {
+                    input: input.into(),
+                    horizon: state.factor.horizon,
+                    quantiles: state.factor.quantiles,
+                    min_samples: state.factor.min_samples,
+                };
+                let flag = cancellation();
+                *cancel_slot = Some(flag.clone());
+                state.factor.error = None;
+                send_command(
+                    state,
+                    worker,
+                    WorkerCommand::EvaluateFactors {
+                        task,
+                        request,
+                        cancel: flag,
+                    },
+                );
+            }
+            Err(e) => state.factor.error = Some(e),
+        }
+    }
+    crate::factor_groups::report(ui, state);
     if ui
         .add_enabled(
             !busy,
@@ -606,6 +684,7 @@ fn run_pipeline_request(
         return Err("请至少选择一个因子".into());
     }
     Ok(analytics_workflow::research::pipeline::PipelineRequest {
+        factor_refs: factor.selected_refs()?,
         factor_set: factor.factor_set,
         market_path: PathBuf::from(factor.market_path.trim()),
         universe_path: PathBuf::from(factor.universe_path.trim()),

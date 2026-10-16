@@ -927,7 +927,8 @@ fn quarantined_factor_is_visible_disabled_and_excluded_from_bulk_selection() {
     assert!(h.app.state.factor.selected.is_empty());
     h.app.state.factor.filter.clear();
     h.click("全选筛选结果");
-    assert_eq!(h.app.state.factor.selected.len(), 179);
+    assert_eq!(h.app.state.factor.selected.len(), 178);
+    assert!(!h.app.state.factor.selected.contains("alpha_030"));
     for id in analytics_factor::audit::quarantined_ids() {
         assert!(!h.app.state.factor.selected.contains(&id));
     }
@@ -1609,4 +1610,116 @@ fn acquisition_defaults_match_hithink_main_and_explicit_execution_gap() {
             assert_eq!(sources[0], state.collection_provider);
         }
     }
+}
+
+#[test]
+fn factor_group_builtin_is_readonly_and_copy_can_be_saved() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::new(Panel::Factor);
+    h.app.state.platform.workspace = Some(analytics_workflow::Workspace::open(dir.path()).unwrap());
+    h.frame(vec![]);
+    let group = analytics_workflow::factor_groups::FactorGroup::builtin(
+        analytics_core::research_quality::FactorSet::Alpha158,
+    );
+    h.app.state.factor.factor_set = group.profile.factor_set;
+    h.app.state.factor.selected = group.profile.factor_ids.iter().cloned().collect();
+    h.app.state.factor.group = Some(group);
+    h.click("清空");
+    assert_eq!(h.app.state.factor.selected.len(), 158);
+    h.click("复制为自定义组");
+    assert!(!h.app.state.factor.group.as_ref().unwrap().is_builtin());
+    h.click("清空");
+    assert!(h.app.state.factor.selected.is_empty());
+    h.app
+        .state
+        .factor
+        .selected
+        .insert("alpha158_001_KMID".into());
+    h.click("保存因子组");
+    let groups = analytics_workflow::factor_groups::list(dir.path()).unwrap();
+    assert_eq!(groups.len(), 3);
+    assert_eq!(groups[2].profile.factor_ids, vec!["alpha158_001_KMID"]);
+    h.click("应用到研究配置");
+    assert_eq!(
+        h.app.state.platform.template.config.factor_ids,
+        vec!["alpha158_001_KMID"]
+    );
+}
+
+#[test]
+fn factor_evaluation_button_submits_independent_cancellable_request() {
+    let mut h = Harness::new(Panel::Factor);
+    h.click("因子有效性测试");
+    let command = h.commands.try_recv().unwrap();
+    match command {
+        WorkerCommand::EvaluateFactors {
+            request, cancel, ..
+        } => {
+            assert_eq!(request.horizon, 5);
+            assert_eq!(request.quantiles, 5);
+            assert_eq!(request.min_samples, 30);
+            assert_eq!(request.input.factor_ids, vec!["alpha_001", "alpha_002"]);
+            h.app
+                .cancel
+                .as_ref()
+                .unwrap()
+                .store(true, Ordering::Relaxed);
+            assert!(cancel.load(Ordering::Relaxed));
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+#[test]
+fn formula_editor_saves_revisions_applies_mixed_selection_and_submits_preview() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = analytics_workflow::Workspace::open(dir.path()).unwrap();
+    let mut h = Harness::new(Panel::Factor);
+    h.app.state.platform.workspace = Some(w.clone());
+    h.frame(vec![]);
+    h.click("新建 / 编辑自定义因子");
+    for _ in 0..16 {
+        h.frame(vec![]);
+    }
+    h.click("校验公式");
+    h.frame(vec![]);
+    assert_eq!(h.app.state.factor.compiled.as_ref().unwrap().lookback, 21);
+    h.click("保存新修订");
+    h.frame(vec![]);
+    assert_eq!(h.app.state.factor.draft.expected_revision, Some(1));
+    assert_eq!(
+        analytics_workflow::custom_factors::list(&w, false)
+            .unwrap()
+            .len(),
+        1
+    );
+    let d = analytics_workflow::custom_factors::list(&w, false).unwrap()[0]
+        .definition
+        .clone();
+    h.app.state.factor.factor_refs = vec![
+        analytics_factor::selection::FactorRef::Custom {
+            definition: Box::new(d),
+        },
+        analytics_factor::selection::FactorRef::builtin(
+            analytics_core::research_quality::FactorSet::Alpha158,
+            "alpha158_001_KMID",
+        ),
+        analytics_factor::selection::FactorRef::builtin(Default::default(), "alpha_002"),
+    ];
+    h.app.state.factor.selected = h
+        .app
+        .state
+        .factor
+        .factor_refs
+        .iter()
+        .map(|r| r.id().to_owned())
+        .collect();
+    h.click("应用到研究配置");
+    assert_eq!(h.app.state.platform.template.config.factor_refs.len(), 3);
+    h.app.state.platform.template.validate().unwrap();
+    h.click("合成样本预览");
+    assert!(matches!(
+        h.commands.try_recv().unwrap(),
+        WorkerCommand::PreviewFactor { .. }
+    ));
 }

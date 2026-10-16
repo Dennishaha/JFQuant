@@ -35,44 +35,19 @@ pub fn parse_formula(source: &str) -> Result<FactorExpr, ParseError> {
     if !matches!(parser.peek(), Token::End) {
         return Err(ParseError(format!("unexpected token {:?}", parser.peek())));
     }
+    // Legacy spelling/overload adaptation happens above; the shared catalogue validates its AST.
+    super::operators::Expression::from_legacy(&result)
+        .and_then(|e| e.compile())
+        .map_err(|e| ParseError(e.to_string()))?;
     Ok(result)
 }
 
 pub fn input_columns(source: &str) -> Vec<String> {
-    let functions: BTreeSet<&str> = [
-        "ABS",
-        "CORR",
-        "COUNT",
-        "COV",
-        "DECAYLINEAR",
-        "DELAY",
-        "DELTA",
-        "FILTER",
-        "HIGHDAY",
-        "LOG",
-        "LOWDAY",
-        "MA",
-        "MAX",
-        "MEAN",
-        "MIN",
-        "PROD",
-        "RANK",
-        "REGBETA",
-        "REGRESI",
-        "SIGN",
-        "SMA",
-        "STD",
-        "SUM",
-        "SUMIF",
-        "TSMAX",
-        "TSMIN",
-        "TSRANK",
-        "WMA",
-        "SEQUENCE",
-        "SUMAC",
-    ]
-    .into_iter()
-    .collect();
+    let mut functions: BTreeSet<&str> = super::operators::OperatorRegistry::all()
+        .iter()
+        .flat_map(|s| s.legacy_aliases.iter().map(String::as_str))
+        .collect();
+    functions.insert("SUMAC"); // quarantined legacy source spelling, never a user operator
     let mut columns = BTreeSet::new();
     for token in tokenize(&normalize_source(source)).unwrap_or_default() {
         if let Token::Ident(name) = token

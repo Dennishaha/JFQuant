@@ -24,7 +24,9 @@
             "Input": "open"
           }
         }
-      }
+      },
+      "id": "alpha158_001_KMID",
+      "syntax": "qlib"
     },
     {
       "name": "KLEN",
@@ -47,7 +49,9 @@
             "Input": "open"
           }
         }
-      }
+      },
+      "id": "alpha158_002_KLEN",
+      "syntax": "qlib"
     },
     {
       "name": "KMID2",
@@ -86,7 +90,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_003_KMID2",
+      "syntax": "qlib"
     },
     {
       "name": "KUP",
@@ -119,7 +125,9 @@
             "Input": "open"
           }
         }
-      }
+      },
+      "id": "alpha158_004_KUP",
+      "syntax": "qlib"
     },
     {
       "name": "KUP2",
@@ -168,7 +176,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_005_KUP2",
+      "syntax": "qlib"
     },
     {
       "name": "KLOW",
@@ -201,7 +211,9 @@
             "Input": "open"
           }
         }
-      }
+      },
+      "id": "alpha158_006_KLOW",
+      "syntax": "qlib"
     },
     {
       "name": "KLOW2",
@@ -250,7 +262,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_007_KLOW2",
+      "syntax": "qlib"
     },
     {
       "name": "KSFT",
@@ -289,7 +303,9 @@
             "Input": "open"
           }
         }
-      }
+      },
+      "id": "alpha158_008_KSFT",
+      "syntax": "qlib"
     },
     {
       "name": "KSFT2",
@@ -344,7 +360,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_009_KSFT2",
+      "syntax": "qlib"
     },
     {
       "name": "OPEN0",
@@ -359,7 +377,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_010_OPEN0",
+      "syntax": "qlib"
     },
     {
       "name": "HIGH0",
@@ -374,7 +394,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_011_HIGH0",
+      "syntax": "qlib"
     },
     {
       "name": "LOW0",
@@ -389,7 +411,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_012_LOW0",
+      "syntax": "qlib"
     },
     {
       "name": "VWAP0",
@@ -404,7 +428,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_013_VWAP0",
+      "syntax": "qlib"
     },
     {
       "name": "ROC5",
@@ -429,7 +455,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_014_ROC5",
+      "syntax": "qlib"
     },
     {
       "name": "ROC10",
@@ -454,7 +482,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_015_ROC10",
+      "syntax": "qlib"
     },
     {
       "name": "ROC20",
@@ -479,7 +509,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_016_ROC20",
+      "syntax": "qlib"
     },
     {
       "name": "ROC30",
@@ -504,7 +536,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_017_ROC30",
+      "syntax": "qlib"
     },
     {
       "name": "ROC60",
@@ -529,7 +563,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_018_ROC60",
+      "syntax": "qlib"
     },
     {
       "name": "MA5",
@@ -554,7 +590,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_019_MA5",
+      "syntax": "qlib"
     },
     {
       "name": "MA10",
@@ -579,7 +617,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_020_MA10",
+      "syntax": "qlib"
     },
     {
       "name": "MA20",
@@ -604,7 +644,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_021_MA20",
+      "syntax": "qlib"
     },
     {
       "name": "MA30",
@@ -629,7 +671,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_022_MA30",
+      "syntax": "qlib"
     },
     {
       "name": "MA60",
@@ -654,7 +698,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_023_MA60",
+      "syntax": "qlib"
     },
     {
       "name": "STD5",
@@ -679,7 +725,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_024_STD5",
+      "syntax": "qlib"
     },
     {
       "name": "STD10",
@@ -704,7 +752,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_025_STD10",
+      "syntax": "qlib"
     },
     {
       "name": "STD20",
@@ -729,7 +779,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_026_STD20",
+      "syntax": "qlib"
     },
     {
       "name": "STD30",
@@ -754,7 +806,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_027_STD30",
+      "syntax": "qlib"
     },
     {
       "name": "STD60",
@@ -779,7 +833,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_028_STD60",
+      "syntax": "qlib"
     },
     {
       "name": "BETA5",
@@ -804,7 +860,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_029_BETA5",
+      "syntax": "qlib"
     },
     {
       "name": "BETA10",
@@ -829,7 +887,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_030_BETA10",
+      "syntax": "qlib"
     },
     {
       "name": "BETA20",
@@ -854,7 +914,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_031_BETA20",
+      "syntax": "qlib"
     },
     {
       "name": "BETA30",
@@ -879,7 +941,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_032_BETA30",
+      "syntax": "qlib"
     },
     {
       "name": "BETA60",
@@ -904,7 +968,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_033_BETA60",
+      "syntax": "qlib"
     },
     {
       "name": "RSQR5",
@@ -921,7 +987,9 @@
             }
           ]
         }
-      }
+      },
+      "id": "alpha158_034_RSQR5",
+      "syntax": "qlib"
     },
     {
       "name": "RSQR10",
@@ -938,7 +1006,9 @@
             }
           ]
         }
-      }
+      },
+      "id": "alpha158_035_RSQR10",
+      "syntax": "qlib"
     },
     {
       "name": "RSQR20",
@@ -955,7 +1025,9 @@
             }
           ]
         }
-      }
+      },
+      "id": "alpha158_036_RSQR20",
+      "syntax": "qlib"
     },
     {
       "name": "RSQR30",
@@ -972,7 +1044,9 @@
             }
           ]
         }
-      }
+      },
+      "id": "alpha158_037_RSQR30",
+      "syntax": "qlib"
     },
     {
       "name": "RSQR60",
@@ -989,7 +1063,9 @@
             }
           ]
         }
-      }
+      },
+      "id": "alpha158_038_RSQR60",
+      "syntax": "qlib"
     },
     {
       "name": "RESI5",
@@ -1014,7 +1090,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_039_RESI5",
+      "syntax": "qlib"
     },
     {
       "name": "RESI10",
@@ -1039,7 +1117,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_040_RESI10",
+      "syntax": "qlib"
     },
     {
       "name": "RESI20",
@@ -1064,7 +1144,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_041_RESI20",
+      "syntax": "qlib"
     },
     {
       "name": "RESI30",
@@ -1089,7 +1171,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_042_RESI30",
+      "syntax": "qlib"
     },
     {
       "name": "RESI60",
@@ -1114,7 +1198,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_043_RESI60",
+      "syntax": "qlib"
     },
     {
       "name": "MAX5",
@@ -1139,7 +1225,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_044_MAX5",
+      "syntax": "qlib"
     },
     {
       "name": "MAX10",
@@ -1164,7 +1252,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_045_MAX10",
+      "syntax": "qlib"
     },
     {
       "name": "MAX20",
@@ -1189,7 +1279,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_046_MAX20",
+      "syntax": "qlib"
     },
     {
       "name": "MAX30",
@@ -1214,7 +1306,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_047_MAX30",
+      "syntax": "qlib"
     },
     {
       "name": "MAX60",
@@ -1239,7 +1333,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_048_MAX60",
+      "syntax": "qlib"
     },
     {
       "name": "MIN5",
@@ -1264,7 +1360,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_049_MIN5",
+      "syntax": "qlib"
     },
     {
       "name": "MIN10",
@@ -1289,7 +1387,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_050_MIN10",
+      "syntax": "qlib"
     },
     {
       "name": "MIN20",
@@ -1314,7 +1414,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_051_MIN20",
+      "syntax": "qlib"
     },
     {
       "name": "MIN30",
@@ -1339,7 +1441,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_052_MIN30",
+      "syntax": "qlib"
     },
     {
       "name": "MIN60",
@@ -1364,7 +1468,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_053_MIN60",
+      "syntax": "qlib"
     },
     {
       "name": "QTLU5",
@@ -1392,7 +1498,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_054_QTLU5",
+      "syntax": "qlib"
     },
     {
       "name": "QTLU10",
@@ -1420,7 +1528,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_055_QTLU10",
+      "syntax": "qlib"
     },
     {
       "name": "QTLU20",
@@ -1448,7 +1558,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_056_QTLU20",
+      "syntax": "qlib"
     },
     {
       "name": "QTLU30",
@@ -1476,7 +1588,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_057_QTLU30",
+      "syntax": "qlib"
     },
     {
       "name": "QTLU60",
@@ -1504,7 +1618,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_058_QTLU60",
+      "syntax": "qlib"
     },
     {
       "name": "QTLD5",
@@ -1532,7 +1648,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_059_QTLD5",
+      "syntax": "qlib"
     },
     {
       "name": "QTLD10",
@@ -1560,7 +1678,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_060_QTLD10",
+      "syntax": "qlib"
     },
     {
       "name": "QTLD20",
@@ -1588,7 +1708,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_061_QTLD20",
+      "syntax": "qlib"
     },
     {
       "name": "QTLD30",
@@ -1616,7 +1738,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_062_QTLD30",
+      "syntax": "qlib"
     },
     {
       "name": "QTLD60",
@@ -1644,7 +1768,9 @@
             "Input": "close"
           }
         }
-      }
+      },
+      "id": "alpha158_063_QTLD60",
+      "syntax": "qlib"
     },
     {
       "name": "RANK5",
@@ -1661,7 +1787,9 @@
             }
           ]
         }
-      }
+      },
+      "id": "alpha158_064_RANK5",
+      "syntax": "qlib"
     },
     {
       "name": "RANK10",
@@ -1678,7 +1806,9 @@
             }
           ]
         }
-      }
+      },
+      "id": "alpha158_065_RANK10",
+      "syntax": "qlib"
     },
     {
       "name": "RANK20",
@@ -1695,7 +1825,9 @@
             }
           ]
         }
-      }
+      },
+      "id": "alpha158_066_RANK20",
+      "syntax": "qlib"
     },
     {
       "name": "RANK30",
@@ -1712,7 +1844,9 @@
             }
           ]
         }
-      }
+      },
+      "id": "alpha158_067_RANK30",
+      "syntax": "qlib"
     },
     {
       "name": "RANK60",
@@ -1729,7 +1863,9 @@
             }
           ]
         }
-      }
+      },
+      "id": "alpha158_068_RANK60",
+      "syntax": "qlib"
     },
     {
       "name": "RSV5",
@@ -1798,7 +1934,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_069_RSV5",
+      "syntax": "qlib"
     },
     {
       "name": "RSV10",
@@ -1867,7 +2005,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_070_RSV10",
+      "syntax": "qlib"
     },
     {
       "name": "RSV20",
@@ -1936,7 +2076,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_071_RSV20",
+      "syntax": "qlib"
     },
     {
       "name": "RSV30",
@@ -2005,7 +2147,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_072_RSV30",
+      "syntax": "qlib"
     },
     {
       "name": "RSV60",
@@ -2074,7 +2218,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_073_RSV60",
+      "syntax": "qlib"
     },
     {
       "name": "IMAX5",
@@ -2099,7 +2245,9 @@
             "Constant": 5
           }
         }
-      }
+      },
+      "id": "alpha158_074_IMAX5",
+      "syntax": "qlib"
     },
     {
       "name": "IMAX10",
@@ -2124,7 +2272,9 @@
             "Constant": 10
           }
         }
-      }
+      },
+      "id": "alpha158_075_IMAX10",
+      "syntax": "qlib"
     },
     {
       "name": "IMAX20",
@@ -2149,7 +2299,9 @@
             "Constant": 20
           }
         }
-      }
+      },
+      "id": "alpha158_076_IMAX20",
+      "syntax": "qlib"
     },
     {
       "name": "IMAX30",
@@ -2174,7 +2326,9 @@
             "Constant": 30
           }
         }
-      }
+      },
+      "id": "alpha158_077_IMAX30",
+      "syntax": "qlib"
     },
     {
       "name": "IMAX60",
@@ -2199,7 +2353,9 @@
             "Constant": 60
           }
         }
-      }
+      },
+      "id": "alpha158_078_IMAX60",
+      "syntax": "qlib"
     },
     {
       "name": "IMIN5",
@@ -2224,7 +2380,9 @@
             "Constant": 5
           }
         }
-      }
+      },
+      "id": "alpha158_079_IMIN5",
+      "syntax": "qlib"
     },
     {
       "name": "IMIN10",
@@ -2249,7 +2407,9 @@
             "Constant": 10
           }
         }
-      }
+      },
+      "id": "alpha158_080_IMIN10",
+      "syntax": "qlib"
     },
     {
       "name": "IMIN20",
@@ -2274,7 +2434,9 @@
             "Constant": 20
           }
         }
-      }
+      },
+      "id": "alpha158_081_IMIN20",
+      "syntax": "qlib"
     },
     {
       "name": "IMIN30",
@@ -2299,7 +2461,9 @@
             "Constant": 30
           }
         }
-      }
+      },
+      "id": "alpha158_082_IMIN30",
+      "syntax": "qlib"
     },
     {
       "name": "IMIN60",
@@ -2324,7 +2488,9 @@
             "Constant": 60
           }
         }
-      }
+      },
+      "id": "alpha158_083_IMIN60",
+      "syntax": "qlib"
     },
     {
       "name": "IMXD5",
@@ -2367,7 +2533,9 @@
             "Constant": 5
           }
         }
-      }
+      },
+      "id": "alpha158_084_IMXD5",
+      "syntax": "qlib"
     },
     {
       "name": "IMXD10",
@@ -2410,7 +2578,9 @@
             "Constant": 10
           }
         }
-      }
+      },
+      "id": "alpha158_085_IMXD10",
+      "syntax": "qlib"
     },
     {
       "name": "IMXD20",
@@ -2453,7 +2623,9 @@
             "Constant": 20
           }
         }
-      }
+      },
+      "id": "alpha158_086_IMXD20",
+      "syntax": "qlib"
     },
     {
       "name": "IMXD30",
@@ -2496,7 +2668,9 @@
             "Constant": 30
           }
         }
-      }
+      },
+      "id": "alpha158_087_IMXD30",
+      "syntax": "qlib"
     },
     {
       "name": "IMXD60",
@@ -2539,7 +2713,9 @@
             "Constant": 60
           }
         }
-      }
+      },
+      "id": "alpha158_088_IMXD60",
+      "syntax": "qlib"
     },
     {
       "name": "CORR5",
@@ -2574,7 +2750,9 @@
             }
           ]
         }
-      }
+      },
+      "id": "alpha158_089_CORR5",
+      "syntax": "qlib"
     },
     {
       "name": "CORR10",
@@ -2609,7 +2787,9 @@
             }
           ]
         }
-      }
+      },
+      "id": "alpha158_090_CORR10",
+      "syntax": "qlib"
     },
     {
       "name": "CORR20",
@@ -2644,7 +2824,9 @@
             }
           ]
         }
-      }
+      },
+      "id": "alpha158_091_CORR20",
+      "syntax": "qlib"
     },
     {
       "name": "CORR30",
@@ -2679,7 +2861,9 @@
             }
           ]
         }
-      }
+      },
+      "id": "alpha158_092_CORR30",
+      "syntax": "qlib"
     },
     {
       "name": "CORR60",
@@ -2714,7 +2898,9 @@
             }
           ]
         }
-      }
+      },
+      "id": "alpha158_093_CORR60",
+      "syntax": "qlib"
     },
     {
       "name": "CORD5",
@@ -2785,7 +2971,9 @@
             }
           ]
         }
-      }
+      },
+      "id": "alpha158_094_CORD5",
+      "syntax": "qlib"
     },
     {
       "name": "CORD10",
@@ -2856,7 +3044,9 @@
             }
           ]
         }
-      }
+      },
+      "id": "alpha158_095_CORD10",
+      "syntax": "qlib"
     },
     {
       "name": "CORD20",
@@ -2927,7 +3117,9 @@
             }
           ]
         }
-      }
+      },
+      "id": "alpha158_096_CORD20",
+      "syntax": "qlib"
     },
     {
       "name": "CORD30",
@@ -2998,7 +3190,9 @@
             }
           ]
         }
-      }
+      },
+      "id": "alpha158_097_CORD30",
+      "syntax": "qlib"
     },
     {
       "name": "CORD60",
@@ -3069,7 +3263,9 @@
             }
           ]
         }
-      }
+      },
+      "id": "alpha158_098_CORD60",
+      "syntax": "qlib"
     },
     {
       "name": "CNTP5",
@@ -3104,7 +3300,9 @@
             }
           ]
         }
-      }
+      },
+      "id": "alpha158_099_CNTP5",
+      "syntax": "qlib"
     },
     {
       "name": "CNTP10",
@@ -3139,7 +3337,9 @@
             }
           ]
         }
-      }
+      },
+      "id": "alpha158_100_CNTP10",
+      "syntax": "qlib"
     },
     {
       "name": "CNTP20",
@@ -3174,7 +3374,9 @@
             }
           ]
         }
-      }
+      },
+      "id": "alpha158_101_CNTP20",
+      "syntax": "qlib"
     },
     {
       "name": "CNTP30",
@@ -3209,7 +3411,9 @@
             }
           ]
         }
-      }
+      },
+      "id": "alpha158_102_CNTP30",
+      "syntax": "qlib"
     },
     {
       "name": "CNTP60",
@@ -3244,7 +3448,9 @@
             }
           ]
         }
-      }
+      },
+      "id": "alpha158_103_CNTP60",
+      "syntax": "qlib"
     },
     {
       "name": "CNTN5",
@@ -3279,7 +3485,9 @@
             }
           ]
         }
-      }
+      },
+      "id": "alpha158_104_CNTN5",
+      "syntax": "qlib"
     },
     {
       "name": "CNTN10",
@@ -3314,7 +3522,9 @@
             }
           ]
         }
-      }
+      },
+      "id": "alpha158_105_CNTN10",
+      "syntax": "qlib"
     },
     {
       "name": "CNTN20",
@@ -3349,7 +3559,9 @@
             }
           ]
         }
-      }
+      },
+      "id": "alpha158_106_CNTN20",
+      "syntax": "qlib"
     },
     {
       "name": "CNTN30",
@@ -3384,7 +3596,9 @@
             }
           ]
         }
-      }
+      },
+      "id": "alpha158_107_CNTN30",
+      "syntax": "qlib"
     },
     {
       "name": "CNTN60",
@@ -3419,7 +3633,9 @@
             }
           ]
         }
-      }
+      },
+      "id": "alpha158_108_CNTN60",
+      "syntax": "qlib"
     },
     {
       "name": "CNTD5",
@@ -3490,7 +3706,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_109_CNTD5",
+      "syntax": "qlib"
     },
     {
       "name": "CNTD10",
@@ -3561,7 +3779,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_110_CNTD10",
+      "syntax": "qlib"
     },
     {
       "name": "CNTD20",
@@ -3632,7 +3852,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_111_CNTD20",
+      "syntax": "qlib"
     },
     {
       "name": "CNTD30",
@@ -3703,7 +3925,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_112_CNTD30",
+      "syntax": "qlib"
     },
     {
       "name": "CNTD60",
@@ -3774,7 +3998,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_113_CNTD60",
+      "syntax": "qlib"
     },
     {
       "name": "SUMP5",
@@ -3870,7 +4096,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_114_SUMP5",
+      "syntax": "qlib"
     },
     {
       "name": "SUMP10",
@@ -3966,7 +4194,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_115_SUMP10",
+      "syntax": "qlib"
     },
     {
       "name": "SUMP20",
@@ -4062,7 +4292,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_116_SUMP20",
+      "syntax": "qlib"
     },
     {
       "name": "SUMP30",
@@ -4158,7 +4390,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_117_SUMP30",
+      "syntax": "qlib"
     },
     {
       "name": "SUMP60",
@@ -4254,7 +4488,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_118_SUMP60",
+      "syntax": "qlib"
     },
     {
       "name": "SUMN5",
@@ -4350,7 +4586,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_119_SUMN5",
+      "syntax": "qlib"
     },
     {
       "name": "SUMN10",
@@ -4446,7 +4684,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_120_SUMN10",
+      "syntax": "qlib"
     },
     {
       "name": "SUMN20",
@@ -4542,7 +4782,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_121_SUMN20",
+      "syntax": "qlib"
     },
     {
       "name": "SUMN30",
@@ -4638,7 +4880,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_122_SUMN30",
+      "syntax": "qlib"
     },
     {
       "name": "SUMN60",
@@ -4734,7 +4978,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_123_SUMN60",
+      "syntax": "qlib"
     },
     {
       "name": "SUMD5",
@@ -4876,7 +5122,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_124_SUMD5",
+      "syntax": "qlib"
     },
     {
       "name": "SUMD10",
@@ -5018,7 +5266,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_125_SUMD10",
+      "syntax": "qlib"
     },
     {
       "name": "SUMD20",
@@ -5160,7 +5410,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_126_SUMD20",
+      "syntax": "qlib"
     },
     {
       "name": "SUMD30",
@@ -5302,7 +5554,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_127_SUMD30",
+      "syntax": "qlib"
     },
     {
       "name": "SUMD60",
@@ -5444,7 +5698,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_128_SUMD60",
+      "syntax": "qlib"
     },
     {
       "name": "VMA5",
@@ -5477,7 +5733,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_129_VMA5",
+      "syntax": "qlib"
     },
     {
       "name": "VMA10",
@@ -5510,7 +5768,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_130_VMA10",
+      "syntax": "qlib"
     },
     {
       "name": "VMA20",
@@ -5543,7 +5803,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_131_VMA20",
+      "syntax": "qlib"
     },
     {
       "name": "VMA30",
@@ -5576,7 +5838,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_132_VMA30",
+      "syntax": "qlib"
     },
     {
       "name": "VMA60",
@@ -5609,7 +5873,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_133_VMA60",
+      "syntax": "qlib"
     },
     {
       "name": "VSTD5",
@@ -5642,7 +5908,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_134_VSTD5",
+      "syntax": "qlib"
     },
     {
       "name": "VSTD10",
@@ -5675,7 +5943,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_135_VSTD10",
+      "syntax": "qlib"
     },
     {
       "name": "VSTD20",
@@ -5708,7 +5978,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_136_VSTD20",
+      "syntax": "qlib"
     },
     {
       "name": "VSTD30",
@@ -5741,7 +6013,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_137_VSTD30",
+      "syntax": "qlib"
     },
     {
       "name": "VSTD60",
@@ -5774,7 +6048,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_138_VSTD60",
+      "syntax": "qlib"
     },
     {
       "name": "WVMA5",
@@ -5899,7 +6175,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_139_WVMA5",
+      "syntax": "qlib"
     },
     {
       "name": "WVMA10",
@@ -6024,7 +6302,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_140_WVMA10",
+      "syntax": "qlib"
     },
     {
       "name": "WVMA20",
@@ -6149,7 +6429,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_141_WVMA20",
+      "syntax": "qlib"
     },
     {
       "name": "WVMA30",
@@ -6274,7 +6556,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_142_WVMA30",
+      "syntax": "qlib"
     },
     {
       "name": "WVMA60",
@@ -6399,7 +6683,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_143_WVMA60",
+      "syntax": "qlib"
     },
     {
       "name": "VSUMP5",
@@ -6495,7 +6781,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_144_VSUMP5",
+      "syntax": "qlib"
     },
     {
       "name": "VSUMP10",
@@ -6591,7 +6879,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_145_VSUMP10",
+      "syntax": "qlib"
     },
     {
       "name": "VSUMP20",
@@ -6687,7 +6977,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_146_VSUMP20",
+      "syntax": "qlib"
     },
     {
       "name": "VSUMP30",
@@ -6783,7 +7075,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_147_VSUMP30",
+      "syntax": "qlib"
     },
     {
       "name": "VSUMP60",
@@ -6879,7 +7173,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_148_VSUMP60",
+      "syntax": "qlib"
     },
     {
       "name": "VSUMN5",
@@ -6975,7 +7271,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_149_VSUMN5",
+      "syntax": "qlib"
     },
     {
       "name": "VSUMN10",
@@ -7071,7 +7369,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_150_VSUMN10",
+      "syntax": "qlib"
     },
     {
       "name": "VSUMN20",
@@ -7167,7 +7467,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_151_VSUMN20",
+      "syntax": "qlib"
     },
     {
       "name": "VSUMN30",
@@ -7263,7 +7565,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_152_VSUMN30",
+      "syntax": "qlib"
     },
     {
       "name": "VSUMN60",
@@ -7359,7 +7663,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_153_VSUMN60",
+      "syntax": "qlib"
     },
     {
       "name": "VSUMD5",
@@ -7501,7 +7807,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_154_VSUMD5",
+      "syntax": "qlib"
     },
     {
       "name": "VSUMD10",
@@ -7643,7 +7951,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_155_VSUMD10",
+      "syntax": "qlib"
     },
     {
       "name": "VSUMD20",
@@ -7785,7 +8095,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_156_VSUMD20",
+      "syntax": "qlib"
     },
     {
       "name": "VSUMD30",
@@ -7927,7 +8239,9 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_157_VSUMD30",
+      "syntax": "qlib"
     },
     {
       "name": "VSUMD60",
@@ -8069,7 +8383,10 @@
             }
           }
         }
-      }
+      },
+      "id": "alpha158_158_VSUMD60",
+      "syntax": "qlib"
     }
-  ]
+  ],
+  "schema_version": 1
 }

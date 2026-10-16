@@ -8,14 +8,14 @@
 
 | 文件 | 职责 |
 |---|---|
-| [formulas.rs](formulas.rs) | 191 条 canonical 目录公式；不包含行情或原生模型 |
+| [formulas.rs](formulas.rs) | 共同JSON目录加载器；保留191原始文本和158数据AST |
 | [parser.rs](parser.rs) | `parse_formula/input_columns`、词法/优先级/算子参数；拒绝缺窗口和非法常量 |
 | [audit.rs](audit.rs) | `quarantine_reason/quarantined_ids/entries`；原报告定位、隔离原因与验证范围 |
 | [lib.rs](lib.rs) | `FactorRegistry/FactorSpec/FactorExpr`、`Panel`、executor、lookback 与 recursive-state 元数据、Parquet 产物 |
 
 ```mermaid
 flowchart TD
-  FORM["formulas.rs：191 条目录公式"] --> PARSE["parser.rs：规范化、分词、AST"]
+  FORM["catalogs/gtja191.json：191 条目录公式"] --> PARSE["parser.rs：规范化、分词、AST"]
   AUDIT["audit.rs：12 项明确隔离"] --> REG["FactorRegistry：版本与输入列"]
   PARSE --> REG
   REG --> READY["179 项可执行 AST"]
@@ -75,3 +75,8 @@ flowchart LR
 ## 独立Alpha158语义
 
 alpha158.rs保存专用数据AST和逐证券滚动算子；lib.rs按组合选择Registry。原因是两套公式的null、窗口、排名语义不同，不能复用GTJA算子后只换名称。 完整接口、why、边界和验收见[组件契约](../README.md)。
+
+`operators.rs`集中管理OperatorRegistry/OperatorSpec、严格公式编译、统一表达式及内核适配；
+`selection.rs`定义不可变CustomFactorDefinition、有序FactorRef及混合注册表解析。原生AST仍作为
+兼容适配类型，计算入口统一经过显式算子ID；原GTJA解析器的来源修复不会作用于用户公式。
+目录位于相邻`../catalogs/`，版本、规则、公式示例和验收见[组件README](../README.md)。

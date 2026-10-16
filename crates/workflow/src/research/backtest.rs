@@ -52,7 +52,7 @@ const SUPPORTED_RESEARCH_INPUTS: [&str; 15] = [
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// Current strict integer-share research result format.
-pub const RESEARCH_SCHEMA_VERSION: u32 = 17;
+pub const RESEARCH_SCHEMA_VERSION: u32 = 18;
 
 /// A result cannot be interpreted using the current research contract.
 #[derive(Debug, thiserror::Error)]
@@ -156,14 +156,14 @@ pub fn validate_result(
     value: &serde_json::Value,
 ) -> std::result::Result<(), UnsupportedResultFormat> {
     let validate = || -> Result<()> {
-        if !matches!(value["schema_version"].as_u64(), Some(16 | 17))
+        if !matches!(value["schema_version"].as_u64(), Some(16..=18))
             || value["execution"]["mode"] != "akquant_ex_date"
             || !matches!(
                 value["backtest_status"].as_str(),
                 Some("completed" | "no_valid_trades" | "execution_data_not_ready")
             )
         {
-            return Err("requires research schema 16/17 and akquant_ex_date execution".into());
+            return Err("requires research schema 16/17/18 and akquant_ex_date execution".into());
         }
         let hash = |value: &serde_json::Value| {
             value.as_str().is_some_and(|s| {
@@ -174,10 +174,23 @@ pub fn validate_result(
         if !hash(&value["signature"])
             || !hash(&value["factor_signature"])
             || !hash(&value["execution"]["corporate_action_sha256"])
-            || value["formula_version"]
-                != analytics_factor::alpha158::version(serde_json::from_value(
-                    value["execution"]["factor_set"].clone(),
-                )?)
+            || value["formula_version"] != {
+                let family = serde_json::from_value(value["execution"]["factor_set"].clone())?;
+                let refs: Vec<analytics_factor::selection::FactorRef> =
+                    value["execution"]["research_config"]
+                        .get("factor_refs")
+                        .map(|v| serde_json::from_value(v.clone()))
+                        .transpose()?
+                        .unwrap_or_default();
+                let ids: Vec<String> = serde_json::from_value(
+                    value["execution"]["research_config"]["factor_ids"].clone(),
+                )?;
+                if refs.is_empty() {
+                    analytics_factor::alpha158::version(family).to_string()
+                } else {
+                    FactorRegistry::resolve(family, &refs, &ids)?.selection_version(&ids)?
+                }
+            }
             || !matches!(
                 value["input_kind"].as_str(),
                 Some("synthetic_fixture" | "public_market")
@@ -517,6 +530,9 @@ pub struct ResearchConfig {
     pub rebalance_days: usize,
     /// Ordered explicit factor IDs; empty selects available research factors.
     pub factor_ids: Vec<String>,
+    /// Frozen per-factor definitions; absent in legacy builtin recipes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub factor_refs: Vec<analytics_factor::selection::FactorRef>,
     /// Native training parameters and early stopping.
     pub training: crate::research::TrainingConfig,
 }
@@ -526,6 +542,7 @@ impl Default for ResearchConfig {
             top_n: 50,
             rebalance_days: 5,
             factor_ids: Vec::new(),
+            factor_refs: Vec::new(),
             training: crate::research::TrainingConfig {
                 parameters: BTreeMap::from([
                     ("num_iterations".into(), "200".into()),
@@ -658,6 +675,19 @@ pub struct ResearchExecution {
     pub pool_exit_policy: analytics_core::pool::PoolExitPolicy,
 }
 impl ResearchRequest {
+    /// Resolve definitions without reading the mutable workspace library.
+    pub fn factor_registry(&self) -> Result<FactorRegistry> {
+        Ok(FactorRegistry::resolve(
+            self.factor_set,
+            &self.config.factor_refs,
+            &self.config.factor_ids,
+        )?)
+    }
+    /// Required history is the maximum over all frozen factors.
+    pub fn warmup_sessions(&self) -> usize {
+        analytics_factor::selection::warmup_sessions(self.factor_set, &self.config.factor_refs)
+    }
+
     /// Defaults to five training years, one validation year and tests from 2013.
     pub fn new(data_root: PathBuf, output: PathBuf) -> Self {
         Self {
@@ -778,7 +808,7 @@ fn adjustment_basis_signature(
 }
 /// Validate current training descriptor on every read; unsupported files are never converted.
 pub fn validate_training_artifact(artifact: &serde_json::Value) -> Result<()> {
-    if artifact["schema_version"] != 3
+    if !matches!(artifact["schema_version"].as_u64(), Some(3 | 4))
         || artifact["runtime_signature"] != crate::research::worker::runtime_signature()
         || artifact["dependency_signature"] != crate::research::worker::dependency_signature()
         || artifact["status"] != "trained"
@@ -799,10 +829,11 @@ pub fn validate_training_artifact(artifact: &serde_json::Value) -> Result<()> {
     {
         return Err("training_artifact_damaged".into());
     }
-    if artifact["formula_version"]
-        != analytics_factor::alpha158::version(serde_json::from_value(
-            artifact["factor_set"].clone(),
-        )?)
+    let frozen_request: ResearchRequest = serde_json::from_value(artifact["request"].clone())?;
+    let frozen_version = frozen_request
+        .factor_registry()?
+        .selection_version(&frozen_request.config.factor_ids)?;
+    if artifact["formula_version"] != frozen_version
         || artifact["feature_order"]
             .as_array()
             .is_none_or(|ids| ids.is_empty() || ids.iter().any(|id| id.as_str().is_none()))
@@ -818,7 +849,7 @@ pub fn validate_training_artifact(artifact: &serde_json::Value) -> Result<()> {
         artifact["price_basis"].clone(),
     )?;
     let features: Vec<String> = serde_json::from_value(artifact["feature_order"].clone())?;
-    let registry = FactorRegistry::for_set(family);
+    let registry = request.factor_registry()?;
     let mut seen = BTreeSet::new();
     if family != request.factor_set
         || basis != request.price_basis
@@ -870,7 +901,7 @@ pub fn backtest_from_training_with_policy(
     let dataset = DailyDataset::open(&request.data_root)?;
     let folds = request
         .schedule
-        .resolve_with_warmup(&dataset.calendar, request.factor_set.warmup_sessions())?;
+        .resolve_with_warmup(&dataset.calendar, request.warmup_sessions())?;
     let models = artifact["models"]
         .as_array()
         .ok_or("missing trained models")?;
@@ -1040,7 +1071,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
     let last = dataset.calendar.last().copied().ok_or("empty calendar")?;
     let folds = match request
         .schedule
-        .resolve_with_warmup(&dataset.calendar, request.factor_set.warmup_sessions())
+        .resolve_with_warmup(&dataset.calendar, request.warmup_sessions())
     {
         Ok(f) => f,
         Err(e) => {
@@ -1071,7 +1102,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
     let history_index = dataset
         .calendar
         .partition_point(|d| *d < history_start)
-        .saturating_sub(request.factor_set.warmup_sessions());
+        .saturating_sub(request.warmup_sessions());
     let relevant_start = dataset.calendar[history_index];
     dataset.restrict_reads(DateRange {
         start: relevant_start,
@@ -1081,7 +1112,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         ranges.retain(|r| r.end >= relevant_start && r.start <= needed_end);
         !ranges.is_empty()
     });
-    let registry = FactorRegistry::for_set(request.factor_set);
+    let registry = request.factor_registry()?;
     let quality_snapshot = quality::qualify_with_registry(
         &dataset,
         &pool,
@@ -1564,12 +1595,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         }
         ids = request.config.factor_ids.clone();
     }
-    let formula_version = registry
-        .all()
-        .next()
-        .ok_or("empty registry")?
-        .version
-        .clone();
+    let formula_version = registry.selection_version(&ids)?;
     let signature = format!(
         "sha256:{:x}",
         analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(&(
@@ -1584,7 +1610,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
             &request.price_basis,
             &request.factor_set,
             &quality_snapshot,
-            request.factor_set.warmup_sessions(),
+            request.warmup_sessions(),
             "open-next-2,pit-mask,explicit-or-provider-price-input-v3"
         ))?))
     );
@@ -2029,6 +2055,19 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
             context.check()?;
             let mut manifest: serde_json::Value =
                 serde_json::from_slice(&fs::read(&artifact.manifest_path)?)?;
+            manifest["schema_version"] = 3.into();
+            manifest["factor_definitions"] = registry.manifest_definitions(&ids)?;
+            manifest["factor_refs"] =
+                serde_json::to_value(analytics_factor::selection::frozen_refs(
+                    request.factor_set,
+                    &request.config.factor_refs,
+                    &ids,
+                ))?;
+            manifest["training_schema_hash"] = analytics_factor::selection::hash(&(
+                &manifest["features"],
+                &manifest["factor_refs"],
+            ))?
+            .into();
             manifest["formula_version"] = formula_version.clone().into();
             manifest["input_snapshot_hash"] = signature.clone().into();
             manifest["training_signature"] = training_signature.clone().into();
@@ -2127,7 +2166,7 @@ fn run_scoped(request: &ResearchRequest) -> Result<()> {
         original.train_only = false;
         original.config.factor_ids = ids.clone();
         original.reuse_training = None;
-        let mut training = serde_json::json!({"schema_version":3,"runtime_signature":crate::research::worker::runtime_signature(),"dependency_signature":crate::research::worker::dependency_signature(),"factor_set":request.factor_set,"price_basis":request.price_basis,"status":"trained","request":original,"factor_signature":signature,"models":models,"adjustment_basis_signature":historical_basis_signature,"training_signature":training_signature,"source_map":dataset.source_map(),"resolved_folds":folds,"formula_version":formula_version,"feature_order":ids});
+        let mut training = serde_json::json!({"schema_version":if request.config.factor_refs.is_empty(){3}else{4},"runtime_signature":crate::research::worker::runtime_signature(),"dependency_signature":crate::research::worker::dependency_signature(),"factor_set":request.factor_set,"price_basis":request.price_basis,"status":"trained","request":original,"factor_signature":signature,"models":models,"adjustment_basis_signature":historical_basis_signature,"training_signature":training_signature,"source_map":dataset.source_map(),"resolved_folds":folds,"formula_version":formula_version,"feature_order":ids});
         training["source_warnings"] = serde_json::to_value(
             admission
                 .checks

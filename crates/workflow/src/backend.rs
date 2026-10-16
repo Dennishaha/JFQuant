@@ -64,6 +64,16 @@ pub enum TaskKind {
 /// Commands sent from the egui thread to the worker.
 #[derive(Debug)]
 pub enum WorkerCommand {
+    PreviewFactor {
+        task: Uuid,
+        draft: crate::custom_factors::FactorDraft,
+        cancel: Cancellation,
+    },
+    EvaluateFactors {
+        task: Uuid,
+        request: crate::factor_evaluation::EvaluationRequest,
+        cancel: Cancellation,
+    },
     /// Execute a typed platform workflow.
     ExecuteWorkflow {
         task: Uuid,
@@ -175,6 +185,14 @@ pub struct RunSummary {
 /// Events streamed from the worker back to the egui thread.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WorkerEvent {
+    FactorPreviewed {
+        task: Uuid,
+        preview: crate::custom_factors::FormulaPreview,
+    },
+    FactorsEvaluated {
+        task: Uuid,
+        report: crate::factor_evaluation::EvaluationReport,
+    },
     /// Durable workflow result and refreshed local catalogs.
     WorkflowFinished {
         task: Uuid,
@@ -305,7 +323,9 @@ impl WorkerCommand {
             | Self::SessionQuery { task, .. }
             | Self::SessionNext { task, .. } => (*task, TaskKind::Query),
             Self::ExportQuery { task, .. } => (*task, TaskKind::Export),
-            Self::RunPipeline { task, .. } => (*task, TaskKind::Pipeline),
+            Self::PreviewFactor { task, .. }
+            | Self::EvaluateFactors { task, .. }
+            | Self::RunPipeline { task, .. } => (*task, TaskKind::Pipeline),
             Self::TrainFromCache { task, .. } => (*task, TaskKind::Training),
             #[cfg(any(test, feature = "test-support"))]
             Self::PanicTask { task, kind } => (*task, *kind),
@@ -439,6 +459,8 @@ impl Worker {
                 | WorkerEvent::QueryDescribed { task, .. }
                 | WorkerEvent::QueryPaged { task, .. }
                 | WorkerEvent::Exported { task, .. }
+                | WorkerEvent::FactorPreviewed { task, .. }
+                | WorkerEvent::FactorsEvaluated { task, .. }
                 | WorkerEvent::PipelineFinished { task, .. }
                 | WorkerEvent::TrainingFinished { task, .. } => Some(task),
                 _ => None,
@@ -774,6 +796,68 @@ impl Worker {
                             .export(request)
                             .map_err(|error| error.to_string())?;
                         worker.emit_result(WorkerEvent::Exported { task, destination })?;
+                        Ok(())
+                    },
+                );
+            }
+            WorkerCommand::PreviewFactor {
+                task,
+                draft,
+                cancel,
+            } => {
+                self.record_request = serde_json::to_value(&draft).ok();
+                self.active_cancel = Some(cancel.clone());
+                self.run_task(
+                    task,
+                    TaskKind::Pipeline,
+                    "自定义因子合成预览".into(),
+                    |worker| {
+                        let preview = crate::custom_factors::preview(&draft, cancel)
+                            .map_err(|e| e.to_string())?;
+                        if let Some(root) = &worker.root {
+                            crate::atomic_json(
+                                &root.join(format!(".jfquant/runs/{task}/artifacts.json")),
+                                &preview,
+                            )
+                            .map_err(|e| e.to_string())?;
+                        }
+                        worker.emit_result(WorkerEvent::FactorPreviewed { task, preview })?;
+                        Ok(())
+                    },
+                );
+            }
+            WorkerCommand::EvaluateFactors {
+                task,
+                mut request,
+                cancel,
+            } => {
+                request.input.market_path = self.path(request.input.market_path);
+                request.input.universe_path = self.path(request.input.universe_path);
+                request.input.output_dir = if let Some(root) = &self.root {
+                    root.join(format!(".jfquant/runs/{task}"))
+                } else {
+                    self.path(request.input.output_dir)
+                };
+                self.record_request = serde_json::to_value(&request).ok();
+                self.active_cancel = Some(cancel.clone());
+                self.run_task(
+                    task,
+                    TaskKind::Pipeline,
+                    "因子有效性测试".into(),
+                    |worker| {
+                        let (progress, thread) = worker.pipeline_progress(task);
+                        let result = crate::factor_evaluation::run(&request, progress, cancel)
+                            .map_err(pipeline_error_message);
+                        let _ = thread.join();
+                        let report = result?;
+                        if let Some(root) = &worker.root {
+                            crate::atomic_json(
+                                &root.join(format!(".jfquant/runs/{task}/artifacts.json")),
+                                &report,
+                            )
+                            .map_err(|e| e.to_string())?;
+                        }
+                        worker.emit_result(WorkerEvent::FactorsEvaluated { task, report })?;
                         Ok(())
                     },
                 );

@@ -33,7 +33,9 @@ use thiserror::Error;
 pub mod alpha158;
 pub mod audit;
 mod formulas;
+pub mod operators;
 mod parser;
+pub mod selection;
 
 /// Pinned formula and operator interpretation; required by execution requests.
 pub const FORMULA_VERSION: &str = "gtja191-paper-2017+jfquant-audit-v4";
@@ -42,6 +44,8 @@ pub const FORMULA_VERSION: &str = "gtja191-paper-2017+jfquant-audit-v4";
 /// panel executor. Window lengths are in observations (per instrument).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FactorExpr {
+    /// Unified, versioned operator expression.
+    Unified(Box<operators::Expression>),
     /// Independently pinned Qlib expression with its own rolling/null semantics.
     Alpha158(alpha158::Expr),
     /// Panel input column (`close`, `volume`, ...).
@@ -152,7 +156,11 @@ impl FactorExpr {
         use FactorExpr::*;
         let merge = |a: (u32, bool), b: (u32, bool)| (a.0.max(b.0), a.1 || b.1);
         match self {
-            Alpha158(expr) => (expr.lookback() as u32, false),
+            Unified(expr) => expr
+                .lower()
+                .expect("validated unified expression")
+                .history_requirement(),
+            Alpha158(expr) => (expr.lookback() as u32, expr.requires_recursive_state()),
             Column(_) | Const(_) | Sequence(_) => (1, false),
             Unsupported { .. } => (0, false),
             Neg(a) | Abs(a) | Log(a) | Sign(a) | Pow(a, _) | Rank(a) | ZScore(a) | Scale(a) => {
@@ -212,7 +220,7 @@ impl FactorExpr {
     }
 }
 
-/// One registered Alpha191 factor: parsed expression plus catalog metadata.
+/// One registered builtin or custom factor: expression plus pinned source metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FactorSpec {
     /// Canonical ID such as `alpha_001`.
@@ -242,7 +250,7 @@ pub struct FactorRunRequest {
     pub universe_id: String,
     /// Factors to compute, in output column order.
     pub factor_ids: Vec<String>,
-    /// Formula catalog version pin recorded in the manifest.
+    /// Builtin version or ordered mixed-definition signature recorded in the manifest.
     pub formula_version: String,
 }
 
@@ -477,8 +485,11 @@ impl FactorRegistry {
     /// Builds the 191-entry registry from the pinned formula catalog.
     pub fn new() -> Self {
         let mut specs = BTreeMap::new();
-        for (index, formula) in formulas::ALPHA_FORMULAS.iter().enumerate() {
-            let id = format!("alpha_{:03}", index + 1);
+        for (index, entry) in formulas::gtja().features.into_iter().enumerate() {
+            let formula = &entry.formula;
+            assert_eq!(entry.syntax, "gtja");
+            let id = entry.id.clone();
+            assert_eq!(id, format!("alpha_{:03}", index + 1));
             let expression = if let Some(reason) = audit::quarantine_reason(index + 1) {
                 FactorExpr::Unsupported {
                     formula: format!("{}: {reason}", formula),
@@ -499,7 +510,7 @@ impl FactorRegistry {
                     requires_recursive_state,
                     input_columns,
                     version: FORMULA_VERSION.into(),
-                    formula: (*formula).to_string(),
+                    formula: formula.to_string(),
                 },
             );
         }
@@ -624,7 +635,7 @@ impl InMemoryFactorExecutor {
                 .registry
                 .get(id)
                 .ok_or_else(|| FactorError::UnknownFactor(id.clone()))?;
-            if request.formula_version != spec.version {
+            if request.formula_version != self.registry.selection_version(&request.factor_ids)? {
                 return Err(FactorError::InvalidRequest(format!(
                     "formula version mismatch: requested {}, executing {}",
                     request.formula_version, spec.version
@@ -657,7 +668,7 @@ impl InMemoryFactorExecutor {
                 .registry
                 .get(id)
                 .ok_or_else(|| FactorError::UnknownFactor(id.clone()))?;
-            let values = evaluate(&spec.expression, &context)?;
+            let values = operators::evaluate(&spec.expression, &context)?;
             consume(spec, &values)?;
         }
         Ok(())
@@ -688,7 +699,7 @@ impl FactorExecutor for InMemoryFactorExecutor {
                 .registry
                 .get(id)
                 .ok_or_else(|| FactorError::UnknownFactor(id.clone()))?;
-            let values = evaluate(&spec.expression, &context)?;
+            let values = operators::evaluate(&spec.expression, &context)?;
             outputs.insert(id.clone(), values);
             completed_ids.push(id.clone());
             let _ = progress.send(FactorEvent::Progress {
@@ -698,12 +709,15 @@ impl FactorExecutor for InMemoryFactorExecutor {
             });
         }
         let manifest_json = serde_json::to_string(&serde_json::json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "formula_version": request.formula_version,
             "universe_id": request.universe_id,
             "date_range": request.date_range,
             "factor_ids": completed_ids,
             "rows": self.panel.instrument_id.len(),
+            "factor_definitions": self.registry.manifest_definitions(&request.factor_ids)?,
+            "recursive_seed_rule":"first_finite_observation",
+            "loaded_history_start": self.panel.trade_date.iter().min(),
         }))
         .map_err(|e| FactorError::InvalidRequest(e.to_string()))?;
         let artifact = FactorRunArtifact {
@@ -761,6 +775,7 @@ fn evaluate(expr: &FactorExpr, panel: &EvaluationPanel<'_>) -> Result<Vec<Option
                 .collect()
         };
     match expr {
+        FactorExpr::Unified(expr) => evaluate(&expr.lower()?, panel),
         FactorExpr::Alpha158(expr) => alpha158::evaluate(expr, panel),
         FactorExpr::Column(name) => panel
             .columns

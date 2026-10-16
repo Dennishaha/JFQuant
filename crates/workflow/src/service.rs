@@ -26,10 +26,16 @@ use std::{
 };
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 21;
+pub const PROTOCOL_VERSION: u32 = 23;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TaskRequest {
+    PreviewFactor {
+        draft: crate::custom_factors::FactorDraft,
+    },
+    EvaluateFactors {
+        request: Box<crate::factor_evaluation::EvaluationRequest>,
+    },
     #[cfg(any(test, feature = "test-support"))]
     TestingPause {
         milliseconds: u64,
@@ -73,7 +79,9 @@ impl TaskRequest {
             Self::Describe { .. } => TaskKind::Describe,
             Self::Query { .. } | Self::QueryNext { .. } => TaskKind::Query,
             Self::Export { .. } => TaskKind::Export,
-            Self::Pipeline { .. } => TaskKind::Pipeline,
+            Self::PreviewFactor { .. } | Self::EvaluateFactors { .. } | Self::Pipeline { .. } => {
+                TaskKind::Pipeline
+            }
             Self::Train { .. } => TaskKind::Training,
         }
     }
@@ -86,6 +94,8 @@ impl TaskRequest {
             Self::Describe { .. } => "描述查询结构".into(),
             Self::Query { .. } | Self::QueryNext { .. } => "执行查询".into(),
             Self::Export { .. } => "导出查询结果".into(),
+            Self::PreviewFactor { .. } => "自定义因子合成预览".into(),
+            Self::EvaluateFactors { .. } => "因子有效性测试".into(),
             Self::Pipeline { .. } => "运行因子流水线".into(),
             Self::Train { .. } => "训练模型".into(),
         }
@@ -114,6 +124,16 @@ impl TaskRequest {
                 after,
             },
             Self::Export { request } => WorkerCommand::ExportQuery { task, request },
+            Self::PreviewFactor { draft } => WorkerCommand::PreviewFactor {
+                task,
+                draft,
+                cancel,
+            },
+            Self::EvaluateFactors { request } => WorkerCommand::EvaluateFactors {
+                task,
+                request: *request,
+                cancel,
+            },
             Self::Pipeline { request } => WorkerCommand::RunPipeline {
                 task,
                 request: *request,
@@ -172,6 +192,25 @@ fn result_error(e: Box<dyn std::error::Error>, task_id: Option<Uuid>) -> Service
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum Rpc {
+    Operators {
+        query: String,
+    },
+    FactorLibrary,
+    ValidateFactor {
+        draft: crate::custom_factors::FactorDraft,
+    },
+    SaveFactor {
+        draft: crate::custom_factors::FactorDraft,
+    },
+    ArchiveFactor {
+        id: String,
+    },
+    SaveFactorGroup {
+        group: Box<crate::factor_groups::FactorGroup>,
+    },
+    ArchiveFactorGroup {
+        id: String,
+    },
     Status,
     Submit {
         id: Uuid,
@@ -341,7 +380,7 @@ impl Server {
                     TaskRequest::Workflow { request } => crate::snapshot(&self.workspace, request)
                         .map_err(|e| ServiceError::new("invalid_request", e))?,
                     _ => {
-                        json!({"request":request,"app_version":env!("CARGO_PKG_VERSION"),"formula_version":match &request { TaskRequest::Pipeline {request} => analytics_factor::alpha158::version(request.factor_set), _=>analytics_factor::FORMULA_VERSION }})
+                        json!({"request":request,"app_version":env!("CARGO_PKG_VERSION"),"formula_version":match &request { TaskRequest::Pipeline {request} => analytics_factor::FactorRegistry::resolve(request.factor_set,&request.factor_refs,&request.factor_ids).and_then(|r|r.selection_version(&request.factor_ids)).map_err(failure)?, TaskRequest::EvaluateFactors {request} => analytics_factor::FactorRegistry::resolve(request.input.factor_set,&request.input.factor_refs,&request.input.factor_ids).and_then(|r|r.selection_version(&request.input.factor_ids)).map_err(failure)?, _=>analytics_factor::FORMULA_VERSION.to_string() }})
                     }
                 };
                 let record = self
@@ -440,6 +479,13 @@ impl Server {
                     .map_err(|e| result_error(e, None))?,
             )
             .map_err(failure),
+            r @ (Rpc::Operators { .. }
+            | Rpc::FactorLibrary
+            | Rpc::ValidateFactor { .. }
+            | Rpc::SaveFactor { .. }
+            | Rpc::ArchiveFactor { .. }
+            | Rpc::SaveFactorGroup { .. }
+            | Rpc::ArchiveFactorGroup { .. }) => factor_library_call(&self.workspace, r),
             Rpc::Pools => {
                 serde_json::to_value(self.workspace.pools().map_err(failure)?).map_err(failure)
             }
@@ -493,6 +539,52 @@ impl Server {
             }
             Rpc::Restart => Ok(json!({"restarted":false})),
         }
+    }
+}
+/// Shared data-only library operations; App test adapters use this same handler.
+pub fn factor_library_call(w: &Workspace, request: Rpc) -> Result<Value> {
+    let snapshot = || -> Result<Value> {
+        Ok(
+            json!({"groups":crate::factor_groups::list(w.root()).map_err(failure)?,"factors":crate::custom_factors::list(w,true).map_err(failure)?}),
+        )
+    };
+    match request {
+        Rpc::Operators { query } => {
+            Ok(json!({"operators":analytics_factor::operators::OperatorRegistry::search(&query)}))
+        }
+        Rpc::FactorLibrary => snapshot(),
+        Rpc::ValidateFactor { draft } => Ok(
+            json!({"compiled":crate::custom_factors::validate(&draft).map_err(|e|ServiceError::new("invalid_formula",e))?}),
+        ),
+        Rpc::SaveFactor { draft } => {
+            let saved = crate::custom_factors::save(w, draft).map_err(failure)?;
+            let mut result = snapshot()?;
+            result["saved_factor"] = serde_json::to_value(saved).map_err(failure)?;
+            Ok(result)
+        }
+        Rpc::ArchiveFactor { id } => {
+            crate::custom_factors::archive(w, &id).map_err(failure)?;
+            snapshot()
+        }
+        Rpc::SaveFactorGroup { group } => {
+            group.save(w.root()).map_err(failure)?;
+            snapshot()
+        }
+        Rpc::ArchiveFactorGroup { id } => {
+            let group = crate::factor_groups::list(w.root())
+                .map_err(failure)?
+                .into_iter()
+                .find(|g| g.id == id)
+                .ok_or_else(|| ServiceError::new("not_found", "factor group not found"))?;
+            group.delete(w.root()).map_err(failure)?;
+            let mut result = snapshot()?;
+            result["archived_group"] = id.into();
+            Ok(result)
+        }
+        _ => Err(ServiceError::new(
+            "invalid_request",
+            "not a factor library request",
+        )),
     }
 }
 // Collector threads share the service state, never native handles.
@@ -914,6 +1006,17 @@ pub fn bridge(
                         WorkerCommand::ExportQuery { request, .. } => {
                             (TaskRequest::Export { request }, None)
                         }
+                        WorkerCommand::PreviewFactor { draft, cancel, .. } => {
+                            (TaskRequest::PreviewFactor { draft }, Some(cancel))
+                        }
+                        WorkerCommand::EvaluateFactors {
+                            request, cancel, ..
+                        } => (
+                            TaskRequest::EvaluateFactors {
+                                request: Box::new(request),
+                            },
+                            Some(cancel),
+                        ),
                         WorkerCommand::RunPipeline {
                             request, cancel, ..
                         } => (

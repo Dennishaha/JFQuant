@@ -22,3 +22,7 @@ DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow research::backtest
 ```
 
 HiThink真实账户验收：年度因子分片按逐证券供应商口径读取已前复权OHLC、原始股数与CNY金额，指数同样不要求独立系数；中性缩放不写成研究系数，VWAP继续为null。通达信/Qlib的既有单位恢复保留。fixture覆盖股票、指数、null VWAP及两种量额转换路径。
+
+混合因子选择来自ResearchConfig.factor_refs，prepare_year按最大嵌套lookback扩大历史读取，
+算子经统一注册表执行。缓存分片manifest记录载入历史起点和递归种子约定；训练描述4保留完整固定修订。
+旧模型复用不读取可变自定义因子库；验证定义版本、顺序、模型哈希和训练签名后继续已有账户执行流程。

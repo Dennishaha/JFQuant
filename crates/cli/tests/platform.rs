@@ -1628,6 +1628,34 @@ fn evidence_commands_share_status_and_persist_nonpublishing_scaffolds() {
     let result = s.json(&["jobs", "results", sub["task_id"].as_str().unwrap()]);
     assert_eq!(result["details"]["actions"], actions.id);
     assert!(result["details"]["entries"].is_array());
+    assert_eq!(result["details"]["report_kind"], "evidence_inventory");
+    assert!(result["details"]["current"].is_null());
+    let mut owner = w
+        .begin(Uuid::new_v4(), "terminal dependency fixture", json!({}))
+        .unwrap();
+    std::fs::write(w.resolve(&owner.output).join("execution-dependencies.json"),serde_json::to_vec(&json!({"schema_version":1,"policy":"audited","scope":{"SH600000":{"start":"2009-01-02","end":"2009-01-02"}}})).unwrap()).unwrap();
+    w.finish(&mut owner, analytics_workflow::RunStatus::Succeeded, None)
+        .unwrap();
+    let task_status = s.json(&[
+        "data",
+        "evidence",
+        "status",
+        "--actions",
+        &actions.id,
+        "--task",
+        &owner.id.to_string(),
+    ]);
+    s.json(&[
+        "jobs",
+        "wait",
+        task_status["task_id"].as_str().unwrap(),
+        "--timeout",
+        "30",
+    ]);
+    let result = s.json(&["jobs", "results", task_status["task_id"].as_str().unwrap()]);
+    assert_eq!(result["details"]["report_kind"], "task_dependencies");
+    assert_eq!(result["details"]["current"]["ready"], true);
+    assert_eq!(result["details"]["current"]["task"], owner.id.to_string());
     let root = w.resolve("selected evidence");
     std::fs::create_dir_all(root.join("raw")).unwrap();
     std::fs::write(

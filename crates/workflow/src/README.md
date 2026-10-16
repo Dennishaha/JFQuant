@@ -67,3 +67,15 @@ recursive seeds while avoiding repeated full-pool expansion during real rolling 
 Regression compares the optimized sets against the original observation-by-observation algorithm.
 
 `action_evidence`：共享 Capture / Recover / Retry / Status / Draft 后台任务。输入版本和外部证据树在提交时冻结，执行前核对；捕获与恢复输出现有公告 manifest，修订草稿经正式 review 校验后保存在任务目录，不自动发布。失败批次的恢复保留来源任务状态与签名，原生重试保持原请求和 resume owner。客户端只传普通数据；任务沿用进度、取消和 outcome 持久化。服务协议 27。
+
+## 当前公司行动依赖（协议28）
+
+训练复权、回测预检和账户逐日检查共用存储层 `DependencyIndex`，不再无条件按历史采集失败阻断。保留供应商/严格审核策略、供应商价格路径和实际持仓暴露规则；账户问题不自动变成训练价格问题。
+
+新任务保存格式1的 `adjustment-dependencies.json`、`execution-dependencies.json`，包含真实证券区间集合和检查策略；不以跨折大区间替代训练依赖。`EvidenceRequest::Status { task: Some(ID), .. }` 冻结已结束任务的上下文文件哈希，针对所选行动版本生成状态报告；不启动因子、训练或账户。仅接受明确的当前依赖文件；旧任务缺少准确上下文时要求重新运行输入检查，不从旧报告恢复范围。
+
+证据报告格式2分为 `evidence_inventory` 与 `task_dependencies`。`current` 提供覆盖、事件检查、缺口数、阻断检查数、受影响证券数和历史失败证券数；`ready` 仅指公司行动依赖。补齐对比限定同一冻结任务上下文，列出新增及消失的阻断。旧报告不改写，正式运行必须重新准入；行动版本及执行校验版本进入原有冻结签名。
+
+验证：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow --lib`；`python3 crates/workflow/checks/architecture.py`。
+
+完整原生公告批次的空白修订草稿同时填入覆盖审核骨架（查询日期、全部候选ID、源版本哈希、默认九类）；审核理由留空且校验未通过。审核人必须调整实际证明的事件日期/类别并审阅候选，查询日期本身不代表事件覆盖。选定PDF批次不生成完整覆盖骨架。

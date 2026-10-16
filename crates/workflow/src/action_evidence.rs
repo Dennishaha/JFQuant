@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{fs, path::PathBuf};
 use uuid::Uuid;
+pub(crate) mod status;
 
 /// Versioned workflow operations for selected evidence and immutable review preparation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +35,9 @@ pub enum EvidenceRequest {
         actions: String,
         /// Optional security filter.
         instrument: Option<String>,
+        /// Terminal task whose frozen dependencies are inspected; None is inventory only.
+        #[serde(default)]
+        task: Option<Uuid>,
     },
     /// Generate a review scaffold, or validate and rebase an existing reviewed proposal.
     Draft {
@@ -138,6 +142,12 @@ pub(crate) fn freeze(w: &Workspace, request: &EvidenceRequest) -> Result<Value> 
             json!({"source_record_sha256":analytics_storage::market_view::file_hash(&path)?}),
         );
     }
+    if let EvidenceRequest::Status {
+        task: Some(task), ..
+    } = request
+    {
+        inputs.push(status::freeze(w, *task)?);
+    }
     Ok(Value::from(inputs))
 }
 fn retry_request(w: &Workspace, task: Uuid) -> Result<crate::WorkflowRequest> {
@@ -217,6 +227,7 @@ pub(crate) fn execute(
         EvidenceRequest::Status {
             actions,
             instrument,
+            task,
         } => {
             if let Some(id) = instrument {
                 analytics_core::pool::validate_instrument(id)?;
@@ -231,7 +242,12 @@ pub(crate) fn execute(
                 .chain(book.actions.iter().map(|a| &a.instrument))
                 .collect::<std::collections::BTreeSet<_>>();
             let entries=ids.into_iter().filter(|id|instrument.as_ref().is_none_or(|s|s==*id)).map(|id|Ok(json!({"instrument":id,"queried":book.queried_symbols.contains(id),"failure":book.failures.get(id),"coverage":book.structured_coverage.get(id),"event_count":book.actions.iter().filter(|a|a.instrument==*id).count(),"issues":book.execution_issues.iter().filter(|i|i.instrument==*id).map(|i|Ok(json!({"issue":i,"sha256":signature(i)?}))).collect::<Result<Vec<_>>>()?,"failure_receipt":book.raw_sha256.get(&format!("{id}-actions-failure.json")).map(|h|json!({"filename":format!("{id}-actions-failure.json"),"sha256":h}))}))).collect::<Result<Vec<_>>>()?;
-            json!({"actions":actions,"source_signature":source.signature,"evidence_root":w.resolve(&source.path).parent().unwrap().join("raw"),"entries":entries,"source_failures":book.failures.len(),"queried":book.queried_symbols.len(),"next_steps":["capture selected PDFs","recover terminal batches","draft and validate revisions","revise-actions with the saved request","rerun task admission"]})
+            let current = task
+                .map(|task| {
+                    status::evaluate(w, task, &book, instrument.as_deref(), &source.signature)
+                })
+                .transpose()?;
+            json!({"schema_version":2,"report_kind":if task.is_some() {"task_dependencies"} else {"evidence_inventory"},"current":current,"actions":actions,"source_signature":source.signature,"evidence_root":w.resolve(&source.path).parent().unwrap().join("raw"),"entries":entries,"source_failures":book.failures.len(),"queried":book.queried_symbols.len(),"next_steps":["capture selected PDFs","recover terminal batches","draft and validate revisions","revise-actions with the saved request","rerun task admission"]})
         }
         EvidenceRequest::Draft {
             actions,
@@ -291,6 +307,46 @@ pub(crate) fn execute(
             } else {
                 Default::default()
             };
+            if request.is_none()
+                && let Some(id) = instrument
+            {
+                let path = draft
+                    .evidence_manifest
+                    .parent()
+                    .unwrap()
+                    .join("raw")
+                    .join(format!("{id}-actions-structured.json"));
+                if path.is_file() {
+                    let shard: Value = serde_json::from_slice(&fs::read(path)?)?;
+                    if shard["instrument"] == *id
+                        && shard["evidence"]["pagination_complete"] == true
+                    {
+                        draft.coverage_reviews.push(review::CoverageReview {
+                            instrument: id.clone(),
+                            dates: serde_json::from_value(
+                                shard["evidence"]["requested_announcement_dates"].clone(),
+                            )?,
+                            categories: analytics_storage::corporate_actions::EVENT_CATEGORIES
+                                .iter()
+                                .map(|s| (*s).into())
+                                .collect(),
+                            document_ids: shard["evidence"]["documents"]
+                                .as_array()
+                                .ok_or("coverage documents missing")?
+                                .iter()
+                                .map(|d| {
+                                    d["id"]
+                                        .as_str()
+                                        .map(str::to_owned)
+                                        .ok_or("coverage document ID missing")
+                                })
+                                .collect::<std::result::Result<Vec<_>, _>>()?,
+                            expected_source_sha256: signature(&book)?,
+                            reason: String::new(),
+                        });
+                    }
+                }
+            }
             let validation = if request.is_some()
                 && (!draft.events.is_empty() || !draft.coverage_reviews.is_empty())
             {
@@ -339,6 +395,7 @@ mod tests {
             EvidenceRequest::Status {
                 actions: version.id.clone(),
                 instrument: None,
+                task: None,
             },
         )
         .unwrap();

@@ -308,6 +308,7 @@ pub(super) fn prepare(
         }
     }
     let mut adjustment_issues = BTreeMap::new();
+    let mut action_dependencies = BTreeMap::<String, Vec<DateRange>>::new();
     {
         let mut symbols: BTreeSet<_> = members.keys().cloned().collect();
         if required_inputs.contains_key(&request.benchmark)
@@ -315,35 +316,70 @@ pub(super) fn prepare(
         {
             symbols.insert(request.benchmark.clone());
         }
+        for id in &symbols {
+            if dataset.uses_supplier_prices(id) {
+                continue;
+            }
+            let until = pool
+                .intervals
+                .get(id)
+                .and_then(|rs| rs.iter().map(|r| r.end).max())
+                .map_or(needed_end, |d| d.min(needed_end));
+            if let Some(fields) = required_inputs.get(id) {
+                let dates: BTreeSet<_> = fields.values().flatten().copied().collect();
+                let mut intervals: Vec<(usize, usize)> = vec![];
+                for day in dates {
+                    if let Some((_, end)) = intervals.last_mut()
+                        && *end + 1 == day
+                    {
+                        *end = day;
+                    } else {
+                        intervals.push((day, day));
+                    }
+                }
+                for (a, b) in intervals {
+                    match dataset.security_range(
+                        id,
+                        dataset.calendar[a],
+                        dataset.calendar[b].min(until),
+                    ) {
+                        Ok(range) if range.start <= range.end => action_dependencies
+                            .entry(id.clone())
+                            .or_default()
+                            .push(range),
+                        Ok(_) => {
+                            adjustment_issues
+                                .entry(id.clone())
+                                .or_insert_with(Vec::new)
+                                .push("empty adjustment dependency interval".into());
+                        }
+                        Err(e) => {
+                            adjustment_issues
+                                .entry(id.clone())
+                                .or_insert_with(Vec::new)
+                                .push(e.to_string());
+                        }
+                    }
+                }
+            }
+        }
         match &action_book {
             Some(book) => {
-                for id in &symbols {
-                    let until = pool
-                        .intervals
-                        .get(id)
-                        .and_then(|rs| rs.iter().map(|r| r.end).max())
-                        .map_or(needed_end, |d| d.min(needed_end));
-                    if let Some(fields) = required_inputs.get(id) {
-                        let dates: BTreeSet<_> = fields.values().flatten().copied().collect();
-                        let mut intervals: Vec<(usize, usize)> = vec![];
-                        for day in dates {
-                            if let Some((_, end)) = intervals.last_mut()
-                                && *end + 1 == day
-                            {
-                                *end = day;
-                            } else {
-                                intervals.push((day, day));
-                            }
-                        }
-                        for (a, b) in intervals {
-                            adjustment_issues.extend(adjustment::adjustment_issues(
-                                &dataset,
-                                book,
-                                &BTreeSet::from([id.clone()]),
-                                dataset.calendar[a],
-                                dataset.calendar[b].min(until),
-                            )?);
-                        }
+                let index =
+                    analytics_storage::corporate_actions::dependencies::DependencyIndex::build(
+                        book,
+                    )?;
+                for (id, ranges) in &action_dependencies {
+                    for range in ranges {
+                        adjustment_issues.extend(adjustment::adjustment_issues(
+                            &dataset,
+                            book,
+                            &index,
+                            request.event_check_policy,
+                            &BTreeSet::from([id.clone()]),
+                            range.start,
+                            range.end,
+                        )?);
                     }
                 }
             }
@@ -388,6 +424,10 @@ pub(super) fn prepare(
     {
         admission_issues.push("no eligible labeled training/validation rows".into());
     }
+    save(
+        request.output.join("adjustment-dependencies.json"),
+        &serde_json::json!({"schema_version":1,"policy":request.event_check_policy,"training_only":request.train_only,"blocking":request.price_basis==analytics_core::research_quality::PriceBasis::Verified,"scope":action_dependencies}),
+    )?;
     if !adjustment_issues.is_empty()
         && request.price_basis == analytics_core::research_quality::PriceBasis::Verified
     {

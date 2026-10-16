@@ -69,44 +69,27 @@ fn check(
         affected_factors: vec![],
     }
 }
-fn covers(book: &ActionBundle, id: &str, category: &str, range: &DateRange) -> bool {
-    let mut spans = book
-        .coverage
-        .get(id)
-        .into_iter()
-        .flatten()
-        .filter(|c| {
-            c.category == category && c.status == CheckStatus::Passed && !c.evidence.is_empty()
-        })
-        .map(|c| c.dates.clone())
-        .collect::<Vec<_>>();
-    spans.sort_by_key(|r| r.start);
-    let mut next = range.start;
-    for r in spans {
-        if r.end < next {
-            continue;
-        }
-        if r.start > next {
-            return false;
-        }
-        if r.end >= range.end {
-            return true;
-        }
-        next = r.end.succ_opt().unwrap();
-    }
-    false
-}
 pub(super) fn audited_coverage(book: &ActionBundle, id: &str, range: &DateRange) -> bool {
-    analytics_storage::corporate_actions::EVENT_CATEGORIES
-        .iter()
-        .all(|category| covers(book, id, category, range))
+    analytics_storage::corporate_actions::dependencies::DependencyIndex::build(book)
+        .and_then(|index| {
+            index.resolve(
+                id,
+                std::slice::from_ref(range),
+                analytics_storage::corporate_actions::EVENT_CATEGORIES,
+                EventCheckPolicy::Audited,
+            )
+        })
+        .is_ok_and(|r| r.ready())
 }
-pub(super) fn event_checks(
+pub(crate) fn event_checks(
     book: Option<&ActionBundle>,
     scope: &BTreeMap<String, DateRange>,
     policy: EventCheckPolicy,
 ) -> Vec<AdmissionCheck> {
     let mut checks = vec![];
+    let index = book
+        .map(analytics_storage::corporate_actions::dependencies::DependencyIndex::build)
+        .transpose();
     for (id, range) in scope {
         let Some(book) = book else {
             checks.push(check(
@@ -118,36 +101,46 @@ pub(super) fn event_checks(
             ));
             continue;
         };
-        let evidence = book
-            .structured_coverage
-            .get(id)
-            .map(|c| c.evidence.clone())
-            .unwrap_or_default();
-        let failure = if let Some(e) = book.failures.get(id) {
-            Some(("execution_source_failed", e.clone()))
-        } else if !book.queried_symbols.contains(id) {
-            Some((
-                "execution_history_not_queried",
-                "complete history query missing".into(),
-            ))
-        } else {
-            None
-        };
-        let audited = audited_coverage(book, id, range);
-        let structured = book.structured_coverage.get(id).is_some_and(|c| {
-            c.dates.start <= range.start
-                && c.dates.end >= range.end
-                && !c.source.is_empty()
-                && !c.evidence.is_empty()
+        let resolution = index.as_ref().map_err(|e| e.to_string()).and_then(|index| {
+            index
+                .as_ref()
+                .ok_or_else(|| "event version missing".to_string())?
+                .resolve(
+                    id,
+                    std::slice::from_ref(range),
+                    analytics_storage::corporate_actions::EVENT_CATEGORIES,
+                    policy,
+                )
+                .map_err(|e| e.to_string())
         });
-        let failure = failure.or_else(|| match policy {
-            EventCheckPolicy::Audited if !audited => Some(("execution_event_coverage_missing", "audited category/date coverage missing".into())),
-            EventCheckPolicy::Provider if !audited && !structured => Some(("execution_structured_coverage_missing", "structured history does not cover required dates; successful empty history also requires evidence".into())),
-            _ => None,
-        });
-        let (code, error) =
-            failure.map_or(("execution_history_verified", None), |(c, e)| (c, Some(e)));
-        checks.push(check(Some(id.clone()), range, code, error, evidence));
+        match resolution {
+            Ok(current) => {
+                let code = current
+                    .blocking_code
+                    .as_deref()
+                    .unwrap_or("execution_history_verified");
+                let error = (!current.ready()).then(|| {
+                    format!(
+                        "current coverage gaps: {:?}; historical acquisition: {:?}",
+                        current.gaps, current.historical_failure
+                    )
+                });
+                checks.push(check(
+                    Some(id.clone()),
+                    range,
+                    code,
+                    error,
+                    current.evidence,
+                ));
+            }
+            Err(error) => checks.push(check(
+                Some(id.clone()),
+                range,
+                "execution_evidence_invalid",
+                Some(error),
+                vec![],
+            )),
+        }
         for event in book
             .actions
             .iter()
@@ -296,6 +289,10 @@ pub(super) fn checks(
     range: &DateRange,
 ) -> Result<Vec<AdmissionCheck>> {
     let scope = scope(pool, range);
+    save(
+        request.output.join("execution-dependencies.json"),
+        &serde_json::json!({"schema_version":1,"policy":request.event_check_policy,"scope":scope}),
+    )?;
     let mut checks = event_checks(book, &scope, request.event_check_policy);
     checks.push(check(
         None,
@@ -381,7 +378,7 @@ mod tests {
         }
     }
     fn book() -> ActionBundle {
-        serde_json::from_value(serde_json::json!({"schema_version":5,"downloader":"test","downloaded_at":"2026-01-01T00:00:00Z","source_bindings":{},"coverage":{},"queried_symbols":["SH600000"],"actions":[],"failures":{},"raw_sha256":{},"structured_coverage":{"SH600000":{"dates":{"start":"2012-01-01","end":"2026-12-31"},"source":"fixture","evidence":["raw"]}}})).unwrap()
+        serde_json::from_value(serde_json::json!({"schema_version":5,"downloader":"JFQuant analytics-storage corporate-actions","downloaded_at":"2026-01-01T00:00:00Z","source_bindings":{},"coverage":{},"queried_symbols":["SH600000"],"actions":[],"failures":{},"raw_sha256":{},"structured_coverage":{"SH600000":{"dates":{"start":"2012-01-01","end":"2026-12-31"},"source":"hithink.events/per-share-v1","evidence":["raw"]}}})).unwrap()
     }
     #[test]
     fn unresolved_events_require_actual_opening_exposure() {
@@ -511,7 +508,7 @@ mod tests {
     fn dividend_needs_no_settlement_dates_but_unsupported_terms_block() {
         let s = BTreeMap::from([("SH600000".into(), range("2012-01-01", "2026-12-31"))]);
         let mut b = book();
-        b.actions.push(serde_json::from_value(serde_json::json!({"id":"dividend","instrument":"SH600000","announced":"2013-05-01","record_date":"2013-06-01","ex_date":"2013-06-02","pay_date":null,"listing_date":null,"cash_per_share":0.2,"shares_per_share":0.1,"source":"fixture"})).unwrap());
+        b.actions.push(serde_json::from_value(serde_json::json!({"id":"SH600000:2013-06-02","instrument":"SH600000","announced":"2013-05-01","record_date":"2013-06-01","ex_date":"2013-06-02","pay_date":null,"listing_date":null,"cash_per_share":0.2,"shares_per_share":0.1,"source":"hithink.events/per-share-v1"})).unwrap());
         assert!(
             event_checks(Some(&b), &s, EventCheckPolicy::Provider)
                 .iter()

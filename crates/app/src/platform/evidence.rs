@@ -10,6 +10,7 @@ pub struct EvidenceTools {
     announced: String,
     implementation: bool,
     recover_task: String,
+    status_task: String,
 }
 pub(super) fn controls(
     ui: &mut egui::Ui,
@@ -20,9 +21,20 @@ pub(super) fn controls(
     ui.collapsing("证据维护：公告留存、批次恢复与修订草稿",|ui| {
         ui.label("选定公告只补充该文档，不代表整段历史完整。原始版本与失败任务记录保留。");
         ui.horizontal(|ui| {
-            if ui.button("查看所选版本证据缺口").clicked(){submit(state,worker,cancel_slot,WorkflowRequest::Evidence{request:EvidenceRequest::Status{actions:state.platform.actions.clone(),instrument:None}});}
-            if ui.button("查看本证券缺口").clicked(){submit(state,worker,cancel_slot,WorkflowRequest::Evidence{request:EvidenceRequest::Status{actions:state.platform.actions.clone(),instrument:Some(state.platform.action_review_instrument.clone())}});}
+            if ui.button("查看所选版本证据缺口").clicked(){submit(state,worker,cancel_slot,WorkflowRequest::Evidence{request:EvidenceRequest::Status{actions:state.platform.actions.clone(),instrument:None,task:None}});}
+            if ui.button("查看本证券缺口").clicked(){submit(state,worker,cancel_slot,WorkflowRequest::Evidence{request:EvidenceRequest::Status{actions:state.platform.actions.clone(),instrument:Some(state.platform.action_review_instrument.clone()),task:None}});}
         });
+        ui.horizontal(|ui| {
+            ui.label("当前依赖检查的已结束任务ID");
+            ui.text_edit_singleline(&mut state.platform.evidence_tools.status_task);
+            if ui.button("检查本任务当前阻断").clicked() {
+                match state.platform.evidence_tools.status_task.trim().parse() {
+                    Ok(task) => submit(state,worker,cancel_slot,WorkflowRequest::Evidence{request:EvidenceRequest::Status{actions:state.platform.actions.clone(),instrument:None,task:Some(task)}}),
+                    Err(_) => state.platform.error=Some("任务ID无效；请选择已结束的训练或回测检查任务".into()),
+                }
+            }
+        });
+        ui.label("不指定任务的结果是证据清单；当前依赖通过不代表完整训练或回测通过。");
         ui.label("证券使用下方证券输入；URL 必须为原始 PDF。标题摘录与证券代码须出现在正文中。");
         let tools=&mut state.platform.evidence_tools;
         egui::Grid::new("evidence_document_form").show(ui,|ui| {
@@ -50,6 +62,36 @@ pub(super) fn controls(
         let report=&state.platform.details;
         // Running a different task replaces details; never auto-select an old report or publish it.
         let details=report.get("details").unwrap_or(report);
+        if let Some(current)=details.get("current").filter(|v|v.is_object()) {
+            let stale=report_stale(details,&state.platform.actions,&state.platform.evidence_tools.status_task,&state.platform.market);
+            if stale { ui.colored_label(egui::Color32::YELLOW,"报告已过期：行动版本或任务选择已变化，请重新检查。"); }
+            else { ui.label(format!("当前公司行动依赖：{}；缺口 {} 条；阻断检查 {} 项；影响证券 {} 只",if current["ready"]==true {"可用"} else {"未解决"},current["gap_count"],current["blocking_check_count"],current["affected_security_count"])); }
+            if let Some(entries)=current["entries"].as_array() {
+                ui.collapsing("当前覆盖与事件问题",|ui| {
+                    for entry in entries {
+                        let c=&entry["coverage"];
+                        let label=match c["status"].as_str(){Some("available")=>"覆盖可用",Some("partial")=>"部分覆盖",_=>"覆盖阻断"};
+                        ui.collapsing(format!("{} · {} · {}",c["instrument"].as_str().unwrap_or(""),entry["purpose"].as_str().unwrap_or(""),label),|ui| {
+                            ui.label(format!("任务区间：{}",entry["ranges"]));
+                            ui.label(format!("剩余日期与类别：{}",c["gaps"]));
+                            ui.label(format!("解决证据：{}",c["evidence"]));
+                            if let Some(issues)=entry.get("event_issues") {ui.label(format!("事件问题：{issues}"));}
+                        });
+                    }
+                });
+                ui.collapsing("历史采集失败（不直接计入当前阻断）",|ui| {
+                    for entry in entries.iter().filter(|e|!e["coverage"]["historical_failure"].is_null()) {ui.label(format!("{}：{}",entry["coverage"]["instrument"],entry["coverage"]["historical_failure"]));}
+                });
+            }
+            ui.collapsing("当前事件检查与补齐变化",|ui| { ui.label(format!("{}",current["checks"]));ui.label(format!("{}",current["comparison"])); });
+        }
+        ui.collapsing("完整历史覆盖审核",|ui| {
+            ui.label("使用下方修订JSON中的 coverage_reviews 编辑证券、日期、类别、全部候选文档ID与审核理由。完整独立证据可解除当前覆盖缺口，原供应商失败保留。单份选定公告不支持完整历史审核。");
+            if let Ok(request)=serde_json::from_str::<analytics_storage::corporate_actions::review::RevisionRequest>(&state.platform.action_review_editor) {
+                for c in &request.coverage_reviews {ui.label(format!("{}：{}～{}，{} 个类别，{} 份候选；{}",c.instrument,c.dates.start,c.dates.end,c.categories.len(),c.document_ids.len(),c.reason));}
+            }
+            ui.label("编辑后使用“核验并迁移编辑中的修订”；校验通过后再提交新版本。覆盖补齐不会自动解决已知事件问题。");
+        });
         if let Some(manifest)=details["manifest"].as_str() && ui.button("使用本次报告的公告manifest").clicked(){state.platform.action_evidence_manifest=manifest.into();}
         if let Some(draft)=details.get("draft_request") {
             ui.label(format!("草稿校验：{}",details["validation"]));
@@ -57,4 +99,25 @@ pub(super) fn controls(
         }
         ui.label("草稿不会发布新版本。核对逐字段引用后，使用下方“提交证据修订为新版本”；CLI 可直接使用报告中的 request_path。");
     });
+}
+
+fn report_stale(report: &serde_json::Value, actions: &str, task: &str, market: &str) -> bool {
+    report["actions"].as_str() != Some(actions)
+        || report["current"]["task"].as_str() != Some(task.trim())
+        || (!market.is_empty()
+            && report["current"]["market_versions"]
+                .as_array()
+                .is_some_and(|vs| !vs.is_empty() && !vs.iter().any(|v| v.as_str() == Some(market))))
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn changing_selected_context_marks_report_stale() {
+        let report = serde_json::json!({"actions":"v1","current":{"task":"task1","market_versions":["m1"],"ready":true}});
+        assert!(!report_stale(&report, "v1", "task1", "m1"));
+        assert!(report_stale(&report, "v2", "task1", "m1"));
+        assert!(report_stale(&report, "v1", "task2", "m1"));
+        assert!(report_stale(&report, "v1", "task1", "m2"));
+    }
 }

@@ -128,3 +128,5 @@ DUCKDB_DOWNLOAD_LIB=1 cargo nextest run -p analytics-desktop
 此项不调用任何 Python、编译器或源码模块，也可对只读挂载 DMG 中的 App 执行。
 
 研究页新增证据维护面板，对应 CLI 的 `data evidence`：公告 URL 表单、失败批次恢复、原检查点重试、缺口查询、草稿核验与载入。只提交共享后台任务，不在 UI 改写来源或证据。操作流程见 [CLI 与 GUI 共用证据维护](../cli/src/README.md#公司行动证据维护agent-与-gui-共用)。
+
+当前证据驱动的任务准入、历史失败追溯与验证命令见本组件 src 下的 README；公司行动状态按任务实际范围计算，采集失败记录不再等同于当前任务阻断。

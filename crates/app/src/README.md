@@ -182,3 +182,5 @@ EvaluateFactors后台任务，`state.rs`只接收当前活动任务的FactorsEva
 研究页分别编辑TrainingPlan与BacktestPlan，JSON可导入导出；B行情、池和模型选择独立，默认滚动。模型查询结果保留在平台状态，训练完成自动填ID；全部任务经共享服务，UI不持有原生句柄。报告显示分组贡献与冻结切换计划；研究页整体支持滚动。运行 `DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-desktop independent_training_and_backtest_editors` 验证真实egui操作。
 
 研究页“证据维护：公告留存、批次恢复与修订草稿”由 `platform/evidence.rs` 维护：选定 PDF 的公开 URL、证券、文档ID、披露日、标题和实施分类表单；原批次恢复与检查点重试；全局/单证券缺口；可编辑骨架及已有修订的核验迁移。全部发送 `WorkflowRequest::Evidence`，不在 GUI 采集、改哈希或解除准入。报告可将 manifest 或 draft_request 显式载入现有编辑器，再经原修订入口发布。交互验收覆盖共享状态与草稿请求。
+
+公司行动当前阻断、历史失败和覆盖审核入口见 [platform](platform/README.md)；客户端仅展示共享任务报告，不自行判断历史覆盖。

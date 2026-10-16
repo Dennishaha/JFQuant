@@ -29,15 +29,24 @@ class EvidenceCapture:
         path = self.root / filename
         if not path.exists():
             path.write_bytes(body)
-        self.receipts.append(
-            {
+        receipt = {
                 "url": url,
                 "status": response.status_code,
                 "filename": filename,
                 "sha256": "sha256:" + digest,
                 "kind": "http_response_body_decoded",
             }
-        )
+        # Only this public announcement form is recorded; never capture provider headers/keys.
+        request = getattr(response, "request", None)
+        if url == "https://www.cninfo.com.cn/new/hisAnnouncement/query" and getattr(request, "method", None) == "POST":
+            encoded = request.body or ""
+            if isinstance(encoded, bytes):
+                encoded = encoded.decode("utf-8", errors="strict")
+            fields = parse_qsl(encoded, keep_blank_values=True)
+            allowed = {"pageNum", "pageSize", "column", "tabName", "stock", "searchkey", "seDate", "sortName", "sortType", "isHLtitle"}
+            if len(dict(fields)) == len(fields) and set(dict(fields)) <= allowed:
+                receipt["query_request"] = dict(fields)
+        self.receipts.append(receipt)
 
     @contextlib.contextmanager
     def enabled(self):

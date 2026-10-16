@@ -367,6 +367,302 @@ pub(super) fn verified_document_records(
     }
     Ok(out)
 }
+/// Validate the exact scope and candidate set both at publication and on replay.
+pub(super) fn verify_coverage_review(review: &CoverageReview, shard: &Value) -> io::Result<()> {
+    review.dates.validate().map_err(invalid)?;
+    if review.reason.trim().is_empty()
+        || review.categories.is_empty()
+        || review
+            .categories
+            .iter()
+            .any(|c| !EVENT_CATEGORIES.contains(&c.as_str()))
+        || shard["instrument"] != review.instrument
+        || shard["evidence"]["pagination_complete"] != true
+        || !shard["evidence"]["all_announcements"].is_array()
+    {
+        return Err(invalid(
+            "coverage review requires complete identity-matched disclosure metadata",
+        ));
+    }
+    let start: Date =
+        serde_json::from_value(shard["evidence"]["requested_announcement_dates"]["start"].clone())
+            .map_err(invalid)?;
+    let end: Date =
+        serde_json::from_value(shard["evidence"]["requested_announcement_dates"]["end"].clone())
+            .map_err(invalid)?;
+    if start > review.dates.start || end < review.dates.end {
+        return Err(invalid("coverage review exceeds captured disclosure dates"));
+    }
+    let docs = shard["evidence"]["documents"]
+        .as_array()
+        .ok_or_else(|| invalid("coverage documents missing"))?;
+    let captured: BTreeSet<_> = docs.iter().filter_map(|d| d["id"].as_str()).collect();
+    let requested: BTreeSet<_> = review.document_ids.iter().map(String::as_str).collect();
+    if requested != captured
+        || captured.len() != docs.len()
+        || requested.len() != review.document_ids.len()
+        || docs.iter().any(|d| d["instrument"] != review.instrument)
+    {
+        return Err(invalid(
+            "coverage review must include every identity-matched captured action candidate",
+        ));
+    }
+    Ok(())
+}
+
+/// Replay complete CNINFO disclosure metadata from original successful response bodies.
+/// Partial/selected PDF receipts cannot establish an exhaustive search.
+pub(super) fn verify_coverage_capture(
+    root: &Path,
+    review: &CoverageReview,
+    shard: &Value,
+) -> io::Result<()> {
+    verify_coverage_review(review, shard)?;
+    crate::collector::verify_http_receipts(root, &shard["evidence"])?;
+    let metadata = shard["evidence"]["all_announcements"].as_array().unwrap();
+    let code = review
+        .instrument
+        .get(2..)
+        .ok_or_else(|| invalid("invalid coverage security"))?;
+    let mut found = BTreeMap::<String, Value>::new();
+    let mut empty_query = false;
+    let mut bound_queries = 0;
+    for receipt in shard["evidence"]["http_receipts"]
+        .as_array()
+        .ok_or_else(|| invalid("coverage HTTP query receipts missing"))?
+    {
+        if receipt["url"] != "https://www.cninfo.com.cn/new/hisAnnouncement/query"
+            || receipt["status"] != 200
+        {
+            continue;
+        }
+        let binding = &receipt["query_request"];
+        let expected_dates = format!(
+            "{}~{}",
+            shard["evidence"]["requested_announcement_dates"]["start"]
+                .as_str()
+                .unwrap_or(""),
+            shard["evidence"]["requested_announcement_dates"]["end"]
+                .as_str()
+                .unwrap_or("")
+        );
+        let venue = match review.instrument.get(..2) {
+            Some("SH") => "sse",
+            Some("SZ") => "szse",
+            Some("BJ") => "bse",
+            _ => return Err(invalid("coverage exchange missing")),
+        };
+        let stock = binding["stock"].as_str().unwrap_or("");
+        let bound = stock
+            .split_once(',')
+            .is_some_and(|(c, org)| c == code && !org.is_empty())
+            && binding["column"] == venue
+            && binding["searchkey"] == ""
+            && binding["tabName"] == "fulltext"
+            && binding["seDate"] == expected_dates;
+        if !bound {
+            continue;
+        }
+        if bound {
+            bound_queries += 1;
+        }
+        let name = receipt["filename"]
+            .as_str()
+            .ok_or_else(|| invalid("query receipt filename missing"))?;
+        let body: Value =
+            serde_json::from_slice(&fs::read(root.join("raw").join(name))?).map_err(invalid)?;
+        let total = body["totalAnnouncement"]
+            .as_u64()
+            .ok_or_else(|| invalid("query total missing"))?;
+        let rows = body["announcements"].as_array();
+        if total == 0 && (rows.is_some_and(Vec::is_empty) || body["announcements"].is_null()) {
+            empty_query = true;
+        }
+        for row in rows.into_iter().flatten().filter(|r| r["secCode"] == code) {
+            if stock
+                .split_once(',')
+                .is_none_or(|(_, org)| row["orgId"] != org)
+            {
+                return Err(invalid("coverage query institution mismatch"));
+            }
+            if total != metadata.len() as u64 {
+                return Err(invalid("coverage query total changed or incomplete"));
+            }
+            let id = row["announcementId"]
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| row["announcementId"].to_string());
+            let raw_title = row["announcementTitle"]
+                .as_str()
+                .ok_or_else(|| invalid("query title missing"))?;
+            let mut tag = false;
+            let title: String = raw_title
+                .chars()
+                .filter(|c| {
+                    if *c == '<' {
+                        tag = true;
+                        false
+                    } else if *c == '>' {
+                        tag = false;
+                        false
+                    } else {
+                        !tag
+                    }
+                })
+                .collect();
+            let item = serde_json::json!({"id":id,"title":title,"institution_id":row["orgId"],"announcement_time":row["announcementTime"],"attachment":row["adjunctUrl"]});
+            if found.get(&id).is_some_and(|old| old != &item) {
+                return Err(invalid("conflicting query metadata"));
+            }
+            found.insert(id, item);
+        }
+    }
+    if bound_queries == 0 {
+        return Err(invalid(
+            "coverage query identity/range binding missing; recollect with current collector",
+        ));
+    }
+    if (metadata.is_empty() && !empty_query)
+        || found.len() != metadata.len()
+        || metadata
+            .iter()
+            .any(|m| m["id"].as_str().and_then(|id| found.get(id)) != Some(m))
+    {
+        return Err(invalid(
+            "coverage metadata does not replay from complete query responses",
+        ));
+    }
+    let terms = [
+        "权益分派",
+        "利润分配",
+        "转增",
+        "送股",
+        "派息",
+        "股利",
+        "分红",
+        "配股",
+        "缩股",
+        "重整",
+        "股权分置",
+        "换股",
+        "合并",
+        "终止上市",
+        "摘牌",
+        "清偿",
+        "清算",
+        "交割",
+        "现金选择权",
+    ];
+    let documents: BTreeSet<_> = review.document_ids.iter().map(String::as_str).collect();
+    if metadata.iter().any(|m| {
+        m["title"].as_str().is_some_and(|t| {
+            terms.iter().any(|term| t.contains(term))
+                || (t.contains("证券代码") && t.contains("变更"))
+        }) && m["id"].as_str().is_none_or(|id| !documents.contains(id))
+    }) {
+        return Err(invalid(
+            "coverage action candidate was not captured/reviewed",
+        ));
+    }
+    Ok(())
+}
+
+/// Replay one coverage claim; callers cache expensive capture replay per receipt/range.
+pub(super) fn verify_coverage_receipt(
+    bundle: &ActionBundle,
+    root: &Path,
+    id: &str,
+    c: &EventCoverage,
+    name: &str,
+    verify_capture: bool,
+) -> io::Result<()> {
+    if !name.starts_with("review-") {
+        return Err(invalid(
+            "event completeness needs an auditable review receipt",
+        ));
+    }
+    let bytes = fs::read(root.join("raw").join(name))?;
+    if bundle.raw_sha256.get(name)
+        != Some(&format!(
+            "sha256:{:x}",
+            analytics_core::hash::Hex(Sha256::digest(&bytes))
+        ))
+    {
+        return Err(invalid("category review receipt hash mismatch"));
+    }
+    let review: Value = serde_json::from_slice(&bytes).map_err(invalid)?;
+    if review["coverage_validation_version"] != 2 {
+        return Err(invalid(
+            "unsupported coverage validation version; recollect and republish review",
+        ));
+    }
+    let consistent = review["request"]["coverage_reviews"]
+        .as_array()
+        .is_some_and(|rs| {
+            rs.iter().any(|r| {
+                r["instrument"] == id
+                    && r["dates"] == serde_json::json!(c.dates)
+                    && r["reason"] == c.reason
+                    && r["categories"]
+                        .as_array()
+                        .is_some_and(|cs| cs.iter().any(|v| v == &c.category))
+                    && r["expected_source_sha256"] == review["source_sha256"]
+            })
+        });
+    if !consistent {
+        return Err(invalid("category review claim/receipt mismatch"));
+    }
+    if !verify_capture {
+        return Ok(());
+    }
+    let receipt = &review["collection_receipts"][id];
+    if receipt["evidence"]["pagination_complete"] != true
+        || !receipt["evidence"]["all_announcements"].is_array()
+    {
+        return Err(invalid(
+            "category review lacks complete disclosure metadata",
+        ));
+    }
+    let coverage_review: review::CoverageReview = serde_json::from_value(
+        review["request"]["coverage_reviews"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| {
+                r["instrument"] == id
+                    && r["dates"] == serde_json::json!(c.dates)
+                    && r["reason"] == c.reason
+                    && r["categories"]
+                        .as_array()
+                        .is_some_and(|cs| cs.iter().any(|v| v == &c.category))
+            })
+            .unwrap()
+            .clone(),
+    )
+    .map_err(invalid)?;
+    review::verify_coverage_capture(root, &coverage_review, receipt)?;
+    for doc in receipt["evidence"]["documents"].as_array().unwrap() {
+        for (field, hash_field) in [("pdf", "pdf_sha256"), ("text", "text_sha256")] {
+            let name = doc[field]
+                .as_str()
+                .ok_or_else(|| invalid("coverage document file missing"))?;
+            if Path::new(name).file_name().and_then(|n| n.to_str()) != Some(name) {
+                return Err(invalid("unsafe coverage document path"));
+            }
+            let bytes = fs::read(root.join("raw").join(name))?;
+            let hash = format!(
+                "sha256:{:x}",
+                analytics_core::hash::Hex(Sha256::digest(&bytes))
+            );
+            if doc[hash_field] != hash || bundle.raw_sha256.get(name) != Some(&hash) {
+                return Err(invalid("coverage document evidence changed"));
+            }
+        }
+    }
+    crate::collector::verify_http_receipts(root, &receipt["evidence"])?;
+    Ok(())
+}
+
 /// Produce a new current-format action bundle; source files are never rewritten.
 pub fn apply(
     source: &ActionBundle,
@@ -481,8 +777,6 @@ pub fn apply(
         if review.reason.trim().is_empty()
             || review.categories.is_empty()
             || review.expected_source_sha256 != digest(source)?
-            || !source.queried_symbols.contains(&review.instrument)
-            || source.failures.contains_key(&review.instrument)
         {
             return Err(invalid(
                 "coverage review requires verified source identity and stale hash",
@@ -497,37 +791,10 @@ pub fn apply(
                 .join(format!("{}-actions-structured.json", review.instrument)),
         )?)
         .map_err(invalid)?;
-        if receipt.is_null()
-            || shard["evidence"]["pagination_complete"] != true
-            || !shard["evidence"]["all_announcements"].is_array()
-        {
-            return Err(invalid(
-                "coverage review requires complete unfiltered announcement metadata",
-            ));
+        if receipt.is_null() {
+            return Err(invalid("coverage review source receipt missing"));
         }
-        let queried_start: Date = serde_json::from_value(
-            shard["evidence"]["requested_announcement_dates"]["start"].clone(),
-        )
-        .map_err(invalid)?;
-        let queried_end: Date = serde_json::from_value(
-            shard["evidence"]["requested_announcement_dates"]["end"].clone(),
-        )
-        .map_err(invalid)?;
-        if queried_start > review.dates.start || queried_end < review.dates.end {
-            return Err(invalid("coverage review exceeds captured disclosure dates"));
-        }
-        let captured: BTreeSet<_> = shard["evidence"]["documents"]
-            .as_array()
-            .ok_or_else(|| invalid("coverage documents missing"))?
-            .iter()
-            .filter_map(|d| d["id"].as_str())
-            .collect();
-        let requested: BTreeSet<_> = review.document_ids.iter().map(String::as_str).collect();
-        if requested != captured {
-            return Err(invalid(
-                "coverage review must include every captured action candidate",
-            ));
-        }
+        verify_coverage_capture(root, review, &shard)?;
         for id in &review.document_ids {
             if !documents.contains_key(id) {
                 return Err(invalid("coverage document missing or altered"));
@@ -828,7 +1095,7 @@ pub fn apply(
             bundle.raw_sha256.insert(name.into(), hash);
         }
     }
-    let receipt = serde_json::json!({"schema_version":1,"source_sha256":digest(source)?,"request":request,"source_events":source.actions,"captured_documents":selected_documents,"collection_receipts":collection_receipts,"collector_completion":manifest["complete"],"evidence_manifest_sha256":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(&manifest_bytes))),"applied_at":chrono::Utc::now().to_rfc3339()});
+    let receipt = serde_json::json!({"schema_version":1,"coverage_validation_version":2,"source_sha256":digest(source)?,"request":request,"source_events":source.actions,"captured_documents":selected_documents,"collection_receipts":collection_receipts,"collector_completion":manifest["complete"],"evidence_manifest_sha256":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(&manifest_bytes))),"applied_at":chrono::Utc::now().to_rfc3339()});
     let name = format!("review-{}.json", &digest(&receipt)?[7..23]);
     let bytes = serde_json::to_vec_pretty(&receipt).map_err(invalid)?;
     bundle.raw_sha256.insert(
@@ -1067,13 +1334,19 @@ mod coverage_tests {
             failures: Default::default(),
             raw_sha256: Default::default(),
         };
+        // A failed primary query must remain auditable while a complete independent audit passes.
+        let mut source = source;
+        source.queried_symbols.clear();
+        source
+            .failures
+            .insert("SH600000".into(), "primary query failed".into());
         let body = b"{\"totalAnnouncement\":0,\"announcements\":[]}";
         let hash = format!(
             "sha256:{:x}",
             analytics_core::hash::Hex(Sha256::digest(body))
         );
         fs::write(evidence.join("raw/http-query.body"), body).unwrap();
-        let mut shard = serde_json::json!({"instrument":"SH600000","evidence":{"documents":[],"all_announcements":[],"pagination_complete":true,"requested_announcement_dates":{"start":"2024-01-01","end":"2024-12-31"},"http_receipts":[{"url":"https://www.cninfo.com.cn/new/hisAnnouncement/query","status":200,"filename":"http-query.body","sha256":hash}]}});
+        let mut shard = serde_json::json!({"instrument":"SH600000","evidence":{"documents":[],"all_announcements":[],"pagination_complete":true,"requested_announcement_dates":{"start":"2024-01-01","end":"2024-12-31"},"http_receipts":[{"url":"https://www.cninfo.com.cn/new/hisAnnouncement/query","status":200,"filename":"http-query.body","sha256":hash,"query_request":{"stock":"600000,gssh0600000","column":"sse","searchkey":"","tabName":"fulltext","seDate":"2024-01-01~2024-12-31","pageNum":"1","pageSize":"30"}}]}});
         let write = |shard: &Value| {
             let bytes = serde_json::to_vec(shard).unwrap();
             fs::write(
@@ -1115,13 +1388,119 @@ mod coverage_tests {
                 )
                 .is_empty()
         );
-        ActionBundle::read(&output.join("actions.json")).unwrap();
+        let loaded = ActionBundle::read(&output.join("actions.json")).unwrap();
+        // Obsolete reviews must fail even when expensive capture replay is cached.
+        let name = loaded
+            .raw_sha256
+            .keys()
+            .find(|n| n.starts_with("review-"))
+            .unwrap();
+        let mut obsolete: Value =
+            serde_json::from_slice(&fs::read(output.join("raw").join(name)).unwrap()).unwrap();
+        obsolete
+            .as_object_mut()
+            .unwrap()
+            .remove("coverage_validation_version");
+        let bytes = serde_json::to_vec(&obsolete).unwrap();
+        let obsolete_name = "review-obsolete.json";
+        fs::write(output.join("raw").join(obsolete_name), &bytes).unwrap();
+        let mut obsolete_book = loaded.clone();
+        obsolete_book.raw_sha256.insert(
+            obsolete_name.into(),
+            format!(
+                "sha256:{:x}",
+                analytics_core::hash::Hex(Sha256::digest(&bytes))
+            ),
+        );
+        for verify_capture in [false, true] {
+            let error = verify_coverage_receipt(
+                &obsolete_book,
+                &output,
+                "SH600000",
+                &loaded.coverage["SH600000"][0],
+                obsolete_name,
+                verify_capture,
+            )
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("unsupported coverage validation version")
+            );
+        }
+        assert_eq!(loaded.failures, source.failures);
+        assert!(loaded.queried_symbols.is_empty());
+        loaded
+            .require_adjustment_coverage(
+                &BTreeSet::from(["SH600000".into()]),
+                "2024-01-01".parse().unwrap(),
+                "2024-12-31".parse().unwrap(),
+            )
+            .unwrap();
+        super::super::execution_index::ExecutionIndex::build(
+            &loaded,
+            analytics_core::execution::EventCheckPolicy::Audited,
+        )
+        .unwrap()
+        .check("SH600000", "2024-06-01".parse().unwrap())
+        .unwrap();
+        assert!(
+            loaded
+                .require_adjustment_coverage(
+                    &BTreeSet::from(["SH600000".into()]),
+                    "2023-12-31".parse().unwrap(),
+                    "2024-12-31".parse().unwrap()
+                )
+                .is_err()
+        );
+        let mut conflicted = loaded.clone();
+        conflicted
+            .execution_issues
+            .push(crate::execution_data::ExecutionIssue {
+                id: "open-conflict".into(),
+                instrument: "SH600000".into(),
+                announced: None,
+                dates: analytics_core::DateRange {
+                    start: "2024-06-01".parse().unwrap(),
+                    end: "2024-06-01".parse().unwrap(),
+                },
+                code: "source_event_conflict".into(),
+                event_category: "distribution".into(),
+                evidence: vec!["fixture independent conflict".into()],
+                message: "coverage does not close an event conflict".into(),
+            });
+        assert!(
+            super::super::execution_index::ExecutionIndex::build(
+                &conflicted,
+                analytics_core::execution::EventCheckPolicy::Audited
+            )
+            .unwrap()
+            .check("SH600000", "2024-06-01".parse().unwrap())
+            .is_err()
+        );
         request.coverage_reviews[0].expected_source_sha256 = "stale".into();
         assert!(apply(&source, &original, &request, &d.path().join("stale")).is_err());
         request.coverage_reviews[0].expected_source_sha256 = digest(&source).unwrap();
         shard["evidence"]["pagination_complete"] = serde_json::json!(false);
         write(&shard);
         assert!(apply(&source, &original, &request, &d.path().join("truncated")).is_err());
+        shard["evidence"]["pagination_complete"] = serde_json::json!(true);
+        let incomplete = br#"{"totalAnnouncement":1,"announcements":[]}"#;
+        fs::write(evidence.join("raw/http-query.body"), incomplete).unwrap();
+        shard["evidence"]["http_receipts"][0]["sha256"] = serde_json::json!(format!(
+            "sha256:{:x}",
+            analytics_core::hash::Hex(Sha256::digest(incomplete))
+        ));
+        write(&shard);
+        assert!(
+            apply(
+                &source,
+                &original,
+                &request,
+                &d.path().join("false-complete")
+            )
+            .is_err()
+        );
         fs::write(output.join("raw/http-query.body"), "altered evidence").unwrap();
         assert!(ActionBundle::read(&output.join("actions.json")).is_err());
     }

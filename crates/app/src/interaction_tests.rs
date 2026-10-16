@@ -1945,6 +1945,7 @@ fn evidence_maintenance_submits_shared_status_and_scaffold_requests() {
                         analytics_workflow::action_evidence::EvidenceRequest::Status {
                             actions,
                             instrument,
+                            task: _,
                         },
                 } => {
                     assert!(!scaffold);

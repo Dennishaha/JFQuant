@@ -76,6 +76,13 @@ run_cli research run --template "$recipe" --market "$market" --actions "$actions
 research_id="$(plutil -extract task_id raw -o - "$check_root/research-submission.json")"
 run_cli jobs wait "$research_id" --timeout 60 > "$check_root/research.json"
 run_cli jobs results "$research_id" > "$check_root/online-results.json"
+run_cli data evidence status --actions "$actions" --task "$research_id" > "$check_root/current-evidence-submit.json"
+current_evidence_id="$(plutil -extract task_id raw -o - "$check_root/current-evidence-submit.json")"
+run_cli jobs wait "$current_evidence_id" --timeout 30 > "$check_root/current-evidence.json"
+[ "$(plutil -extract results.details.report_kind raw -o - "$check_root/current-evidence.json")" = task_dependencies ]
+[ "$(plutil -extract results.details.current.ready raw -o - "$check_root/current-evidence.json")" = true ]
+[ "$(plutil -extract results.details.current.affected_security_count raw -o - "$check_root/current-evidence.json")" = 0 ]
+
 [ "$(plutil -extract schema_version raw -o - "$check_root/online-results.json")" = "$result_schema" ]
 [ "$(plutil -extract execution.mode raw -o - "$check_root/online-results.json")" = akquant_ex_date ]
 "$app/Contents/Resources/python/bin/python3" -I -B - "$check_root/online-results.json" <<'PY'

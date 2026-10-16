@@ -302,7 +302,7 @@ pub(crate) fn reviewed_collection_owner(owner: &Value) -> bool {
             )
         && owner["normalization"] == NORMALIZATION
 }
-/// Verify an immutable current producer receipt without authorizing old implementations.
+/// Verify the exact current producer; stored evidence uses the same identity check as live data.
 pub(crate) fn verify_coefficient_producer(message: &Value, _provider: Provider) -> io::Result<u32> {
     verify_collector_identity(message)?;
     Ok(13)
@@ -1212,6 +1212,9 @@ mod historical_producer_tests {
         assert!(verify_coefficient_producer(&receipt, Provider::Hithink).is_err());
         assert!(verify_collector_identity(&receipt).is_err());
         assert!(verify_coefficient_producer(&receipt, Provider::Tdxaidata).is_err());
+        let known = json!({"collector_signature":"sha256:f5b05566abb8557c3651fc1d68d98289f7443ef406bb72d0cd07aa3ef3adcd7d","versions":{"python":"3.12.15","tdxaidata":"1.2.2"}});
+        assert!(verify_coefficient_producer(&known, Provider::Tdxaidata).is_err());
+        assert!(verify_collector_identity(&known).is_err());
         receipt["collector_signature"] = json!("unknown");
         assert!(verify_coefficient_producer(&receipt, Provider::Hithink).is_err());
     }

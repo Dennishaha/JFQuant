@@ -189,6 +189,9 @@ pub enum EvidenceCommand {
         actions: String,
         #[arg(long)]
         instrument: Option<String>,
+        /// Inspect this terminal task’s frozen action dependencies instead of inventory only.
+        #[arg(long)]
+        task: Option<Uuid>,
     },
     /// Generate a scaffold, or rebase and validate reviewed proposals without publishing.
     Draft {
@@ -994,7 +997,7 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
                     EvidenceCommand::Capture { request } => EvidenceRequest::Capture{request:read(&client.root,&request)?},
                     EvidenceCommand::Recover { task } => EvidenceRequest::Recover{task},
                     EvidenceCommand::Retry { task } => EvidenceRequest::Retry{task},
-                    EvidenceCommand::Status {actions,instrument} => EvidenceRequest::Status{actions,instrument},
+                    EvidenceCommand::Status {actions,instrument,task} => EvidenceRequest::Status{actions,instrument,task},
                     EvidenceCommand::Draft {actions,request,instrument,evidence_manifest} => EvidenceRequest::Draft{actions,request:request.map(|p|read(&client.root,&p).map(Box::new)).transpose()?,instrument,evidence_manifest},
                 };
                 workflow(WorkflowRequest::Evidence{request})

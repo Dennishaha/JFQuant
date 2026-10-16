@@ -208,3 +208,5 @@ research preview/check、fit-inputs 和 backtest-inputs 会执行实际因子和
 补采选项仍属于准备数据阶段。三档策略、标签边界和基准截尾与正式执行共用。
 
 `data evidence capture|recover|retry|status|draft` 为 Agent 提供可复用补证命令，和 App 共用后台任务。支持按 URL 留存、核验恢复失败批次、按原请求重试、逐证券缺口及已审阅修订迁移预览；正式发布仍经 `data revise-actions`。完整命令、请求格式和限制见 [CLI 组件说明](src/README.md#公司行动证据维护agent-与-gui-共用)。
+
+当前证据驱动的任务准入、历史失败追溯与验证命令见本组件 src 下的 README；公司行动状态按任务实际范围计算，采集失败记录不再等同于当前任务阻断。

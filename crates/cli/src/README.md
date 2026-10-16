@@ -206,3 +206,14 @@ jfquant --workspace W data revise-actions --actions NEW_ACTION_VERSION --request
 `draft` 无 --request 时生成可编辑骨架、原事件哈希、问题哈希和公告原文；缺失字段需要人工填写并引用原文。带 --request 时可同时用 --evidence-manifest 指向经核验恢复的新 manifest；把已审阅的目标事件迁移至明确选择的新版本，更新原事件哈希，保留逐字段证据、理由和显式问题处置，跳过完全相同的事件。使用正式修订校验器生成预览，校验错误保存在 validation 中；不会自动新增引用、求和重复事件、清除失败或发布版本。已有问题哈希失效时须重新审阅，不静默更新。无变更不会标为可发布。
 
 证据输入在提交时冻结树哈希，执行前再核验。正式发布仍由 `revise-actions` 验证；草稿通过不等于训练/回测准入通过。GUI 的“证据维护”提供同样的留存表单、恢复、重试、缺口查询、草稿生成/校验和载入操作，业务判断不在客户端实现。
+
+### 按任务检查当前公司行动阻断
+
+```bash
+jfquant --workspace W data evidence status --actions ACTION_VERSION --task TERMINAL_TASK_UUID
+# 可追加 --instrument SH600000；随后 jobs wait / jobs results 与既有证据任务一致。
+```
+
+不带 `--task` 仅输出证据清单，不表示训练/回测可用。带任务时使用其冻结的市场、股票池、实际区间及策略，检查明确选择的行动版本。格式2报告中 `current.ready` 仅表示公司行动依赖，`gap_count` 是类别/日期缺口数，`affected_security_count` 是受当前阻断影响的证券数；`historical_failure_security_count` 是独立追溯计数。完整替代证明可使当前范围可用而保留历史失败。
+
+必须指定已结束的任务。缺少可恢复的精确依赖上下文时要求重新输入检查，不回退固定年份。报告中的通过标记不能替代正式任务重新准入。协议28的客户端与后台需配套更新。

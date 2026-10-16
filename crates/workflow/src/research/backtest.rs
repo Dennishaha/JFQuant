@@ -5,7 +5,7 @@ mod adjustment;
 mod akquant;
 mod artifacts;
 mod data;
-mod execution;
+pub(crate) mod execution;
 /// Fit-only models and independent cross-pool prediction/account tasks.
 pub mod independent;
 mod portfolio;

@@ -55,6 +55,22 @@ class HttpEvidence(unittest.TestCase):
             self.assertEqual(receipt["kind"], "http_response_body_decoded")
             self.assertEqual(len(receipt["sha256"]), 71)
 
+    def test_only_public_cninfo_form_is_bound_to_query_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            capture = EvidenceCapture(directory)
+            response = requests.Response()
+            response.status_code = 200
+            response.url = "https://www.cninfo.com.cn/new/hisAnnouncement/query"
+            response._content = b'{"totalAnnouncement":0,"announcements":[]}'
+            form = {"stock": "600000,gssh0600000", "column": "sse", "seDate": "2024-01-01~2024-12-31", "searchkey": "", "tabName": "fulltext", "pageNum": "1", "pageSize": "30"}
+            response.request = requests.Request("POST", response.url, data=form).prepare()
+            capture.response(response)
+            self.assertEqual(capture.receipts[-1]["query_request"], form)
+            response.request = requests.Request("POST", response.url, data={**form, "api_key": "private-key"}).prepare()
+            capture.response(response)
+            self.assertNotIn("query_request", capture.receipts[-1])
+            self.assertNotIn("private-key", str(capture.receipts))
+
     def test_rate_limits_retry_boundedly_and_timeout_is_not_empty_success(self):
         calls = []
 

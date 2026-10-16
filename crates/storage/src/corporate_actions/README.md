@@ -174,3 +174,13 @@ DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow
 修订 draft 只重新绑定明确目标版本的事件哈希，不创造引用、处置或失败清除。改除权日时保留原事件身份；双重事件身份冲突拒绝。正式可用性仍由 review::apply 校验。验收：`cargo test -p analytics-storage corporate_actions::evidence` 及既有公司行动测试。
 
 恢复不复制 `.tdx-runtime` 私有 SDK 配置目录；它不是证据或检查点。任务根目录须位于工作区，根链接及树内其他链接均拒绝。
+
+## 当前证据与历史失败
+
+`dependencies::DependencyIndex` 从 `ActionBundle::read` 已核验的版本构建一次，按证券、区间集合、所需类别和 `EventCheckPolicy` 返回 `CoverageResolution`：`available/partial/blocked`、精确剩余日期、证明文件以及独立的 `historical_failure`。账户逐日使用编译后的 `available_on` 查找，不重读公告或重新拼接区间。覆盖可用不代表已知事件的字段、交收或价格校验通过。
+
+`review::apply` 允许完整独立公告审核覆盖原供应商失败的证券，保留 `failures` 和原始回执，不新增虚假的供应商查询成功。发布及读取均回放成功查询响应、总数、完整公告元数据和候选集合，并验证证券、范围、文件及审核哈希。选定PDF、事件修订和缺乏完整性证明的空查询不能单独关闭历史覆盖缺口。代码变更不能作为跨代码的无日期别名。
+
+验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-storage corporate_actions`。包含失败保留但独立覆盖通过、类别/日期差集、无事件完整查询、部分覆盖与原文篡改。
+
+新发布的完整覆盖审核要求CNINFO原始查询回执绑定公开的证券/机构、交易所、完整查询和日期参数（coverage_validation_version=2）。固定采集器仅记录该公开接口的白名单表单，不记录供应商认证头或密钥。完整覆盖审核仅接受校验版本2；旧审核或旧采集批次缺少查询绑定时须重新采集并发布，选定PDF仍只能证明单笔事实。

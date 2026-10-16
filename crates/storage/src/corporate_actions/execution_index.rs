@@ -9,8 +9,7 @@ pub struct ExecutionIndex {
     on_record: BTreeMap<Date, Vec<CorporateAction>>,
     coverage: BTreeMap<String, Vec<EventCoverage>>,
     structured: BTreeMap<String, crate::execution_data::StructuredCoverage>,
-    queried: BTreeSet<String>,
-    failures: BTreeMap<String, String>,
+    dependencies: dependencies::DependencyIndex,
     issues: BTreeMap<String, Vec<crate::execution_data::ExecutionIssue>>,
     synthetic: bool,
     /// Frozen execution auxiliary data, independently validated.
@@ -87,8 +86,7 @@ impl ExecutionIndex {
             on_record,
             coverage: book.coverage.clone(),
             structured: book.structured_coverage.clone(),
-            queried: book.queried_symbols.clone(),
-            failures: book.failures.clone(),
+            dependencies: dependencies::DependencyIndex::build(book)?,
             issues,
             synthetic: book.downloader == "JFQuant analytics-workflow synthetic-demo-v1",
             data: book.execution_data.clone(),
@@ -96,34 +94,11 @@ impl ExecutionIndex {
     }
     /// Only dependencies effective and publicly known by this date affect today's account.
     pub fn check(&self, id: &str, date: Date) -> io::Result<()> {
-        if !self.queried.contains(id) || self.failures.contains_key(id) {
-            return Err(invalid(format!("action_history_unavailable: {id}")));
-        }
-        let audited = EVENT_CATEGORIES.iter().all(|category| {
-            self.coverage.get(id).is_some_and(|cs| {
-                cs.iter().any(|c| {
-                    c.category == *category
-                        && c.status == analytics_core::admission::CheckStatus::Passed
-                        && c.dates.contains(date)
-                        && !c.evidence.is_empty()
-                })
-            })
-        });
-        match self.policy {
-            EventCheckPolicy::Audited if !audited => {
-                return Err(invalid(format!("event_coverage_unverified: {id} {date}")));
-            }
-            EventCheckPolicy::Provider
-                if !audited
-                    && !self.structured.get(id).is_some_and(|c| {
-                        c.dates.contains(date) && !c.source.is_empty() && !c.evidence.is_empty()
-                    }) =>
-            {
-                return Err(invalid(format!(
-                    "structured_history_incomplete: {id} {date}"
-                )));
-            }
-            _ => {}
+        if !self
+            .dependencies
+            .available_on(id, date, EVENT_CATEGORIES, self.policy)
+        {
+            return Err(invalid(format!("action_history_unavailable: {id} {date}")));
         }
         if let Some(issues) = self.issues.get(id) {
             for i in issues {

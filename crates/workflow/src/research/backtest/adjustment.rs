@@ -29,6 +29,8 @@ impl RawFields {
 pub(super) fn adjustment_issues(
     dataset: &DailyDataset,
     book: &ActionBundle,
+    coverage: &analytics_storage::corporate_actions::dependencies::DependencyIndex,
+    policy: analytics_core::execution::EventCheckPolicy,
     symbols: &BTreeSet<String>,
     start: Date,
     end: Date,
@@ -48,8 +50,22 @@ pub(super) fn adjustment_issues(
             let end = range.end;
             let lo = dataset.calendar.partition_point(|d| *d < start).max(lo);
             let hi = dataset.calendar.partition_point(|d| *d <= end).min(hi);
-            if book.failures.contains_key(id) {
-                return Err("company-action source failure remains unresolved".into());
+            let current = coverage.resolve(
+                id,
+                &[DateRange { start, end }],
+                analytics_storage::corporate_actions::EVENT_CATEGORIES,
+                policy,
+            )?;
+            if !current.ready() {
+                return Err(format!(
+                    "company-action current coverage incomplete: {:?}",
+                    current.gaps
+                )
+                .into());
+            }
+            let known_issues = book.adjustment_event_issues(id, &[DateRange { start, end }]);
+            if !known_issues.is_empty() {
+                return Err(known_issues.join("; ").into());
             }
             for action in book
                 .actions

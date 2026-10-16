@@ -116,3 +116,5 @@ GP29确认停牌日且缺少原始日线/成交量为零时，在日频账户适
 行动采集现在独立请求GP41/GP43，Rust事实格式7与版本2修订契约见[公司行动组件](../src/corporate_actions/README.md)。单字段失败保留其他回执；旧采集协议和生产者检查点需重取。巨潮目录除gssh/gssz和99数字ID外，也接受目录中匹配证券的qsgn经纪机构ID；该前缀不推断交易所，证券代码/市场仍独立校验。
 
 运行时依赖：requests 2.34.2、pandas 3.0.6、pypdf 6.20.1；通达信 SDK 保持 1.2.2。新公告标记 `cninfo-candidates-v5` 并记录 `pypdf_version`；旧公告文本、哈希、引用保留，不按新版重写。Python 独立运行时使用 3.12.15/20261013 构建。验收：`PYTHONPATH=crates/storage/collectors target/collector-build/python/bin/python3 -B -m unittest discover -s crates/storage/collectors/tests`。
+
+新发布的完整覆盖审核要求CNINFO原始查询回执绑定公开的证券/机构、交易所、完整查询和日期参数（coverage_validation_version=2）。固定采集器仅记录该公开接口的白名单表单，不记录供应商认证头或密钥。完整覆盖审核仅接受校验版本2；旧审核或旧采集批次缺少查询绑定时须重新采集并发布，选定PDF仍只能证明单笔事实。

@@ -1,6 +1,7 @@
 //! Immutable company-action bundles and evidence validation. Incomplete dates stay null.
 //! Provider success is recorded separately from execution eligibility.
 /// Selected public documents, partial recovery and review drafts.
+pub mod dependencies;
 pub mod evidence;
 pub mod execution_index;
 pub mod facts;
@@ -80,7 +81,7 @@ pub struct ActionBundle {
     pub queried_symbols: BTreeSet<String>,
     /// Implemented distributions, potentially missing pay/listing dates.
     pub actions: Vec<CorporateAction>,
-    /// Failed symbols and reasons; must be retried before using their history.
+    /// Historical acquisition failures; current eligibility is resolved from accepted evidence.
     pub failures: BTreeMap<String, String>,
     /// Saved raw JSON filename to SHA256, for independent provenance review.
     pub raw_sha256: BTreeMap<String, String>,
@@ -259,6 +260,37 @@ impl ActionBundle {
         }
         Ok(())
     }
+    /// Current known-event problems affecting adjustment dependencies only.
+    /// Coverage completeness is resolved separately, so one cannot hide the other.
+    pub fn adjustment_event_issues(
+        &self,
+        id: &str,
+        ranges: &[analytics_core::DateRange],
+    ) -> Vec<String> {
+        let mut issues: Vec<_> = self
+            .execution_issues
+            .iter()
+            .filter(|i| {
+                i.instrument == id
+                    && i.code == "unexplained_coefficient_transition"
+                    && ranges
+                        .iter()
+                        .any(|r| i.dates.start <= r.end && i.dates.end >= r.start)
+            })
+            .map(|i| format!("{}: {}", i.code, i.message))
+            .collect();
+        issues.extend(
+            self.actions
+                .iter()
+                .filter(|a| a.instrument == id && ranges.iter().any(|r| r.contains(a.ex_date)))
+                .filter_map(|a| {
+                    a.validate_adjustment_terms()
+                        .err()
+                        .map(|e| format!("{}: {e}", a.id))
+                }),
+        );
+        issues
+    }
     /// Require verified histories and adjustment terms over training/warmup dates.
     /// Payment/listing dates remain mandatory separately for actual execution rights.
     pub fn require_adjustment_coverage(
@@ -271,13 +303,27 @@ impl ActionBundle {
         if start > end {
             return Err(invalid("invalid action bundle identity/range"));
         }
+        let index = dependencies::DependencyIndex::build(self)?;
         for id in symbols {
-            if !self.queried_symbols.contains(id) || self.failures.contains_key(id) {
-                return Err(invalid(format!("company-action history unavailable: {id}")));
+            let resolution = index.resolve(
+                id,
+                &[analytics_core::DateRange { start, end }],
+                EVENT_CATEGORIES,
+                analytics_core::execution::EventCheckPolicy::Audited,
+            )?;
+            if !resolution.ready() {
+                return Err(invalid(format!(
+                    "company-action current coverage unavailable: {id}: {:?}",
+                    resolution.gaps
+                )));
             }
-            let issues = self.coverage_issues(id, start, end);
-            if !issues.is_empty() {
-                return Err(invalid(issues.join("; ")));
+            if !self
+                .adjustment_event_issues(id, &[analytics_core::DateRange { start, end }])
+                .is_empty()
+            {
+                return Err(invalid(format!(
+                    "unresolved company-action event issue: {id}"
+                )));
             }
         }
         let mut seen = BTreeSet::new();
@@ -535,52 +581,27 @@ impl ActionBundle {
                     }
                 }
             }
+            let mut verified_captures = BTreeSet::new();
             for (id, claims) in &bundle.coverage {
                 for c in claims
                     .iter()
                     .filter(|c| c.status == analytics_core::admission::CheckStatus::Passed)
                 {
                     for name in &c.evidence {
-                        if !name.starts_with("review-") {
-                            return Err(invalid(
-                                "event completeness needs an auditable review receipt",
-                            ));
-                        }
-                        let bytes = fs::read(root.join("raw").join(name))?;
-                        if bundle.raw_sha256.get(name)
-                            != Some(&format!(
-                                "sha256:{:x}",
-                                analytics_core::hash::Hex(Sha256::digest(&bytes))
-                            ))
-                        {
-                            return Err(invalid("category review receipt hash mismatch"));
-                        }
-                        let review: Value = serde_json::from_slice(&bytes).map_err(invalid)?;
-                        let consistent = review["request"]["coverage_reviews"]
-                            .as_array()
-                            .is_some_and(|rs| {
-                                rs.iter().any(|r| {
-                                    r["instrument"] == *id
-                                        && r["dates"] == serde_json::json!(c.dates)
-                                        && r["reason"] == c.reason
-                                        && r["categories"]
-                                            .as_array()
-                                            .is_some_and(|cs| cs.iter().any(|v| v == &c.category))
-                                        && r["expected_source_sha256"] == review["source_sha256"]
-                                })
-                            });
-                        if !consistent {
-                            return Err(invalid("category review claim/receipt mismatch"));
-                        }
-                        let receipt = &review["collection_receipts"][id];
-                        if receipt["evidence"]["pagination_complete"] != true
-                            || !receipt["evidence"]["all_announcements"].is_array()
-                        {
-                            return Err(invalid(
-                                "category review lacks complete disclosure metadata",
-                            ));
-                        }
-                        crate::collector::verify_http_receipts(root, &receipt["evidence"])?;
+                        let verify_capture = verified_captures.insert((
+                            id.clone(),
+                            name.clone(),
+                            c.dates.start,
+                            c.dates.end,
+                        ));
+                        review::verify_coverage_receipt(
+                            &bundle,
+                            root,
+                            id,
+                            c,
+                            name,
+                            verify_capture,
+                        )?;
                     }
                 }
             }

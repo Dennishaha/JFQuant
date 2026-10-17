@@ -190,3 +190,11 @@ Reviewed Conversion and Delisting terms can carry `last_trade_date`. Delisting m
 Acceptance: `DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-storage corporate_actions`.
 
 Announcement PDF extraction is shared between complete CNINFO searches and selected-document capture:64 MiB/PDF,4096 pages,8 MiB extracted text; encrypted or oversized inputs remain failures. Collector progress reports each document and every32 completed pages, preserving the native idle watchdog and cancellation. See `collectors/README.md` and `src/corporate_actions/README.md` for audit/replay contracts.
+
+## 跨证券修订核验
+
+公司行动格式9／修订4增加基于原文的参与方关联，允许已核实后继公告证明交收字段；预览、发布和加载重放使用同一验证器。`review::validate_proposal` 汇总独立字段问题，身份前置失败标为 waiting_identity；`evidence::combine` 保留完整查询范围及部分捕获边界，不将选定公告升级为全历史证据。接口与验收见 corporate_actions/review 的组件 README。
+
+提交只核对行动 manifest 的规范签名（`ActionBundle::snapshot_content`），不在持有服务控制锁时重放全部证据；worker 仍通过 `ActionBundle::read` 与 acquisition 检查核验原始字节。快照身份不是准入结论，证据篡改必须在 worker 阻断，不能用元数据缓存替代完整核验。
+
+离线 `data reconcile-actions --evidence-task TASK` 现同步导入完成分片中的已认证 GP29 停复牌证据。公司行动历史采集失败不使独立停牌证据失效，也不借此解除历史覆盖缺口。原生参数、响应、分片哈希一并冻结，读取重放；源证券之外的附件与冲突的已有状态凭据拒绝发布。此路径不修改原始日线、因子或模型。验收：`cargo test -p analytics-storage status_survives`，验证历史失败保留、估值依据可重放与篡改拒绝。

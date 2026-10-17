@@ -4,6 +4,7 @@ use crate::collector::{CollectionRequest, Provider};
 use analytics_core::DateRange;
 use serde_json::json;
 use std::path::PathBuf;
+mod status;
 
 fn verify_bytes(path: &Path, expected: &str) -> io::Result<Vec<u8>> {
     let bytes = fs::read(path)?;
@@ -358,6 +359,7 @@ pub fn apply(
                 }
             }
         }
+        status::attach(root, output, &mut bundle)?;
     }
     let mut inputs = serde_json::Map::new();
     let mut first = None::<Date>;

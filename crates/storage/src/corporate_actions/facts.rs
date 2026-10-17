@@ -468,7 +468,7 @@ pub fn derive(bundle: &ActionBundle, root: &Path) -> io::Result<BTreeMap<String,
 }
 /// Refresh the derived snapshot only after its source bytes have been captured.
 pub fn refresh(bundle: &mut ActionBundle, root: &Path) -> io::Result<()> {
-    bundle.schema_version = 8;
+    bundle.schema_version = bundle.schema_version.max(8);
     bundle.field_facts = derive(bundle, root)?;
     Ok(())
 }
@@ -828,6 +828,7 @@ mod tests {
             schema_version: 2,
             evidence_manifest: tmp.path().join("actions.json"),
             events: vec![EventRevision {
+                participants: None,
                 original_id: Some(original.id.clone()),
                 original_sha256: Some(format!(
                     "sha256:{:x}",

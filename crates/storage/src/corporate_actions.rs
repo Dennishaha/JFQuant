@@ -195,12 +195,12 @@ impl ActionBundle {
     }
 
     fn validate_identity(&self) -> io::Result<()> {
-        if !matches!(self.schema_version, 5..=8)
+        if !matches!(self.schema_version, 5..=9)
             || (self.downloader != "JFQuant analytics-storage corporate-actions"
                 && self.downloader != "JFQuant analytics-workflow synthetic-demo-v1")
         {
             return Err(invalid(
-                "unsupported_data_format: action bundle requires supported format 5/6/7/8 and known source",
+                "unsupported_data_format: action bundle requires supported format 5/6/7/8/9 and known source",
             ));
         }
         analytics_core::source_map::reject_removed_sources(
@@ -371,6 +371,18 @@ impl ActionBundle {
         }
         Ok(())
     }
+    /// Cheap manifest identity for submission snapshots; never authenticates evidence bytes.
+    /// Workers must still call `read` and validate acquisition evidence before execution.
+    pub fn snapshot_content(path: &Path) -> io::Result<Value> {
+        let raw: Value = serde_json::from_slice(&fs::read(path)?).map_err(invalid)?;
+        let book: Self = serde_json::from_value(raw.clone()).map_err(invalid)?;
+        book.validate_identity()?;
+        if book.schema_version == 5 {
+            Ok(raw)
+        } else {
+            serde_json::to_value(book).map_err(invalid)
+        }
+    }
     /// Canonical version identity keeps legacy numeric fields and absent metadata intact.
     /// Validation uses the supported typed reader; hashing does not rewrite format 5.
     pub fn version_content(path: &Path) -> io::Result<Value> {
@@ -384,7 +396,7 @@ impl ActionBundle {
     /// Read without silently upgrading a historical schema.
     pub fn read(path: &Path) -> io::Result<Self> {
         let raw: Value = serde_json::from_slice(&fs::read(path)?).map_err(invalid)?;
-        if matches!(raw["schema_version"].as_u64(), Some(6..=8))
+        if matches!(raw["schema_version"].as_u64(), Some(6..=9))
             && raw["actions"].as_array().is_none_or(|rows| {
                 rows.iter()
                     .any(|a| !a["cash_per_share"].is_string() || !a["shares_per_share"].is_string())
@@ -428,6 +440,28 @@ impl ActionBundle {
             }
         }
         bundle.validate_identity()?;
+        if bundle.schema_version < 9
+            && bundle.actions.iter().any(|a| {
+                matches!(
+                    a.terms.allocation(),
+                    Some(analytics_core::actions::Allocation::RankedRemainder { .. })
+                )
+            })
+        {
+            return Err(invalid(
+                "ranked registrar allocation requires action format 9",
+            ));
+        }
+        if bundle.schema_version < 9
+            && bundle.actions.iter().any(|a| {
+                matches!(
+                    a.terms.reference(),
+                    Some(analytics_core::actions::Reference::Terminal { .. })
+                )
+            })
+        {
+            return Err(invalid("terminal reference requires action format 9"));
+        }
         if bundle.schema_version < 8
             && bundle.actions.iter().any(|a| {
                 matches!(
@@ -582,6 +616,7 @@ impl ActionBundle {
                 }
             }
             let mut verified_captures = BTreeSet::new();
+            let mut review_receipts = BTreeMap::new();
             for (id, claims) in &bundle.coverage {
                 for c in claims
                     .iter()
@@ -594,13 +629,19 @@ impl ActionBundle {
                             c.dates.start,
                             c.dates.end,
                         ));
-                        review::verify_coverage_receipt(
+                        if !review_receipts.contains_key(name) {
+                            review_receipts.insert(
+                                name.clone(),
+                                review::read_coverage_receipt(&bundle, root, name)?,
+                            );
+                        }
+                        review::verify_coverage_value(
                             &bundle,
                             root,
                             id,
                             c,
-                            name,
                             verify_capture,
+                            &review_receipts[name],
                         )?;
                     }
                 }

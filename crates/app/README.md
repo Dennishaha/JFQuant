@@ -133,4 +133,8 @@ DUCKDB_DOWNLOAD_LIB=1 cargo nextest run -p analytics-desktop
 
 ## Company-event controls
 
-Independent backtest plans expose `evidence_only` and `research_transitions`. The latter visibly discloses retrospective terminal-close liquidation, next-session cash, uncompensated fractional floor and locked-asset valuation. The existing evidence revision editor adds last-trade date, successor, ratio and successor-tradability controls; these edit the same draft and never bypass publication evidence checks. Task reports expose candidate versus actual holding impact through shared execution diagnostics. Protocol 29 and plan schema 2 require matching App/CLI/service versions.
+Independent backtest plans expose `evidence_only` and `research_transitions`. The latter visibly discloses retrospective terminal-close liquidation, next-session cash, uncompensated fractional floor and locked-asset valuation. The existing evidence revision editor adds last-trade date, successor, ratio and successor-tradability controls; these edit the same draft and never bypass publication evidence checks. Task reports expose candidate versus actual holding impact through shared execution diagnostics. Protocol 30 and plan schema 2 require matching App/CLI/service versions.
+
+## 跨证券证据维护
+
+现有证据区域支持合并已采集 manifest、任务补证清单、选择已采集文档、原文/单位引用与参与方关联维护、新增待填写的换股事件草稿，以及逐项校验结果。操作走相同 Evidence worker；GUI 不持有数据库句柄、不在渲染时读取文件或联网。选择的行动版本、任务或草稿变化时旧校验显示过期；发布仍通过共享服务重新核验。协议30需要 App、CLI 和服务一起更新。

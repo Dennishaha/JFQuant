@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{fs, path::PathBuf};
 use uuid::Uuid;
+mod checklist;
 pub(crate) mod status;
 
 /// Versioned workflow operations for selected evidence and immutable review preparation.
@@ -18,6 +19,11 @@ pub enum EvidenceRequest {
     Capture {
         /// Public selected-document specification.
         request: evidence::CaptureRequest,
+    },
+    /// Combine authenticated issuer shards; never infer complete coverage.
+    Combine {
+        /// At least two captured manifests in this workspace.
+        manifests: Vec<PathBuf>,
     },
     /// Recover independently verifiable completed output from a terminal collection task.
     Recover {
@@ -49,6 +55,9 @@ pub enum EvidenceRequest {
         instrument: Option<String>,
         /// Captured manifest for a new scaffold.
         evidence_manifest: Option<PathBuf>,
+        /// Optional terminal task whose context binds the validation receipt.
+        #[serde(default)]
+        task: Option<Uuid>,
     },
 }
 impl EvidenceRequest {
@@ -60,6 +69,11 @@ impl EvidenceRequest {
     }
     pub(crate) fn input_roots(&self, w: &Workspace) -> Result<Vec<PathBuf>> {
         match self {
+            Self::Combine { manifests } => manifests
+                .iter()
+                .cloned()
+                .map(|p| evidence_path(w, p).map(|p| p.parent().unwrap().to_path_buf()))
+                .collect(),
             Self::Recover { task } | Self::Retry { task } => {
                 let root = recovery_root(w, *task)?;
                 if fs::symlink_metadata(&root)?.file_type().is_symlink() {
@@ -144,6 +158,9 @@ pub(crate) fn freeze(w: &Workspace, request: &EvidenceRequest) -> Result<Value> 
     }
     if let EvidenceRequest::Status {
         task: Some(task), ..
+    }
+    | EvidenceRequest::Draft {
+        task: Some(task), ..
     } = request
     {
         inputs.push(status::freeze(w, *task)?);
@@ -185,6 +202,14 @@ pub(crate) fn execute(
     let details = match request {
         EvidenceRequest::Capture { request } => {
             evidence::capture(request, &root.join("captured"), context)?
+        }
+        EvidenceRequest::Combine { manifests } => {
+            let paths = manifests
+                .iter()
+                .cloned()
+                .map(|p| evidence_path(w, p))
+                .collect::<Result<Vec<_>>>()?;
+            evidence::combine(&paths, &root.join("combined"))?
         }
         EvidenceRequest::Retry { task } => {
             let original = retry_request(w, *task)?;
@@ -247,13 +272,14 @@ pub(crate) fn execute(
                     status::evaluate(w, task, &book, instrument.as_deref(), &source.signature)
                 })
                 .transpose()?;
-            json!({"schema_version":2,"report_kind":if task.is_some() {"task_dependencies"} else {"evidence_inventory"},"current":current,"actions":actions,"source_signature":source.signature,"evidence_root":w.resolve(&source.path).parent().unwrap().join("raw"),"entries":entries,"source_failures":book.failures.len(),"queried":book.queried_symbols.len(),"next_steps":["capture selected PDFs","recover terminal batches","draft and validate revisions","revise-actions with the saved request","rerun task admission"]})
+            json!({"schema_version":3,"report_kind":if task.is_some() {"task_dependencies"} else {"evidence_inventory"},"current":current,"actions":actions,"source_signature":source.signature,"evidence_root":w.resolve(&source.path).parent().unwrap().join("raw"),"entries":entries,"source_failures":book.failures.len(),"queried":book.queried_symbols.len(),"next_steps":["capture selected PDFs","recover terminal batches","draft and validate revisions","revise-actions with the saved request","rerun task admission"]})
         }
         EvidenceRequest::Draft {
             actions,
             request,
             instrument,
             evidence_manifest,
+            task,
         } => {
             let source = crate::usecases::version(w, actions, "actions")?;
             let source_path = w.resolve(&source.path);
@@ -267,7 +293,7 @@ pub(crate) fn execute(
                 analytics_core::pool::validate_instrument(id)?;
                 (
                     review::RevisionRequest {
-                        schema_version: 3,
+                        schema_version: 4,
                         evidence_manifest: evidence_manifest
                             .clone()
                             .ok_or("draft scaffold requires evidence manifest")?,
@@ -278,6 +304,7 @@ pub(crate) fn execute(
                             .filter(|a| a.instrument == *id)
                             .map(|a| {
                                 Ok(review::EventRevision {
+                                    participants: None,
                                     original_id: Some(a.id.clone()),
                                     original_sha256: Some(signature(a)?),
                                     replacement: a.clone(),
@@ -347,8 +374,13 @@ pub(crate) fn execute(
                     }
                 }
             }
-            let validation = if request.is_some()
-                && (!draft.events.is_empty() || !draft.coverage_reviews.is_empty())
+            let problems = review::validate_proposal(&book, &draft)?;
+            let validation = if !problems.is_empty() {
+                json!({"ready":false,"problems":problems})
+            } else if request.is_some()
+                && (!draft.events.is_empty()
+                    || !draft.coverage_reviews.is_empty()
+                    || (draft.schema_version == 4 && draft.structured_manifest.is_some()))
             {
                 match review::apply(
                     &book,
@@ -362,9 +394,11 @@ pub(crate) fn execute(
             } else {
                 json!({"ready":false,"reason":if request.is_some(){"all proposed events already match; no publication needed"}else{"editable scaffold; add reviewed changes, exact quotes and units before validation"}})
             };
+            let receipt = json!({"schema_version":1,"ready":validation["ready"]==true,"source_signature":source.signature,"request_sha256":signature(&draft)?,"evidence_inputs":freeze(w, &EvidenceRequest::Draft {actions:actions.clone(),request:Some(Box::new(draft.clone())),instrument:instrument.clone(),evidence_manifest:None,task:*task})?,"task":task,"context":task.map(|t|status::freeze(w,t)).transpose()?,"rules":"cross-security-review-v1"});
+            atomic_json(&root.join("validation-receipt.json"), &receipt)?;
             let path = root.join("review-request.json");
             atomic_json(&path, &draft)?;
-            json!({"request_path":path,"apply_argv":["jfquant","--workspace",w.root.to_string_lossy(),"data","revise-actions","--actions",actions,"--request",path],"draft_request":draft,"validation":validation,"unchanged_events":unchanged,"source_signature":source.signature,"issues":book.execution_issues.iter().filter(|i|instrument.as_ref().is_none_or(|id|i.instrument==*id)).map(|i|Ok(json!({"issue":i,"sha256":signature(i)?}))).collect::<Result<Vec<_>>>()?,"documents":documents.into_values().filter(|(d,_)|instrument.as_ref().is_none_or(|id|d["instrument"]==*id)).map(|(document,text)|json!({"document":document,"extracted_text":text})).collect::<Vec<_>>()})
+            json!({"schema_version":3,"actions":actions,"validation_receipt":receipt,"request_path":path,"apply_argv":["jfquant","--workspace",w.root.to_string_lossy(),"data","revise-actions","--actions",actions,"--request",path],"event_template":evidence::conversion_template(instrument.as_deref().unwrap_or("")),"draft_request":draft,"validation":validation,"unchanged_events":unchanged,"source_signature":source.signature,"issues":book.execution_issues.iter().filter(|i|instrument.as_ref().is_none_or(|id|i.instrument==*id)).map(|i|Ok(json!({"issue":i,"sha256":signature(i)?}))).collect::<Result<Vec<_>>>()?,"documents":documents.into_values().map(|(document,text)|json!({"document":document,"extracted_text":text})).collect::<Vec<_>>()})
         }
     };
     atomic_json(&root.join("evidence-report.json"), &details)?;
@@ -480,6 +514,7 @@ mod tests {
                 request: None,
                 instrument: Some("SH600000".into()),
                 evidence_manifest: Some(root.join("announcements.json")),
+                task: None,
             },
         )
         .unwrap();
@@ -499,6 +534,7 @@ mod tests {
             request: None,
             instrument: Some("SH600000".into()),
             evidence_manifest: Some(outside.path().join("announcements.json")),
+            task: None,
         };
         assert!(freeze(&w, &request).is_err());
         assert!(

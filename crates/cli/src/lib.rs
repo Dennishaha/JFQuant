@@ -168,6 +168,11 @@ pub enum DataCommand {
 /// Agent-friendly operations sharing the desktop evidence worker.
 #[derive(Debug, Subcommand)]
 pub enum EvidenceCommand {
+    /// Combine verified captures from different issuers without claiming coverage.
+    Combine {
+        #[arg(long, num_args = 2..)]
+        manifests: Vec<PathBuf>,
+    },
     /// Capture selected public PDFs; specification format is documented in the CLI README.
     Capture {
         #[arg(long)]
@@ -203,6 +208,8 @@ pub enum EvidenceCommand {
         instrument: Option<String>,
         #[arg(long, required_unless_present = "request")]
         evidence_manifest: Option<PathBuf>,
+        #[arg(long)]
+        task: Option<Uuid>,
     },
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -998,11 +1005,12 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
             DataCommand::Evidence(command) => {
                 use analytics_workflow::action_evidence::EvidenceRequest;
                 let request=match command {
+                    EvidenceCommand::Combine { manifests } => EvidenceRequest::Combine{manifests},
                     EvidenceCommand::Capture { request } => EvidenceRequest::Capture{request:read(&client.root,&request)?},
                     EvidenceCommand::Recover { task } => EvidenceRequest::Recover{task},
                     EvidenceCommand::Retry { task } => EvidenceRequest::Retry{task},
                     EvidenceCommand::Status {actions,instrument,task} => EvidenceRequest::Status{actions,instrument,task},
-                    EvidenceCommand::Draft {actions,request,instrument,evidence_manifest} => EvidenceRequest::Draft{actions,request:request.map(|p|read(&client.root,&p).map(Box::new)).transpose()?,instrument,evidence_manifest},
+                    EvidenceCommand::Draft {actions,request,instrument,evidence_manifest,task} => EvidenceRequest::Draft{actions,request:request.map(|p|read(&client.root,&p).map(Box::new)).transpose()?,instrument,evidence_manifest,task},
                 };
                 workflow(WorkflowRequest::Evidence{request})
             }

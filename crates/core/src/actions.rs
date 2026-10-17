@@ -25,6 +25,11 @@ pub enum Allocation {
         /// Evidence supporting this allocation rule.
         evidence: String,
     },
+    /// Aggregate registrar ranking/lottery cannot determine one account’s fractional award.
+    RankedRemainder {
+        /// Exact implementation rule excerpt; research floor remains a separate policy.
+        evidence: String,
+    },
     /// Fractional remainder receives an explicitly priced cash payment.
     CashInLieu {
         /// CNY per fractional share.
@@ -39,7 +44,9 @@ impl Allocation {
     /// Return listed integer quantity and fractional cash compensation, never guess rounding.
     pub fn allocate(&self, old: u64, ratio: f64) -> Result<(u64, f64)> {
         match self {
-            Self::Floor { evidence } | Self::CashInLieu { evidence, .. }
+            Self::Floor { evidence }
+            | Self::RankedRemainder { evidence }
+            | Self::CashInLieu { evidence, .. }
                 if evidence.trim().is_empty() =>
             {
                 return Err("missing registrar allocation evidence".into());
@@ -57,6 +64,7 @@ impl Allocation {
             return Ok((n.round() as u64, 0.));
         }
         match self {
+            Self::RankedRemainder { .. } => Err("aggregate registrar allocation requires account-specific results or explicit research policy".into()),
             Self::Exact => Err("fractional shares require actual registrar allocation".into()),
             Self::Floor { evidence } if !evidence.is_empty() => Ok((n.floor() as u64, 0.)),
             Self::CashInLieu {
@@ -70,6 +78,11 @@ impl Allocation {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Reference {
+    /// Predecessor listing ends; there is no subsequent exchange reference to splice.
+    Terminal {
+        /// Evidence of terminal listing / mandatory share exchange.
+        evidence: String,
+    },
     /// Announcement says no exchange ex adjustment applies.
     Unchanged {
         /// Implementation evidence.
@@ -98,6 +111,9 @@ impl Reference {
     /// Validate reference evidence and calculate the exchange's theoretical raw mark.
     pub fn price(&self, previous: f64) -> Result<f64> {
         let (p, e) = match self {
+            Self::Terminal { .. } => {
+                return Err("terminal security has no subsequent exchange reference".into());
+            }
             Self::Unchanged { evidence } => (previous, evidence),
             Self::Formula {
                 cash,
@@ -312,13 +328,37 @@ impl EventTerms {
     }
     /// Structural and implementation checks; actual schedule coverage is checked separately.
     pub fn validate(&self, ex: Date) -> Result<()> {
+        if let Some(Allocation::RankedRemainder { evidence }) = self.allocation()
+            && evidence.trim().is_empty()
+        {
+            return Err("missing registrar allocation evidence".into());
+        }
+
         if let Some(Allocation::CashInLieu { pay_date, .. }) = self.allocation()
             && *pay_date < ex
         {
             return Err("fractional compensation cannot precede the effective date".into());
         }
         if let Some(r) = self.reference() {
-            r.price(1e6)?;
+            if let Reference::Terminal { evidence } = r {
+                if evidence.trim().is_empty()
+                    || !matches!(
+                        self,
+                        Self::Conversion {
+                            category: ConversionKind::Merger,
+                            retain_original: false,
+                            ..
+                        } | Self::Delisting { .. }
+                    )
+                {
+                    return Err(
+                        "terminal reference requires evidenced terminal conversion/delisting"
+                            .into(),
+                    );
+                }
+            } else {
+                r.price(1e6)?;
+            }
         }
         match self {
             Self::RightsIssueFacts { facts, .. } => facts.validate(None, ex)?,
@@ -456,5 +496,19 @@ impl Default for ActionPolicy {
             subscribe_with_available_cash: true,
             exercise_optional_cash_choice: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod terminal_reference_tests {
+    use super::*;
+    #[test]
+    fn terminal_reference_never_invents_an_exchange_price() {
+        let reference = Reference::Terminal {
+            evidence: "verified terminal listing".into(),
+        };
+        assert!(reference.price(10.).is_err());
+        let event:EventTerms=serde_json::from_value(serde_json::json!({"kind":"distribution","allocation":{"kind":"ranked_remainder","evidence":""}})).unwrap();
+        assert!(event.validate("2024-01-05".parse().unwrap()).is_err());
     }
 }

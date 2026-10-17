@@ -206,6 +206,8 @@ impl DependencyIndex {
         }
         let blocking_code = if gaps.is_empty() {
             None
+        } else if any_covered {
+            Some("execution_event_coverage_missing")
         } else if self.failures.contains_key(id) {
             Some("execution_source_failed")
         } else if !self.queried.contains(id) {

@@ -326,6 +326,34 @@ pub(crate) fn dependencies(
         ledger: projection,
     })
 }
+/// Projection failures remain structured blockers so other independent requirements are visible.
+pub(crate) fn assess_dependencies(
+    request: &ResearchRequest,
+    dataset: &DailyDataset,
+    book: Option<&ActionBundle>,
+    pool: &analytics_core::pool::PoolMembership,
+    range: &DateRange,
+) -> Result<(DependencyProjection, Vec<AdmissionCheck>)> {
+    let result = dependencies(request, dataset, book, pool, range);
+    analytics_core::task::TaskContext::current().check()?;
+    match result {
+        Ok(projection) => Ok((projection, vec![])),
+        Err(e) => Ok((
+            DependencyProjection {
+                scope: scope(pool, range),
+                projected: BTreeSet::new(),
+                ledger: None,
+            },
+            vec![check(
+                None,
+                range,
+                "execution_projection_invalid",
+                Some(e.to_string()),
+                vec![],
+            )],
+        )),
+    }
+}
 pub(super) fn checks(
     request: &ResearchRequest,
     dataset: &DailyDataset,
@@ -334,11 +362,14 @@ pub(super) fn checks(
     range: &DateRange,
 ) -> Result<Vec<AdmissionCheck>> {
     let original_scope = scope(pool, range);
-    let DependencyProjection {
-        scope,
-        projected,
-        ledger: projection,
-    } = dependencies(request, dataset, book, pool, range)?;
+    let (
+        DependencyProjection {
+            scope,
+            projected,
+            ledger: projection,
+        },
+        projection_checks,
+    ) = assess_dependencies(request, dataset, book, pool, range)?;
     if let Some(ledger) = &projection {
         save(request.output.join("rights_input.json"), ledger)?;
         save(
@@ -362,6 +393,7 @@ pub(super) fn checks(
         &projected,
         index.as_ref(),
     );
+    checks.extend(projection_checks);
     checks.push(check(
         None,
         range,

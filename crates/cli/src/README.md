@@ -217,3 +217,20 @@ jfquant --workspace W data evidence status --actions ACTION_VERSION --task TERMI
 不带 `--task` 仅输出证据清单，不表示训练/回测可用。带任务时使用其冻结的市场、股票池、实际区间及策略，检查明确选择的行动版本。格式2报告中 `current.ready` 仅表示公司行动依赖，`gap_count` 是类别/日期缺口数，`affected_security_count` 是受当前阻断影响的证券数；`historical_failure_security_count` 是独立追溯计数。完整替代证明可使当前范围可用而保留历史失败。
 
 必须指定已结束的任务。缺少可恢复的精确依赖上下文时要求重新输入检查，不回退固定年份。报告中的通过标记不能替代正式任务重新准入。协议29的客户端与后台需配套更新。
+
+## 跨证券补证
+
+```bash
+jfquant --workspace W data evidence combine --manifests OLD_CAPTURE NEW_CAPTURE
+jfquant --workspace W jobs wait COMBINE_TASK
+jfquant --workspace W data evidence status --actions ACTIONS --task FROZEN_TASK
+jfquant --workspace W data evidence draft --actions ACTIONS --instrument SH600068 --evidence-manifest COMBINED_MANIFEST --task FROZEN_TASK
+jfquant --workspace W data evidence draft --actions ACTIONS --request REVIEW_JSON --task FROZEN_TASK
+jfquant --workspace W data revise-actions --actions ACTIONS --request VALIDATED_REQUEST_JSON
+```
+
+每个后台任务完成后再提交下一项写任务。combine 不扩展查询区间；同证券多个完整查询须分别审核。修订4的 participants 包含 event_id、predecessor/successor 的 instrument、name 和 identity 原文引用，以及 relationship 引用数组；引用形状仍为 document_id/quote/unit。双方身份引用分别包含本方名称和代码，关系引用明确双方与事件；不能引用另一个待审核修订。后继公告只允许交收字段，不可证明决策时点条款。完整示例与核验边界见 storage 组件 review/README.md。
+
+草稿报告格式3提供 event_template（null 表示未知，不能直接发布）、validation.problems 和 validation_receipt；传入 --task 绑定终结任务上下文。状态报告格式3的 current.checklist 按范围输出稳定要求ID、已有证据和下一步操作；未指定任务仍仅为证据清单。发布重新验证源哈希和原文，不接受单独的 ready=true。
+
+后继证券补采可通过修订4的 `structured_manifest` 引用已注册、完整核验的 HiThink 公司行动包；允许空 events/coverage_reviews 的纯附件修订。仅接受已有已发布事件指向、原包未查询过的后继证券，拒绝覆盖旧证券、无关证券、采集失败和未解决冲突；原文按哈希继承并在后续读取核验。可先用 `draft --request ... --task ...` 预览，再用原有 revise-actions 发布，不修改原任务和原模型。

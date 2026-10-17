@@ -1,6 +1,10 @@
 //! Immutable, evidence-backed event corrections; never delete a failure marker alone.
 use super::*;
+mod participants;
+mod validation;
+pub use participants::{Participant, Participants};
 use std::path::PathBuf;
+pub use validation::{Diagnostic, validate_proposal};
 fn inherit_acquisition(source: &Path, output: &Path) -> io::Result<()> {
     fn copy(source: &Path, output: &Path) -> io::Result<()> {
         fs::create_dir(output)?;
@@ -47,6 +51,9 @@ pub struct FieldEvidence {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EventRevision {
+    /// Verified parties permitting successor-issued settlement evidence (revision 4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub participants: Option<Participants>,
     /// Version-2 leaf field to an authenticated structured fact (not an announcement quote).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub structured_fields: BTreeMap<String, StructuredFieldRef>,
@@ -70,7 +77,7 @@ pub struct StructuredFieldRef {
     /// Field within that event, e.g. record_date or subscription_price.
     pub field: String,
 }
-fn verify_structured(
+pub(super) fn verify_structured(
     source: &ActionBundle,
     event: &CorporateAction,
     path: &str,
@@ -105,6 +112,7 @@ fn verify_structured(
 /// Verify structured revision fields and immutable outputs again when loading a bundle.
 pub(super) fn verify_structured_revisions(bundle: &ActionBundle, root: &Path) -> io::Result<()> {
     let mut affected = BTreeSet::new();
+    let mut retired = BTreeSet::new();
     let mut outputs = Vec::new();
     for name in bundle
         .raw_sha256
@@ -116,12 +124,25 @@ pub(super) fn verify_structured_revisions(bundle: &ActionBundle, root: &Path) ->
         if let Some(events) = receipt["request"]["events"].as_array() {
             outputs.extend(events.iter().map(|r| r["replacement"].clone()));
         }
-        if !matches!(receipt["request"]["schema_version"].as_u64(), Some(2 | 3)) {
+        if receipt["request"]["schema_version"] == 4 {
+            validation::replay(bundle, root, &receipt)?;
+        }
+        if !matches!(receipt["request"]["schema_version"].as_u64(), Some(2..=4)) {
             continue;
         }
         let request: RevisionRequest =
             serde_json::from_value(receipt["request"].clone()).map_err(invalid)?;
         for revision in &request.events {
+            if request.schema_version == 4 {
+                affected.insert(revision.replacement.id.clone());
+                if let Some(old) = revision
+                    .original_id
+                    .as_ref()
+                    .filter(|id| **id != revision.replacement.id)
+                {
+                    retired.insert(old.clone());
+                }
+            }
             for (path, reference) in &revision.structured_fields {
                 let event = serde_json::to_value(&revision.replacement).map_err(invalid)?;
                 let pointer = format!("/{}", path.replace('.', "/"));
@@ -134,6 +155,9 @@ pub(super) fn verify_structured_revisions(bundle: &ActionBundle, root: &Path) ->
         }
     }
     for id in affected {
+        if retired.contains(&id) && !bundle.actions.iter().any(|e| e.id == id) {
+            continue;
+        }
         let current = bundle
             .actions
             .iter()
@@ -168,7 +192,10 @@ fn changed_leaves(prefix: &str, old: &Value, new: &Value, out: &mut Vec<(String,
 fn decision_cutoff(event: &CorporateAction) -> Option<Date> {
     if matches!(
         event.terms,
-        analytics_core::actions::EventTerms::Conversion { .. }
+        analytics_core::actions::EventTerms::Conversion {
+            category: analytics_core::actions::ConversionKind::CodeChange,
+            ..
+        }
     ) {
         Some(event.ex_date)
     } else {
@@ -180,6 +207,7 @@ fn verify_leaf_document(
     proof: &FieldEvidence,
     event: &CorporateAction,
     path: &str,
+    participants: Option<&Participants>,
 ) -> io::Result<()> {
     let (document, text) = documents
         .get(&proof.document_id)
@@ -189,7 +217,7 @@ fn verify_leaf_document(
         .ok_or_else(|| invalid("missing disclosure date"))?
         .parse()
         .map_err(invalid)?;
-    let settlement = (path == "ex_date"
+    let settlement = (matches!(path, "ex_date" | "record_date" | "terms.successor")
         && matches!(
             event.terms,
             analytics_core::actions::EventTerms::Conversion { .. }
@@ -206,7 +234,16 @@ fn verify_leaf_document(
         ]
         .iter()
         .any(|p| path == *p || path.starts_with(&format!("{p}.")));
-    if document["instrument"] != event.instrument
+    let settlement = settlement
+        || (path.starts_with("terms.reference")
+            && matches!(
+                event.terms.reference(),
+                Some(analytics_core::actions::Reference::Terminal { .. })
+            ));
+    let issuer_matches = document["instrument"] == event.instrument
+        || (settlement
+            && participants.is_some_and(|p| document["instrument"] == p.successor.instrument));
+    if !issuer_matches
         || document["candidates"]["stage"] != "implementation"
         || proof.quote.trim().is_empty()
         || !text.contains(&proof.quote)
@@ -249,7 +286,7 @@ pub struct RevisionRequest {
     /// Version-3 separately captured, replay-verified structured action facts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structured_manifest: Option<PathBuf>,
-    /// Version 1 for announcement quotes, or 2 for structured field references.
+    /// Revision 4 adds authenticated participant relationships and unified leaf verification.
     pub schema_version: u32,
     /// Captured announcements.json, or the current actions.json for a structured-only revision.
     pub evidence_manifest: PathBuf,
@@ -586,6 +623,7 @@ pub(super) fn verify_coverage_capture(
 }
 
 /// Replay one coverage claim; callers cache expensive capture replay per receipt/range.
+#[cfg(test)]
 pub(super) fn verify_coverage_receipt(
     bundle: &ActionBundle,
     root: &Path,
@@ -594,6 +632,15 @@ pub(super) fn verify_coverage_receipt(
     name: &str,
     verify_capture: bool,
 ) -> io::Result<()> {
+    let review = read_coverage_receipt(bundle, root, name)?;
+    verify_coverage_value(bundle, root, id, c, verify_capture, &review)
+}
+/// Authenticate a review once per bundle load, independently of its category claims.
+pub(super) fn read_coverage_receipt(
+    bundle: &ActionBundle,
+    root: &Path,
+    name: &str,
+) -> io::Result<Value> {
     if !name.starts_with("review-") {
         return Err(invalid(
             "event completeness needs an auditable review receipt",
@@ -608,7 +655,17 @@ pub(super) fn verify_coverage_receipt(
     {
         return Err(invalid("category review receipt hash mismatch"));
     }
-    let review: Value = serde_json::from_slice(&bytes).map_err(invalid)?;
+    serde_json::from_slice(&bytes).map_err(invalid)
+}
+/// Resolve a category claim using an already authenticated task-local receipt.
+pub(super) fn verify_coverage_value(
+    bundle: &ActionBundle,
+    root: &Path,
+    id: &str,
+    c: &EventCoverage,
+    verify_capture: bool,
+    review: &Value,
+) -> io::Result<()> {
     if review["coverage_validation_version"] != 2 {
         return Err(invalid(
             "unsupported coverage validation version; recollect and republish review",
@@ -693,8 +750,10 @@ pub fn apply(
         &serde_json::to_value(request).map_err(invalid)?,
     )
     .map_err(invalid)?;
-    if !matches!(request.schema_version, 1..=3)
-        || (request.events.is_empty() && request.coverage_reviews.is_empty())
+    if !matches!(request.schema_version, 1..=4)
+        || (request.events.is_empty()
+            && request.coverage_reviews.is_empty()
+            && !(request.schema_version == 4 && request.structured_manifest.is_some()))
     {
         return Err(invalid("invalid/empty action revision"));
     }
@@ -721,7 +780,7 @@ pub fn apply(
     let manifest_value: Value =
         serde_json::from_slice(&fs::read(&request.evidence_manifest)?).map_err(invalid)?;
     let documents = if request.schema_version >= 2
-        && matches!(manifest_value["schema_version"].as_u64(), Some(7 | 8))
+        && matches!(manifest_value["schema_version"].as_u64(), Some(7..=9))
     {
         let authenticated = ActionBundle::read(&request.evidence_manifest)?;
         if digest(&authenticated)? != digest(source)?
@@ -737,10 +796,20 @@ pub fn apply(
         verified_documents(&request.evidence_manifest)
             .map_err(|e| invalid(format!("announcement evidence: {e}")))?
     };
+    if request.schema_version < 4 && request.events.iter().any(|r| r.participants.is_some()) {
+        return Err(invalid("participant evidence requires revision 4"));
+    }
+    let problems = validation::against_documents(source, request, &documents)?;
+    if !problems.is_empty() {
+        return Err(invalid(serde_json::to_string(&problems).map_err(invalid)?));
+    }
     let mut bundle = source.clone();
+    if request.schema_version == 4 {
+        bundle.schema_version = 9;
+    }
     let mut attached = BTreeMap::new();
     if let Some(path) = &request.structured_manifest {
-        if request.schema_version != 3 {
+        if request.schema_version < 3 {
             return Err(invalid("external structured facts require revision 3"));
         }
         let evidence =
@@ -749,9 +818,12 @@ pub fn apply(
         let root = path
             .parent()
             .ok_or_else(|| invalid("structured evidence root missing"))?;
+        if request.schema_version == 4 {
+            participants::attach_successors(source, &mut bundle, &evidence, &prefix)?;
+        }
         for (id, report) in &evidence.field_facts {
-            if !source.coverage.contains_key(id) && !source.queried_symbols.contains(id)
-                || source.source_symbol(id)? != evidence.source_symbol(id)?
+            if !bundle.coverage.contains_key(id) && !bundle.queried_symbols.contains(id)
+                || bundle.source_symbol(id)? != evidence.source_symbol(id)?
                 || bundle.field_facts.contains_key(id)
             {
                 return Err(invalid(
@@ -837,6 +909,9 @@ pub fn apply(
         }
     }
     for revision in &request.events {
+        if let Some(parties) = &revision.participants {
+            used.extend(parties.proofs().map(|p| p.document_id.clone()));
+        }
         let a = &revision.replacement;
         a.validate_adjustment_terms().map_err(invalid)?;
         if revision.reason.trim().is_empty()
@@ -874,7 +949,7 @@ pub fn apply(
         if matches!(
             a.terms,
             analytics_core::actions::EventTerms::RightsIssueFacts { .. }
-        ) && (request.schema_version != 3 || revision.fields.contains_key("terms"))
+        ) && (request.schema_version < 3 || revision.fields.contains_key("terms"))
         {
             return Err(invalid(
                 "partial rights require revision 3 with field-level evidence",
@@ -891,7 +966,7 @@ pub fn apply(
                 let mut leaves = vec![];
                 changed_leaves(field, &original[field], value, &mut leaves);
                 for (path, value) in leaves {
-                    if request.schema_version == 3 {
+                    if request.schema_version >= 3 {
                         let pointer = format!("/{}", path.replace('.', "/"));
                         let old = original.pointer(&pointer);
                         if old.is_none()
@@ -913,7 +988,13 @@ pub fn apply(
                             })
                             .max_by_key(|(prefix, _)| prefix.len())
                         {
-                            verify_leaf_document(&documents, proof, a, &path)?;
+                            verify_leaf_document(
+                                &documents,
+                                proof,
+                                a,
+                                &path,
+                                revision.participants.as_ref(),
+                            )?;
                             used.insert(proof.document_id.clone());
                             continue;
                         }
@@ -930,6 +1011,11 @@ pub fn apply(
                 .fields
                 .get(field)
                 .ok_or_else(|| invalid(format!("changed field lacks evidence: {field}")))?;
+            if request.schema_version == 4 {
+                verify_leaf_document(&documents, proof, a, field, revision.participants.as_ref())?;
+                used.insert(proof.document_id.clone());
+                continue;
+            }
             let (document, text) = documents
                 .get(&proof.document_id)
                 .ok_or_else(|| invalid("unknown implementation document"))?;
@@ -1254,6 +1340,7 @@ mod tests {
             schema_version: 1,
             evidence_manifest: root.join("announcements.json"),
             events: vec![EventRevision {
+                participants: None,
                 structured_fields: Default::default(),
                 original_id: Some(a.id.clone()),
                 original_sha256: Some(original),

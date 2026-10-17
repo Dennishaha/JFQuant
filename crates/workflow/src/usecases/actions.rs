@@ -36,7 +36,7 @@ pub(super) fn execute(
             } else {
                 Vec::new()
             };
-            let stock_status=book.execution_data.as_ref().map(|data|json!({"schema_version":data.schema_version,"days":data.suspensions.get(instrument),"capability":data.capabilities.get(&format!("{}:{instrument}",analytics_storage::tdx_status::RULE)),"not_a_complete_status_history":true}));
+            let stock_status=book.execution_data.as_ref().map(|data|json!({"schema_version":data.schema_version,"days":data.suspensions.get(instrument),"capability":data.capabilities.get(&format!("{}:{instrument}",analytics_storage::tdx_status::RULE)),"unavailable":data.capabilities.get(&format!("tdxaidata.gp29-unavailable-v1:{instrument}")),"not_a_complete_status_history":true}));
             details = json!({"instrument":instrument,"events":events,"source_failure":book.failures.get(instrument),"issues":book.execution_issues.iter().filter(|i| i.instrument == *instrument).map(|i| Ok(json!({"issue":i,"sha256":signature(i)?}))).collect::<Result<Vec<_>>>()?,"reconciliation_evidence":book.raw_sha256.get("reconciliation-v1.json"),"documents":documents,"stock_status":stock_status,"structured_fields":book.field_facts.get(instrument)});
         }
         WorkflowRequest::ReconcileActions {
@@ -108,6 +108,7 @@ pub(super) fn execute(
                 &request,
                 &staging,
             )?;
+            context.check()?;
             let output = w.resolve(format!("data/action-review-{}", run.id));
             fs::rename(staging, &output)?;
             data = Some(w.register(&output.join("actions.json"))?);

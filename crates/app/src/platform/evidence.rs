@@ -11,6 +11,9 @@ pub struct EvidenceTools {
     implementation: bool,
     recover_task: String,
     status_task: String,
+    manifests: String,
+    documents: Vec<serde_json::Value>,
+    field_name: String,
 }
 pub(super) fn controls(
     ui: &mut egui::Ui,
@@ -19,6 +22,12 @@ pub(super) fn controls(
     cancel_slot: &mut Option<Cancellation>,
 ) {
     ui.collapsing("证据维护：公告留存、批次恢复与修订草稿",|ui| {
+        ui.label("合并已核验公告manifest，每行一个；同一证券可追加选定文档，多个不同完整查询须分别审核。");
+        ui.text_edit_multiline(&mut state.platform.evidence_tools.manifests);
+        if ui.button("合并已核验证据").clicked() {
+            let manifests=state.platform.evidence_tools.manifests.lines().map(str::trim).filter(|s|!s.is_empty()).map(PathBuf::from).collect();
+            submit(state,worker,cancel_slot,WorkflowRequest::Evidence {request:EvidenceRequest::Combine {manifests}});
+        }
         ui.label("选定公告只补充该文档，不代表整段历史完整。原始版本与失败任务记录保留。");
         ui.horizontal(|ui| {
             if ui.button("查看所选版本证据缺口").clicked(){submit(state,worker,cancel_slot,WorkflowRequest::Evidence{request:EvidenceRequest::Status{actions:state.platform.actions.clone(),instrument:None,task:None}});}
@@ -55,8 +64,8 @@ pub(super) fn controls(
         });
         if ui.button("按原请求重试采集并复用检查点").clicked(){match state.platform.evidence_tools.recover_task.trim().parse(){Ok(task)=>submit(state,worker,cancel_slot,WorkflowRequest::Evidence{request:EvidenceRequest::Retry{task}}),Err(_)=>state.platform.error=Some("原采集任务ID无效".into())}}
         ui.horizontal(|ui| {
-            if ui.button("生成本证券修订草稿").clicked(){submit(state,worker,cancel_slot,WorkflowRequest::Evidence{request:EvidenceRequest::Draft{actions:state.platform.actions.clone(),request:None,instrument:Some(state.platform.action_review_instrument.clone()),evidence_manifest:Some(PathBuf::from(&state.platform.action_evidence_manifest))}});}
-            if ui.button("核验并迁移编辑中的修订").clicked(){match serde_json::from_str(&state.platform.action_review_editor){Ok(request)=>submit(state,worker,cancel_slot,WorkflowRequest::Evidence{request:EvidenceRequest::Draft{actions:state.platform.actions.clone(),request:Some(Box::new(request)),instrument:None,evidence_manifest:None}}),Err(e)=>state.platform.error=Some(e.to_string())}}
+            if ui.button("生成本证券修订草稿").clicked(){if !valid_task(state){return;}submit(state,worker,cancel_slot,WorkflowRequest::Evidence{request:EvidenceRequest::Draft{task:state.platform.evidence_tools.status_task.trim().parse().ok(),actions:state.platform.actions.clone(),request:None,instrument:Some(state.platform.action_review_instrument.clone()),evidence_manifest:Some(PathBuf::from(&state.platform.action_evidence_manifest))}});}
+            if ui.button("核验并迁移编辑中的修订").clicked(){if !valid_task(state){return;}match serde_json::from_str(&state.platform.action_review_editor){Ok(request)=>submit(state,worker,cancel_slot,WorkflowRequest::Evidence{request:EvidenceRequest::Draft{task:state.platform.evidence_tools.status_task.trim().parse().ok(),actions:state.platform.actions.clone(),request:Some(Box::new(request)),instrument:None,evidence_manifest:None}}),Err(e)=>state.platform.error=Some(e.to_string())}}
             if ui.button("载入已保存修订JSON").clicked() && let Some(path)=rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file(){match fs::read_to_string(path){Ok(text)=>state.platform.action_review_editor=text,Err(e)=>state.platform.error=Some(e.to_string())}}
         });
         let report=&state.platform.details;
@@ -83,6 +92,15 @@ pub(super) fn controls(
                     for entry in entries.iter().filter(|e|!e["coverage"]["historical_failure"].is_null()) {ui.label(format!("{}：{}",entry["coverage"]["instrument"],entry["coverage"]["historical_failure"]));}
                 });
             }
+            ui.collapsing("逐项补证清单",|ui| {
+                for item in current["checklist"].as_array().into_iter().flatten() {
+                    ui.collapsing(format!("{} · {} · {}",item["instrument"],item["kind"],item["required_fact"]),|ui| {
+                        ui.label(format!("区间：{}；已有证据：{}",item["dates"],item["existing_evidence"]));
+                        ui.label(format!("原因：{}；下一步：{}",item["reason"],item["next_action"]));
+                        ui.small("历史覆盖缺口不代表清单中的事件字段均缺失；须核验后分别判断。");
+                    });
+                }
+            });
             ui.collapsing("当前事件检查与补齐变化",|ui| { ui.label(format!("{}",current["checks"]));ui.label(format!("{}",current["comparison"])); });
         }
         ui.collapsing("完整历史覆盖审核",|ui| {
@@ -94,8 +112,9 @@ pub(super) fn controls(
         });
         if let Some(manifest)=details["manifest"].as_str() && ui.button("使用本次报告的公告manifest").clicked(){state.platform.action_evidence_manifest=manifest.into();}
         if let Some(draft)=details.get("draft_request") {
-            ui.label(format!("草稿校验：{}",details["validation"]));
-            if ui.button("将本次草稿载入修订编辑器").clicked(){state.platform.action_review_editor=serde_json::to_string_pretty(draft).unwrap_or_default();}
+            if draft_stale(details,&state.platform.actions,&state.platform.action_review_editor,&state.platform.evidence_tools.status_task) {ui.colored_label(egui::Color32::YELLOW,"草稿校验已过期或尚未载入：请载入后重新核验；发布始终再次验证。");} else {ui.label(format!("草稿校验：{}",details["validation"]));}
+            ui.collapsing("逐项校验结果",|ui|{for problem in details["validation"]["problems"].as_array().into_iter().flatten(){ui.label(format!("{} · {} · {}：{}",problem["instrument"],problem["field"],problem["kind"],problem["reason"]));}});
+            if ui.button("将本次草稿载入修订编辑器").clicked(){state.platform.action_review_editor=serde_json::to_string_pretty(draft).unwrap_or_default();state.platform.evidence_tools.documents=details["documents"].as_array().cloned().unwrap_or_default();}
         }
         ui.label("草稿不会发布新版本。核对逐字段引用后，使用下方“提交证据修订为新版本”；CLI 可直接使用报告中的 request_path。");
     });
@@ -110,10 +129,21 @@ fn report_stale(report: &serde_json::Value, actions: &str, task: &str, market: &
                 .is_some_and(|vs| !vs.is_empty() && !vs.iter().any(|v| v.as_str() == Some(market))))
 }
 /// Edit facts in the existing revision draft; publication still requires field evidence.
-pub(super) fn event_terms_editor(ui: &mut egui::Ui, editor: &mut String) {
+pub(super) fn event_terms_editor(
+    ui: &mut egui::Ui,
+    editor: &mut String,
+    tools: &mut EvidenceTools,
+) {
     let Ok(mut request) = serde_json::from_str::<serde_json::Value>(editor) else {
         return;
     };
+    if ui.button("新增换股事件草稿（事实待填写）").clicked() {
+        if let Some(events) = request["events"].as_array_mut() {
+            events.push(analytics_storage::corporate_actions::evidence::conversion_template(""));
+        }
+        request["schema_version"] = 4.into();
+        *editor = serde_json::to_string_pretty(&request).unwrap();
+    }
     let Some(events) = request["events"].as_array_mut() else {
         return;
     };
@@ -121,10 +151,15 @@ pub(super) fn event_terms_editor(ui: &mut egui::Ui, editor: &mut String) {
     ui.collapsing("迁码、换股与退市条款维护", |ui| {
         ui.small("这里维护事实，不写入模拟舍零或清算假设。修改后仍须补齐 fields 中的公告原文、文档ID和单位；发布会重新核验。");
         for (i, revision) in events.iter_mut().enumerate() {
-            let event = &mut revision["replacement"];
-            let kind = event["terms"]["kind"].as_str().unwrap_or("").to_owned();
+            let kind = revision["replacement"]["terms"]["kind"].as_str().unwrap_or("").to_owned();
             if !matches!(kind.as_str(), "conversion" | "delisting") { continue; }
             ui.push_id(i, |ui| {
+                let mut reason=revision["reason"].as_str().unwrap_or("").to_owned();
+                ui.label("审核理由");if ui.text_edit_singleline(&mut reason).changed(){revision["reason"]=reason.into();changed=true;}
+                let event = &mut revision["replacement"];
+                for (field,label) in [("instrument","原证券"),("id","事件ID"),("announced","方案披露日"),("record_date","权益登记日"),("ex_date","权益转换生效日"),("source","来源URL清单")] {
+                    let mut value=event[field].as_str().unwrap_or("").to_owned();ui.horizontal(|ui|{ui.label(label);if ui.text_edit_singleline(&mut value).changed(){event[field]=if value.trim().is_empty(){serde_json::Value::Null}else{value.into()};changed=true;}});
+                }
                 ui.label(format!("{} · {}", event["instrument"], kind));
                 for (field, label) in [("last_trade_date", "最后实际交易日"), ("successor", "后继证券"), ("ratio", "换股比例"), ("listing_date", "后继股份可交易日")] {
                     if kind == "delisting" && field != "last_trade_date" { continue; }
@@ -138,17 +173,128 @@ pub(super) fn event_terms_editor(ui: &mut egui::Ui, editor: &mut String) {
                     });
                 }
                 ui.small(format!("权益生效／终止日：{}；登记日：{}；公告：{}", event["ex_date"], event["record_date"], event["source"]));
+                // End the event borrow before editing sibling evidence fields.
+                let event_id=event["id"].clone();
+                let predecessor=event["instrument"].clone();
+                let successor=event["terms"]["successor"].clone();
+                if kind=="conversion" && revision.get("participants").is_none() && ui.button("添加有证据的参与方关联").clicked() {
+                    revision["participants"]=serde_json::json!({"event_id":event_id,"predecessor":{"instrument":predecessor,"name":"","identity":{"document_id":"","quote":"","unit":"issuer_identity"}},"successor":{"instrument":successor,"name":"","identity":{"document_id":"","quote":"","unit":"issuer_identity"}},"relationship":[]});
+                    changed=true;
+                }
+                if let Some(parties)=revision.get_mut("participants") {
+                    ui.collapsing("跨证券关联原文",|ui| {
+                        for key in ["predecessor","successor"] {
+                            ui.push_id(key,|ui| {
+                                ui.label(format!("{}：{}",key,parties[key]["instrument"]));
+                                let mut name=parties[key]["name"].as_str().unwrap_or("").to_owned();
+                                if ui.text_edit_singleline(&mut name).changed(){parties[key]["name"]=name.into();changed=true;}
+                                changed|=proof_editor(ui,&mut parties[key]["identity"],&tools.documents);
+                            });
+                        }
+                        if ui.button("添加双方交易关系引用").clicked(){parties["relationship"].as_array_mut().unwrap().push(serde_json::json!({"document_id":"","quote":"","unit":"conversion_relationship"}));changed=true;}
+                        for (j,proof) in parties["relationship"].as_array_mut().into_iter().flatten().enumerate(){ui.push_id(j,|ui|changed|=proof_editor(ui,proof,&tools.documents));}
+                    });
+                }
+                ui.collapsing("逐字段证据维护",|ui| {
+                    ui.horizontal(|ui|{ui.label("字段路径");ui.text_edit_singleline(&mut tools.field_name);
+                        if !tools.field_name.trim().is_empty() && ui.button("添加字段引用").clicked(){revision["fields"][tools.field_name.trim()]=serde_json::json!({"document_id":"","quote":"","unit":""});changed=true;}
+                    });
+                    for (path,proof) in revision["fields"].as_object_mut().into_iter().flatten(){ui.push_id(path,|ui|{ui.label(path);changed|=proof_editor(ui,proof,&tools.documents);});}
+                });
+
             });
         }
     });
     if changed {
+        request["schema_version"] = 4.into();
         *editor = serde_json::to_string_pretty(&request).unwrap();
+    }
+}
+
+fn proof_editor(
+    ui: &mut egui::Ui,
+    proof: &mut serde_json::Value,
+    documents: &[serde_json::Value],
+) -> bool {
+    let mut changed = false;
+    let mut id = proof["document_id"].as_str().unwrap_or("").to_owned();
+    egui::ComboBox::from_id_salt("proof_document")
+        .selected_text(if id.is_empty() {
+            "选择已采集文档"
+        } else {
+            &id
+        })
+        .show_ui(ui, |ui| {
+            for item in documents {
+                let d = item.get("document").unwrap_or(item);
+                if let Some(value) = d["id"].as_str() {
+                    changed |= ui
+                        .selectable_value(
+                            &mut id,
+                            value.to_owned(),
+                            format!("{} · {} · {}", d["instrument"], value, d["title"]),
+                        )
+                        .changed();
+                }
+            }
+        });
+    ui.horizontal(|ui| {
+        ui.label("文档ID");
+        changed |= ui.text_edit_singleline(&mut id).changed();
+    });
+    proof["document_id"] = id.clone().into();
+    for (key, label) in [("quote", "精确原文引用"), ("unit", "单位／含义")] {
+        let mut text = proof[key].as_str().unwrap_or("").to_owned();
+        ui.label(label);
+        let response = if key == "quote" {
+            ui.text_edit_multiline(&mut text)
+        } else {
+            ui.text_edit_singleline(&mut text)
+        };
+        if response.changed() {
+            proof[key] = text.into();
+            changed = true;
+        }
+    }
+    if let Some(item) = documents.iter().find(|v| v["document"]["id"] == id) {
+        ui.collapsing("查看原始提取文本", |ui| {
+            ui.label(item["extracted_text"].as_str().unwrap_or(""));
+        });
+    }
+    changed
+}
+
+fn draft_stale(report: &serde_json::Value, actions: &str, editor: &str, task: &str) -> bool {
+    report["actions"].as_str() != Some(actions)
+        || serde_json::from_str::<serde_json::Value>(editor)
+            .ok()
+            .as_ref()
+            != Some(&report["draft_request"])
+        || report["validation_receipt"]["task"].as_str().unwrap_or("") != task.trim()
+}
+
+fn valid_task(state: &mut AppState) -> bool {
+    let task = state.platform.evidence_tools.status_task.trim();
+    if !task.is_empty() && task.parse::<uuid::Uuid>().is_err() {
+        state.platform.error = Some("任务ID无效；请修正或清空后再核验草稿".into());
+        false
+    } else {
+        true
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn draft_receipt_expires_when_editor_actions_or_task_changes() {
+        let draft = serde_json::json!({"schema_version":4,"events":[]});
+        let report = serde_json::json!({"actions":"a1","draft_request":draft,"validation_receipt":{"task":"t1"}});
+        assert!(!draft_stale(&report, "a1", &draft.to_string(), "t1"));
+        assert!(draft_stale(&report, "a2", &draft.to_string(), "t1"));
+        assert!(draft_stale(&report, "a1", "{}", "t1"));
+        assert!(draft_stale(&report, "a1", &draft.to_string(), "t2"));
+    }
     #[test]
     fn changing_selected_context_marks_report_stale() {
         let report = serde_json::json!({"actions":"v1","current":{"task":"task1","market_versions":["m1"],"ready":true}});

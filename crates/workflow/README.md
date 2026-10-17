@@ -189,8 +189,18 @@ App 的后台文件元数据探针仅提示报告过期，正式任务仍验证�
 
 ## Corporate event research execution
 
-Independent backtest plans now use schema **2**, with required `execution.corporate_event_policy`: `evidence_only` or explicit `research_transitions`. Generate a new plan with current CLI/App; old plans are rejected rather than silently migrated. Training catalogue schema 5, weights and feature contracts are unchanged. Result schema is **20**, local service protocol **29**, execution dependencies schema **2**, and shared rights/company-event accounting is `rust-filled-trade-ledger-events-v3`.
+Independent backtest plans now use schema **2**, with required `execution.corporate_event_policy`: `evidence_only` or explicit `research_transitions`. Generate a new plan with current CLI/App; old plans are rejected rather than silently migrated. Training catalogue schema 5, weights and feature contracts are unchanged. Result schema is **20**, local service protocol **30**, execution dependencies schema **2**, and shared rights/company-event accounting is `rust-filled-trade-ledger-events-v3`.
 
 The shared adapter projects reviewed terminal/successor events, follows successor dependencies, and keeps earlier coverage requirements. Preflight freezes input checks and dependency hashes; execution verifies market/action bytes and these receipts without rebuilding coverage for every security. CLI task evidence status recomputes the same projection against its selected action version and frozen market/pool context. A migrated code does not splice normalized quotes; merger consideration never transfers model predictions or membership. Unsupported locked-successor events remain blocking.
 
 `corporate_event_report.json` records candidate and actually exposed events, floor loss at conversion, synthetic liquidation notional/fees and phase audit. Synthetic amounts remain separate from exchange fills and fees. Pending assets enter NAV, never available buying power.
+
+## 跨证券证据任务
+
+协议30扩展现有 Evidence 工作流：Combine 合并核验后的完整查询与选定文档，Draft 可绑定终结任务；状态报告格式3、当前依赖格式2和草稿报告格式3。补证清单区分当前覆盖与事件问题，缺少完整历史不能推断所有事件字段缺失。草稿输出 validation-receipt.json，绑定行动版本、请求、冻结任务及证据树；publish 始终重验，不消费孤立的通过标志。状态查询不联网；投影失败保留结构化阻断及其余独立检查，取消不会降级为普通数据问题。
+
+后继证券补采可通过修订4的 `structured_manifest` 引用已注册、完整核验的 HiThink 公司行动包；允许空 events/coverage_reviews 的纯附件修订。仅接受已有已发布事件指向、原包未查询过的后继证券，拒绝覆盖旧证券、无关证券、采集失败和未解决冲突；原文按哈希继承并在后续读取核验。可先用 `draft --request ... --task ...` 预览，再用原有 revise-actions 发布，不修改原任务和原模型。
+
+提交只核对行动 manifest 的规范签名（`ActionBundle::snapshot_content`），不在持有服务控制锁时重放全部证据；worker 仍通过 `ActionBundle::read` 与 acquisition 检查核验原始字节。快照身份不是准入结论，证据篡改必须在 worker 阻断，不能用元数据缓存替代完整核验。
+
+离线 ReconcileActions 将原生行动采集的 GP29 凭据一并交给存储层验证并冻结，沿用现有任务、取消和原子发布流程。停牌证明与事件历史覆盖分别判定；其用途仅为既有账户停牌估值，不改变因子输入。

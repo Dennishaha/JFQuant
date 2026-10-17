@@ -187,7 +187,7 @@ pub fn research_panel(
                 match ids { Ok(evidence_tasks) => submit(state,worker,cancel_slot,WorkflowRequest::ReconcileActions { actions:state.platform.actions.clone(), evidence_tasks, market:(!state.platform.market.is_empty()).then(||state.platform.market.clone()) }),Err(e)=>state.platform.error=Some(e.to_string()) }
             }
             ui.label("从运行结果查看原值、候选字段及公告。修订JSON必须包含原事件哈希、逐字段原文引用及理由。");
-            super::evidence::event_terms_editor(ui, &mut state.platform.action_review_editor);
+            super::evidence::event_terms_editor(ui, &mut state.platform.action_review_editor, &mut state.platform.evidence_tools);
             ui.add(egui::TextEdit::multiline(&mut state.platform.action_review_editor).desired_rows(8).desired_width(f32::INFINITY));
             if ui.button("提交证据修订为新版本").clicked(){match serde_json::from_str(&state.platform.action_review_editor){Ok(request)=>submit(state,worker,cancel_slot,WorkflowRequest::ReviseActions{actions:state.platform.actions.clone(),request}),Err(e)=>state.platform.error=Some(e.to_string())}}
         });

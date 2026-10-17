@@ -130,6 +130,7 @@ fn evaluate_current(
     let mut execution_scope = BTreeMap::<String, DateRange>::new();
     let mut adjustment_scope = BTreeMap::<String, Vec<DateRange>>::new();
     let mut projected = BTreeSet::new();
+    let mut projection_checks = vec![];
     let mut execution_policy = EventCheckPolicy::default();
     let mut adjustment_policy = EventCheckPolicy::default();
     let mut adjustment_blocking = true;
@@ -150,13 +151,14 @@ fn evaluate_current(
             if context["market_content_sha256"] != crate::market_content_hash(&request.data_root)? {
                 return Err("task market changed".into());
             }
-            let resolved = crate::research::backtest::execution::dependencies(
+            let (resolved, problems) = crate::research::backtest::execution::assess_dependencies(
                 &request,
                 &dataset,
                 Some(book),
                 &pool,
                 &range,
             )?;
+            projection_checks = problems;
             execution_scope = resolved.scope;
             projected = resolved.projected;
         }
@@ -196,6 +198,7 @@ fn evaluate_current(
         &projected,
         Some(&index),
     );
+    checks.extend(projection_checks);
     let mut entries = vec![];
     for (id, dates) in &execution_scope {
         TaskContext::current().check()?;
@@ -241,8 +244,9 @@ fn evaluate_current(
         .filter(|e| !e["coverage"]["historical_failure"].is_null())
         .filter_map(|e| e["coverage"]["instrument"].as_str())
         .collect();
+    let checklist = super::checklist::build(book, &entries, &checks)?;
     Ok(
-        json!({"schema_version":1,"task":task,"market_versions":market_versions,"context_hash":context_hash,"actions_signature":source_signature,"purpose":"action_dependencies_only","ready":blockers.is_empty(),"gap_count":gap_count,"blocking_check_count":blockers.len(),"affected_security_count":securities.len(),"historical_failure_security_count":historical.len(),"entries":entries,"checks":checks,"note":"仅诊断本任务公司行动依赖；完整训练/回测仍需重新准入，原任务报告不改写。"}),
+        json!({"schema_version":2,"checklist":checklist,"task":task,"market_versions":market_versions,"context_hash":context_hash,"actions_signature":source_signature,"purpose":"action_dependencies_only","ready":blockers.is_empty(),"gap_count":gap_count,"blocking_check_count":blockers.len(),"affected_security_count":securities.len(),"historical_failure_security_count":historical.len(),"entries":entries,"checks":checks,"note":"仅诊断本任务公司行动依赖；完整训练/回测仍需重新准入，原任务报告不改写。"}),
     )
 }
 
@@ -301,6 +305,12 @@ mod tests {
         assert_eq!(blocked["ready"], false);
         assert_eq!(blocked["affected_security_count"], 1);
         assert_eq!(blocked["gap_count"], 9);
+        let checklist = blocked["checklist"].as_array().unwrap();
+        assert_eq!(checklist.len(), 9);
+        assert!(checklist.iter().all(|p| p["kind"] == "missing_coverage"
+            && p["field_assessment"] == "not_assessed_by_coverage_gap"));
+        let repeated = evaluate(&w, task.id, &book, None, "version-b").unwrap();
+        assert_eq!(blocked["checklist"], repeated["checklist"]);
         assert_eq!(ready["context_hash"], blocked["context_hash"]);
         assert_ne!(ready["actions_signature"], blocked["actions_signature"]);
         assert_eq!(freeze(&w, task.id).unwrap(), before);

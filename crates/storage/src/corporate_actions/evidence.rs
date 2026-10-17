@@ -127,7 +127,7 @@ fn extract(path: &Path) -> io::Result<Value> {
     }
     serde_json::from_slice(&parsed.stdout).map_err(invalid)
 }
-fn capture_with(
+pub(super) fn capture_with(
     request: &CaptureRequest,
     output: &Path,
     context: &TaskContext,
@@ -448,6 +448,7 @@ mod tests {
             evidence_manifest: "announcements.json".into(),
             structured_manifest: None,
             events: vec![review::EventRevision {
+                participants: None,
                 original_id: None,
                 original_sha256: None,
                 replacement: event,
@@ -499,5 +500,200 @@ mod copy_tests {
         std::os::unix::fs::symlink(source.join("receipt.json"), source.join("linked.json"))
             .unwrap();
         assert!(copy_tree(&source, &t.path().join("linked")).is_err());
+    }
+}
+
+/// Editable conversion scaffold. Null facts must be reviewed before typed validation.
+pub fn conversion_template(instrument: &str) -> Value {
+    json!({"original_id":null,"original_sha256":null,"reason":"","fields":{},"replacement":{"id":null,"instrument":instrument,"announced":null,"record_date":null,"ex_date":null,"pay_date":null,"listing_date":null,"cash_per_share":"0","shares_per_share":"0","source":"","terms":{"kind":"conversion","category":"merger","last_trade_date":null,"successor":null,"ratio":null,"ordinary_holder":null,"retain_original":null,"cash":null,"pay_date":null,"listing_date":null,"reference":null,"allocation":null}}})
+}
+
+/// Combine authenticated captures, preserving at most one complete query context per issuer.
+/// Selected supplements add facts but cannot expand an existing complete query’s dates.
+pub fn combine(manifests: &[std::path::PathBuf], output: &Path) -> io::Result<Value> {
+    if manifests.len() < 2 {
+        return Err(invalid("combine requires at least two manifests"));
+    }
+    let mut shards = BTreeMap::<String, Value>::new();
+    let mut files = BTreeMap::<String, Vec<u8>>::new();
+    let mut inputs = vec![];
+    for manifest in manifests {
+        task_context_check()?;
+        review::verified_documents(manifest)?;
+        let bytes = fs::read(manifest)?;
+        inputs.push(json!({"manifest":manifest,"sha256":hash(&bytes)}));
+        let m: Value = serde_json::from_slice(&bytes).map_err(invalid)?;
+        let raw = manifest.parent().unwrap().join("raw");
+        for id in m["receipts"].as_object().unwrap().keys() {
+            let shard: Value = serde_json::from_slice(&fs::read(
+                raw.join(format!("{id}-actions-structured.json")),
+            )?)
+            .map_err(invalid)?;
+            let docs = shard["evidence"]["documents"].as_array().unwrap();
+            let mut names = vec![];
+            for d in docs {
+                for key in ["pdf", "text"] {
+                    names.push(d[key].as_str().unwrap().to_owned());
+                }
+            }
+            for r in shard["evidence"]["http_receipts"].as_array().unwrap() {
+                names.push(
+                    r["filename"]
+                        .as_str()
+                        .ok_or_else(|| invalid("HTTP filename missing"))?
+                        .to_owned(),
+                );
+            }
+            for name in names {
+                if Path::new(&name).file_name().and_then(|s| s.to_str()) != Some(&name) {
+                    return Err(invalid("unsafe_combine_file"));
+                }
+                let bytes = fs::read(raw.join(&name))?;
+                if files.get(&name).is_some_and(|old| old != &bytes) {
+                    return Err(invalid("combine_file_conflict"));
+                }
+                files.insert(name, bytes);
+            }
+            if let Some(old) = shards.get_mut(id) {
+                if *old == shard {
+                    continue;
+                }
+                let full = |v: &Value| v["evidence"]["pagination_complete"] == true;
+                if full(old) && full(&shard) {
+                    return Err(invalid(
+                        "combine_complete_query_conflict: review different full queries separately",
+                    ));
+                }
+                let (mut base, supplement) = if full(&shard) {
+                    (shard, old.clone())
+                } else {
+                    (old.clone(), shard)
+                };
+                for key in ["documents", "http_receipts"] {
+                    let target = base["evidence"][key].as_array_mut().unwrap();
+                    for item in supplement["evidence"][key].as_array().unwrap() {
+                        if target.contains(item) {
+                            continue;
+                        }
+                        if key == "documents" && target.iter().any(|d| d["id"] == item["id"]) {
+                            return Err(invalid("combine_document_identity_conflict"));
+                        }
+                        target.push(item.clone());
+                    }
+                }
+                *old = base;
+            } else {
+                shards.insert(id.clone(), shard);
+            }
+        }
+    }
+    let mut receipts = BTreeMap::new();
+    let mut documents = vec![];
+    for (id, shard) in &shards {
+        let bytes = serde_json::to_vec_pretty(shard).map_err(invalid)?;
+        receipts.insert(id, hash(&bytes));
+        files.insert(format!("{id}-actions-structured.json"), bytes);
+        documents.extend(
+            shard["evidence"]["documents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .cloned(),
+        );
+    }
+    let manifest = json!({"schema_version":2,"documents":documents,"receipts":receipts,"complete":{"status":"combined_verified_shards","native_collector":false,"full_history":false},"inputs":inputs});
+    fs::create_dir(output)?;
+    fs::create_dir(output.join("raw"))?;
+    for (name, bytes) in files {
+        task_context_check()?;
+        fs::write(output.join("raw").join(name), bytes)?;
+    }
+    write(&output.join("announcements.json"), &manifest)?;
+    review::verified_documents(&output.join("announcements.json"))?;
+    Ok(json!({"manifest":output.join("announcements.json"),"inputs":inputs,"full_history":false}))
+}
+
+#[cfg(test)]
+mod combine_tests {
+    use super::*;
+    use std::path::PathBuf;
+    fn capture(root: &Path, id: &str, instrument: &str) -> PathBuf {
+        let spec = DocumentSpec {
+            id: id.into(),
+            instrument: instrument.into(),
+            url: format!("https://example.org/{id}.pdf"),
+            announced: "2024-01-01".parse().unwrap(),
+            title: "Actual implementation".into(),
+            implementation: true,
+        };
+        let text = format!("{} Actual implementation", &instrument[2..]);
+        capture_with(
+            &CaptureRequest {
+                schema_version: 1,
+                documents: vec![spec],
+            },
+            root,
+            &TaskContext::default(),
+            |_, p| {
+                fs::write(p, b"%PDF-fixture")?;
+                Ok((200, Some(0)))
+            },
+            |_| Ok(json!({"text":text,"pypdf_version":"fixture"})),
+        )
+        .unwrap();
+        root.join("announcements.json")
+    }
+    #[test]
+    fn supplements_preserve_partial_status_and_full_query_conflicts_are_explicit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let a = capture(&root.join("a"), "first", "SH600000");
+        let b = capture(&root.join("b"), "second", "SH600000");
+        let c = capture(&root.join("c"), "receiver", "SZ000001");
+        let report = combine(&[a.clone(), b.clone(), c], &root.join("combined")).unwrap();
+        let docs =
+            review::verified_documents(Path::new(report["manifest"].as_str().unwrap())).unwrap();
+        assert_eq!(docs.len(), 3);
+        let shard: Value = serde_json::from_slice(
+            &fs::read(root.join("combined/raw/SH600000-actions-structured.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(shard["evidence"]["pagination_complete"], false);
+        assert_eq!(report["full_history"], false);
+        // Even identical PDFs may not silently combine two different complete query contexts.
+        for manifest in [&a, &b] {
+            let p = manifest
+                .parent()
+                .unwrap()
+                .join("raw/SH600000-actions-structured.json");
+            let mut shard: Value = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
+            shard["evidence"]["pagination_complete"] = true.into();
+            let bytes = serde_json::to_vec_pretty(&shard).unwrap();
+            fs::write(p, &bytes).unwrap();
+            let mut m: Value = serde_json::from_slice(&fs::read(manifest).unwrap()).unwrap();
+            m["receipts"]["SH600000"] = hash(&bytes).into();
+            write(manifest, &m).unwrap();
+        }
+        assert!(
+            combine(&[a, b], &root.join("bad"))
+                .unwrap_err()
+                .to_string()
+                .contains("combine_complete_query_conflict")
+        );
+        assert!(!root.join("bad").exists());
+    }
+    #[test]
+    fn cancellation_does_not_create_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = TaskContext::new(
+            uuid::Uuid::new_v4(),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            |_| {},
+        );
+        assert!(
+            ctx.execute(|| combine(&["a".into(), "b".into()], &tmp.path().join("cancelled")))
+                .is_err()
+        );
+        assert!(!tmp.path().join("cancelled").exists());
     }
 }

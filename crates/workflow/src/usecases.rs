@@ -80,7 +80,7 @@ pub(crate) fn version_metadata(workspace: &Workspace, id: &str, kind: &str) -> R
             &path,
         )?)?
     } else {
-        ActionBundle::version_content(&path)?
+        ActionBundle::snapshot_content(&path)?
     };
     if signature(&content)? != data.signature {
         return Err("registered data version changed; register it as a new version".into());

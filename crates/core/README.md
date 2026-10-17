@@ -79,3 +79,7 @@ ModelManifest继续读取格式2，并在格式3保留有序factor_refs和factor
 `corporate_account` supplies a Decimal account journal, embedded in `rights_account::Ledger` so native matching and Rust verification use the same implementation. `Policy::ResearchTransitions` is an explicit simulation choice: terminal raw-close liquidation after fills, same-interest code migration, floor merger conversion and locked successor claims. Reviewed `last_trade_date` is a fact; floor allocation and liquidation are not registrar evidence. Transitions preserve zero-exposure records, reject repeated/out-of-order phases, and commit account changes atomically. Current-date successor quotes alone may mark pending shares; missing quotes carry predecessor value after the disclosed fractional loss.
 
 Run `cargo test -p analytics-core`; acceptance includes final-close settlement, restore/repeat rejection, pre-existing successor positions, fractional loss and missing-current-quote valuation.
+
+登记机构尾数排序／同尾随机分配由 `Allocation::RankedRemainder` 保留事实引用；单账户无法从全体排序推导非整数获配，实际分配接口返回错误。`corporate_account::Policy::ResearchTransitions` 的舍零仍独立执行并披露，不改写登记机构事实。
+
+`Reference::Terminal` 表示原证券终止后不适用后续交易所参考价，仅适用于终止原证券的合并和退市。价格计算显式报错，不伪造不变价格；等待期账户估值继续由公司事件策略处理。

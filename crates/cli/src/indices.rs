@@ -102,6 +102,15 @@ pub(super) fn prepare(client: &Client, command: IndexCommand) -> Result<Action, 
                     version,
                     path: output,
                 },
+                IndexHistoryCommand::Compare { before, after } => H::Compare { before, after },
+                IndexHistoryCommand::Material { request, action } => H::Material {
+                    request: Box::new(read(&client.root, &request)?),
+                    action: read(&client.root, &action)?,
+                },
+                IndexHistoryCommand::Migrate { request, artifact } => H::Migrate {
+                    path: request,
+                    artifact,
+                },
                 IndexHistoryCommand::Capture {
                     url,
                     document_format,

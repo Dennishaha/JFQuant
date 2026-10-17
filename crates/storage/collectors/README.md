@@ -125,3 +125,6 @@ GP29确认停牌日且缺少原始日线/成交量为零时，在日频账户适
 公告全文查询与选定文档捕获共用 `extract_pdf_text`：PDF 上限64 MiB、4096页，拒绝加密PDF，逐页累计文本上限8 MiB。此上限覆盖大型合并报告，超限仍失败，不跳过候选或宣告覆盖完整。错误区分HTTP状态/主机、PDF头、字节、页数、加密及文本限制。历史查询解析器版本为 `cninfo-candidates-v10`。
 
 Large-document progress: report before each candidate download and after each32 extracted pages (including the final page). Progress reflects completed work; the native no-progress watchdog and cancellation remain enabled. The shared extractor accepts an optional progress callback; selected-document capture keeps its single JSON extraction response.
+
+
+历史成员图片提取使用锁定的`pypdf[image]==6.20.1`和Pillow：只读取PDF已有内嵌栅格，不增设整页渲染、OCR或联网解析。Rust保存原图与父PDF页/图片位置，人工核对记录独立存在；提取成功不代表名单事实或覆盖完整。

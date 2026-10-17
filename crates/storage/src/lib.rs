@@ -17,6 +17,8 @@ pub mod corporate_actions;
 pub mod daily;
 pub mod hithink;
 pub mod membership_history;
+pub mod membership_history_material;
+pub mod membership_history_migration;
 pub mod msci;
 pub mod qlib;
 pub mod tdx_status;

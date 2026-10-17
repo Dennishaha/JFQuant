@@ -19,6 +19,6 @@ for binary in "$app/Contents/MacOS/"* "$app/Contents/Frameworks/"*.dylib; do
 done
 
 "$app/Contents/Resources/python/bin/python3" -I -B "$(dirname "$0")/verify-python.py" "$app/Contents/Resources/python"
-env -i HOME=/tmp PATH=/usr/bin:/bin "$app/Contents/Resources/python/bin/python3" -I -B -c 'import requests,pandas,tdxaidata,jfquant_collectors; assert jfquant_collectors.PROTOCOL_VERSION==15'
+env -i HOME=/tmp PATH=/usr/bin:/bin "$app/Contents/Resources/python/bin/python3" -I -B -c 'import requests,pandas,tdxaidata,jfquant_collectors,PIL,pypdf; assert jfquant_collectors.PROTOCOL_VERSION==15'
 env -i HOME=/tmp PATH=/usr/bin:/bin "$app/Contents/Resources/python/bin/python3" -I -B -c 'import akquant,lightgbm,jfquant_research; assert akquant.__version__=="0.3.66"; assert lightgbm.__version__=="4.7.0"'
 env -i HOME=/tmp PATH=/usr/bin:/bin "$app/Contents/Resources/python/bin/python3" -I -B -c 'import akquant,hashlib,pathlib,sys; assert akquant.Engine().jfquant_rights_build()=="sha256:"+hashlib.sha256((pathlib.Path(sys.prefix)/"akquant-source.lock.json").read_bytes()).hexdigest()'

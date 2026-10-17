@@ -72,6 +72,27 @@ pub enum Operation {
         /// New output directory.
         path: PathBuf,
     },
+    /// Compare two current history previews under exactly the same requested task context.
+    Compare {
+        /// Earlier completed preview task.
+        before: uuid::Uuid,
+        /// Later completed preview task.
+        after: uuid::Uuid,
+    },
+    /// Local material registration, extraction or explicit human reading.
+    Material {
+        /// Current draft.
+        request: Box<Request>,
+        /// Selected operation.
+        action: crate::history_material::MaterialAction,
+    },
+    /// Explicit one-time v1 draft conversion; preserves the original file.
+    Migrate {
+        /// Workspace-relative v1 request/artifact file (not a runtime fallback).
+        path: PathBuf,
+        /// Explicitly choose a frozen artifact instead of a standalone request.
+        artifact: bool,
+    },
     /// Capture explicitly chosen source bytes; this is the only network operation.
     Capture {
         /// Original HTTPS URL.
@@ -200,6 +221,18 @@ pub(crate) fn freeze(w: &Workspace, op: &Operation) -> Result<Value> {
         Operation::Status { version } | Operation::Export { version, .. } => {
             Ok(json!({"artifact":w.history(version)?.signature}))
         }
+        Operation::Compare { before, after } => {
+            crate::history_diagnostics::snapshot(w, *before, *after)
+        }
+        Operation::Material { request, action } => {
+            crate::history_material::freeze(w, request, action)
+        }
+        Operation::Migrate { path, .. } => {
+            let bytes = fs::read(storage::document_path(&w.root, path)?)?;
+            Ok(
+                json!({"source_hash":storage::bytes_hash(&bytes),"source":serde_json::from_slice::<Value>(&bytes)?}),
+            )
+        }
         Operation::Capture { .. } => Ok(json!({"rules_version":RULES_VERSION})),
     }
 }
@@ -220,7 +253,7 @@ pub(crate) fn execute(
             let index: crate::indices::IndexVersion =
                 serde_json::from_value(frozen["index"].clone())?;
             Ok(
-                json!({"history_request":Request{schema_version:1,history:History{schema_version:1,official_code:index.config.definition.official_code,index_name:index.config.definition.name,identity:vec![],requested:range.clone(),anchors:vec![],events:vec![],reviews:vec![]},documents:vec![]},"ready":false,"purpose":"editable scaffold, no completeness inferred"}),
+                json!({"history_request":Request{schema_version:2,history:History{schema_version:2,official_code:index.config.definition.official_code,index_name:index.config.definition.name,identity:vec![],requested:range.clone(),anchors:vec![],events:vec![],reviews:vec![]},documents:vec![],transcriptions:vec![]},"ready":false,"purpose":"editable scaffold, no completeness inferred"}),
             )
         }
         Operation::Preview { .. } | Operation::Import { .. } | Operation::Publish { .. } => {
@@ -229,8 +262,37 @@ pub(crate) fn execute(
             let calendar: Vec<Date> = serde_json::from_value(frozen["calendar"].clone())?;
             let source_map: SourceMap = serde_json::from_value(frozen["source_map"].clone())?;
             let report = storage::verify(&w.root, &request, &calendar, &source_map, context)?;
-            let mut result = json!({"schema_version":1,"history_request":request,"history_report":report,"context_signature":signature(frozen)?,"ready":!report.segments.is_empty(),"facts_complete":report.missing_dates.is_empty(),"task_ready":report.missing_dates.is_empty() && calendar.iter().filter(|d|request.history.requested.contains(**d)).all(|d|report.segments.iter().any(|s|s.point_in_time_dates.contains(d))),"review_semantics":"evidence-backed attributed human completeness review; no automated semantic proof"});
+            let task_context = signature(&json!([
+                frozen["index"]["calculation_signature"],
+                frozen["market"],
+                frozen["calendar"],
+                frozen["source_map"],
+                request.history.requested,
+                RULES_VERSION
+            ]))?;
+            let integrity_failed = report.issues.iter().any(|i| {
+                matches!(
+                    i.reason.as_str(),
+                    "evidence_verification_failed"
+                        | "duplicate_document_id"
+                        | "image_review_binding_unverified"
+                )
+            });
+            let mut result = json!({"schema_version":2,"task_context_signature":task_context,"history_request":request,"history_report":report,"context_signature":signature(frozen)?,"ready":!integrity_failed && !report.segments.is_empty(),"facts_complete":report.missing_dates.is_empty(),"task_ready":!integrity_failed && report.missing_dates.is_empty() && calendar.iter().filter(|d|request.history.requested.contains(**d)).all(|d|report.segments.iter().any(|s|s.point_in_time_dates.contains(d))),"review_semantics":"evidence-backed attributed human completeness review; no automated semantic proof"});
             if let Operation::Publish { range, .. } = op {
+                if report.issues.iter().any(|i| {
+                    matches!(
+                        i.reason.as_str(),
+                        "evidence_verification_failed"
+                            | "duplicate_document_id"
+                            | "image_review_binding_unverified"
+                    )
+                }) {
+                    return Err(
+                        "history integrity/revision binding failed; inspect current diagnostics"
+                            .into(),
+                    );
+                }
                 let segment = report
                     .segments
                     .iter()
@@ -252,12 +314,12 @@ pub(crate) fn execute(
                     }
                     d.path = PathBuf::from(format!(
                         "evidence/{i}.{}",
-                        if d.format == "pdf" { "pdf" } else { "txt" }
+                        if d.format == "text" { "txt" } else { &d.format }
                     ));
                     fs::write(staging.join(&d.path), b)?;
                 }
                 let mut a = Artifact {
-                    schema_version: 1,
+                    schema_version: 2,
                     id: String::new(),
                     signature: String::new(),
                     index: serde_json::from_value(frozen["index"].clone())?,
@@ -316,15 +378,35 @@ pub(crate) fn execute(
             fs::rename(temp, dest)?;
             Ok(json!({"output":path,"history_version":version}))
         }
+        Operation::Compare { .. } => {
+            crate::history_diagnostics::compare(&frozen["before"], &frozen["after"])
+        }
+        Operation::Material { request, action } => {
+            crate::history_material::execute(w, request, action, run, context)
+        }
+        Operation::Migrate { path, artifact } => {
+            let request = if *artifact {
+                crate::history_migration::artifact_request(w, path, &frozen["source"])?
+            } else {
+                analytics_storage::membership_history_migration::migrate_v1(
+                    frozen["source"].clone(),
+                )?
+            };
+            let output = run.output.join("history-request-v2.json");
+            atomic_json(&w.resolve(&output), &request)?;
+            Ok(
+                json!({"schema_version":2,"history_request":request,"output":output,"source_hash":frozen["source_hash"],"ready":false,"pending":"per-security associations, image positions, review bindings and missing facts must be supplied; published artifacts require fresh preview/publication"}),
+            )
+        }
         Operation::Capture { url, format } => {
             let path = run.output.join(format!(
                 "history-original.{}",
-                if format == "pdf" { "pdf" } else { "txt" }
+                if format == "text" { "txt" } else { format }
             ));
             let mut d = storage::capture(url, format, &w.resolve(&path), context)?;
             d.path = path;
             Ok(
-                json!({"history_document":d,"retrieved_at":chrono::Utc::now(),"membership_verified":false,"complete_coverage_verified":false}),
+                json!({"schema_version":2,"download":"http_200_original_retained","material_status":analytics_storage::membership_history_material::inspect(&w.root,&d),"history_document":d,"retrieved_at":chrono::Utc::now(),"membership_verified":false,"complete_coverage_verified":false}),
             )
         }
     }
@@ -340,7 +422,7 @@ impl Workspace {
         }
         let root = self.resolve(format!(".jfquant/histories/{id}"));
         let a: Artifact = serde_json::from_slice(&fs::read(root.join("artifact.json"))?)?;
-        if a.schema_version != 1
+        if a.schema_version != 2
             || a.id != id
             || a.signature != artifact_signature(&a)?
             || format!("history-{}", &a.signature[7..]) != id
@@ -471,19 +553,29 @@ mod tests {
         fs::write(w.resolve("original.txt"), text).unwrap();
         let cite = || {
             vec![Citation {
+                transcription: None,
                 document: "source".into(),
                 excerpt: text.into(),
             }]
         };
         let r = Request {
-            schema_version: 1,
+            schema_version: 2,
             history: History {
-                schema_version: 1,
+                schema_version: 2,
                 official_code: "000300".into(),
                 index_name: "Fixture index".into(),
                 identity: cite(),
                 requested: range.clone(),
                 anchors: vec![Anchor {
+                    revision: 1,
+                    supersedes: None,
+                    correction: vec![],
+                    securities: vec![analytics_core::membership_history::SecurityEvidence {
+                        instrument: "SH600000".into(),
+                        name: "SH600000".into(),
+                        membership: cite(),
+                        identity: cite(),
+                    }],
                     id: "roster".into(),
                     at: Moment {
                         date: days[0],
@@ -495,6 +587,7 @@ mod tests {
                 }],
                 events: vec![],
                 reviews: vec![Review {
+                    outcome: analytics_core::membership_history::ReviewOutcome::Coverage,
                     id: "review".into(),
                     range,
                     categories: Category::all(),
@@ -503,6 +596,7 @@ mod tests {
                     citations: cite(),
                 }],
             },
+            transcriptions: vec![],
             documents: vec![storage::Document {
                 id: "source".into(),
                 path: "original.txt".into(),
@@ -510,6 +604,7 @@ mod tests {
                 source_url: "https://example.com/synthetic-history-fixture".into(),
                 format: "text".into(),
                 coverage_source: true,
+                derived_from: None,
             }],
         };
         (market.id, r)
@@ -683,5 +778,143 @@ mod tests {
         ctx.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         assert!(crate::execute(&w, &request, &run, &ctx).is_err());
         assert!(!w.resolve(".jfquant/histories").exists());
+    }
+    #[test]
+    fn history_image_review_and_multi_document_security_identity() {
+        use crate::history_material::MaterialAction;
+        let temp = tempfile::tempdir().unwrap();
+        let w = Workspace::open(temp.path()).unwrap();
+        let (market, mut r) = fixture(&w);
+        let bytes: &[u8] = &[
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 8, 0, 0, 0, 1,
+            8, 2, 0, 0, 0, 108, 98, 120, 20, 0, 0, 0, 12, 73, 68, 65, 84, 120, 156, 99, 248, 143,
+            3, 0, 0, 42, 252, 23, 233, 184, 254, 58, 40, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96,
+            130,
+        ];
+        fs::write(w.resolve("roster.png"), bytes).unwrap();
+        r.documents.push(storage::Document {
+            id: "raster".into(),
+            path: "roster.png".into(),
+            sha256: storage::bytes_hash(bytes),
+            source_url: "https://example.com/synthetic-roster.png".into(),
+            format: "png".into(),
+            coverage_source: false,
+            derived_from: None,
+        });
+        let image_cite = vec![Citation {
+            document: "raster".into(),
+            excerpt: "Member SH600000".into(),
+            transcription: Some("reading".into()),
+        }];
+        r.history.anchors[0].citations = image_cite.clone();
+        r.history.anchors[0].securities[0].membership = image_cite;
+        r.transcriptions.push(storage::Transcription {
+            id: "reading".into(),
+            document: "raster".into(),
+            sha256: storage::bytes_hash(bytes),
+            region: [0, 0, 8, 1],
+            text: "Member SH600000".into(),
+            reviewer: String::new(),
+            reviewed_at: None,
+            confirmed: false,
+            receipt: None,
+        });
+        let review = task(
+            &w,
+            Operation::Material {
+                request: Box::new(r),
+                action: MaterialAction::Review {
+                    transcription: "reading".into(),
+                    reviewer: "fixture reviewer".into(),
+                },
+            },
+        )
+        .unwrap();
+        let mut r: Request = serde_json::from_value(review["history_request"].clone()).unwrap();
+        let before = task(
+            &w,
+            Operation::Preview {
+                index: "builtin:csi300".into(),
+                market: market.clone(),
+                request: Box::new(r.clone()),
+            },
+        )
+        .unwrap();
+        assert_eq!(before["task_ready"], true);
+        let published = task(
+            &w,
+            Operation::Publish {
+                index: "builtin:csi300".into(),
+                market: market.clone(),
+                request: Box::new(r.clone()),
+                range: r.history.requested.clone(),
+            },
+        )
+        .unwrap();
+        assert!(
+            w.history(published["history_version"].as_str().unwrap())
+                .is_ok()
+        );
+        r.transcriptions[0].text.push('!');
+        let after = task(
+            &w,
+            Operation::Preview {
+                index: "builtin:csi300".into(),
+                market,
+                request: Box::new(r),
+            },
+        )
+        .unwrap();
+        assert_eq!(after["ready"], false);
+        let comparison = crate::history_diagnostics::compare(&before, &after).unwrap();
+        assert!(
+            !comparison["newly_unproven_dates"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let mut other = after.clone();
+        other["task_context_signature"] = json!("another task");
+        assert!(crate::history_diagnostics::compare(&before, &other).is_err());
+    }
+    #[test]
+    fn history_retired_content_failure_is_trace_but_tampering_blocks_publication() {
+        let temp = tempfile::tempdir().unwrap();
+        let w = Workspace::open(temp.path()).unwrap();
+        let (market, mut r) = fixture(&w);
+        fs::write(w.resolve("old.txt"), "<meta name=\"aliyun_waf_aa\">").unwrap();
+        r.documents.push(storage::Document {
+            id: "old".into(),
+            path: "old.txt".into(),
+            sha256: storage::bytes_hash(&fs::read(w.resolve("old.txt")).unwrap()),
+            source_url: "https://example.com/retired-source".into(),
+            format: "text".into(),
+            coverage_source: false,
+            derived_from: None,
+        });
+        let v = task(
+            &w,
+            Operation::Preview {
+                index: "builtin:csi300".into(),
+                market: market.clone(),
+                request: Box::new(r.clone()),
+            },
+        )
+        .unwrap();
+        assert_eq!(v["task_ready"], true);
+        assert!(!v["history_report"]["trace"].as_array().unwrap().is_empty());
+        fs::write(w.resolve("old.txt"), "changed original").unwrap();
+        assert!(
+            task(
+                &w,
+                Operation::Publish {
+                    index: "builtin:csi300".into(),
+                    market,
+                    range: r.history.requested.clone(),
+                    request: Box::new(r)
+                }
+            )
+            .is_err()
+        );
     }
 }

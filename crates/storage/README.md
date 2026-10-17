@@ -250,12 +250,23 @@ CNY 价格指数。HiThink 接受确切供应商代码（或转换明确的 SH/S
 `DailyDataset::index_config` 从所选快照解析定义，不读取可编辑目录。
 验收：`cargo test -p analytics-storage runtime_index`；TDX fixture 见 `collectors/tests/test_tdx.py`。
 
-本次指数接入格式已收敛：AdjustmentRecord 仅接受格式4（`index_input` 必填，普通证券及内置目录指数显式为 null，自定义指数冻结完整合同）；SourceMap 仅接受格式2，指数无可下单证券身份；CollectionRequest 必须显式包含 `index_inputs`（可为空对象）。正常读取不升级旧版本、不猜测缺失字段。旧快照只作历史留存，显式离线转换后必须以新内容哈希重新登记，原始响应及采集器身份不得改写成当前版本。服务协议36、采集协议15拒绝旧检查点；格式更新不等于来源准入通过。
+本次指数接入格式已收敛：AdjustmentRecord 仅接受格式4（`index_input` 必填，普通证券及内置目录指数显式为 null，自定义指数冻结完整合同）；SourceMap 仅接受格式2，指数无可下单证券身份；CollectionRequest 必须显式包含 `index_inputs`（可为空对象）。正常读取不升级旧版本、不猜测缺失字段。旧快照只作历史留存，显式离线转换后必须以新内容哈希重新登记，原始响应及采集器身份不得改写成当前版本。服务协议37、采集协议15拒绝旧检查点；格式更新不等于来源准入通过。
 
 ## 历史成员原文核验
 
-`membership_history::Request`格式1分开事实与文件。`verify`校验原文SHA256、精确引用（仅归一化空白）、指数名称及官方代码、证券身份及完整性来源，再调用Core。审核是有明确归属的人工判断，不宣称自动理解公告语义。`coverage_source`只能标识实际覆盖来源，单份名单不能证明多日无变更。
+`membership_history::Request`格式2分开事实与文件。`verify`校验原文SHA256、精确引用（仅归一化空白）、指数名称及官方代码、证券身份及完整性来源，再调用Core。审核是有明确归属的人工判断，不宣称自动理解公告语义。`coverage_source`只能标识实际覆盖来源，单份名单不能证明多日无变更。
 
 原文路径限工作区普通文件，拒绝绝对路径、上跳和符号链接。`capture`仅显式调用时复用有界HTTPS传输下载PDF或UTF-8文本，不跟随重定向或推断覆盖。PDF复用安装包提取器，不需要外部Python或定制脚本。
 
 数据流：原文及引用 → 字节/身份核验 → 重建报告 → Workflow发布。验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow membership_history --lib`。
+
+
+### 资料与人工核对 v2
+
+`membership_history_material`分开原文完整性、正文提取与事实核验。HTTPS捕获保留原始字节；HTTP 200的防护页、登录页和空正文不是可引用资料。支持text、pdf、png、jpeg；PDF沿用包内pypdf提取正文和内嵌栅格，不增加整页渲染器。`DerivedFrom`绑定原PDF、页码（1起）和图片位置（0起），发布/读取重新提取比对。包内`pypdf[image]`依赖锁定Pillow。
+
+`Transcription`保存原图哈希、原始像素区域`[x,y,width,height]`、内容、审核人、时间、确认及内容收据。收据用于检测绑定变化，不是外部电子签名，也不自动证明原图语义；原图、区域、文字或审核信息变化都必须重新核对。收据同时绑定来源URL、父PDF哈希、页码和图片标识；把相同图片移到另一页也不能沿用旧审核。原始文件、提取文本及人工录入分别保存/返回哈希。名称和代码可由多文件证明，但必须逐证券明确关联并通过日期身份核验。
+
+`membership_history_migration::migrate_v1`是独立一次性迁移入口，正常读取绝不调用。保留原事实，不补造证券关联、图片定位、审核或发布时间；新草稿必须补证并重新预览/发布。原文篡改仍是当前阻断；未被当前事实引用的旧正文失败保存在追溯区。
+
+验收：`cargo test -p analytics-storage membership_history --lib`。依赖锁复现：`uv pip compile crates/storage/collectors/requirements.in --python-version 3.12 --python-platform aarch64-apple-darwin --generate-hashes -o crates/storage/collectors/requirements.lock`。

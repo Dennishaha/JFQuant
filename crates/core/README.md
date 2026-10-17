@@ -111,11 +111,11 @@ Core 仅校验结构和内置身份约束，不读文件、不联网；具体接
 SourceMap 明确读取格式1（既有交易所身份）及格式2（指数没有股票执行身份），无格式猜测。
 验收：`cargo test -p analytics-core indices`，工作区版本与冻结验收见 workflow。
 
-本次指数接入格式已收敛：AdjustmentRecord 仅接受格式4（`index_input` 必填，普通证券及内置目录指数显式为 null，自定义指数冻结完整合同）；SourceMap 仅接受格式2，指数无可下单证券身份；CollectionRequest 必须显式包含 `index_inputs`（可为空对象）。正常读取不升级旧版本、不猜测缺失字段。旧快照只作历史留存，显式离线转换后必须以新内容哈希重新登记，原始响应及采集器身份不得改写成当前版本。服务协议36、采集协议15拒绝旧检查点；格式更新不等于来源准入通过。
+本次指数接入格式已收敛：AdjustmentRecord 仅接受格式4（`index_input` 必填，普通证券及内置目录指数显式为 null，自定义指数冻结完整合同）；SourceMap 仅接受格式2，指数无可下单证券身份；CollectionRequest 必须显式包含 `index_inputs`（可为空对象）。正常读取不升级旧版本、不猜测缺失字段。旧快照只作历史留存，显式离线转换后必须以新内容哈希重新登记，原始响应及采集器身份不得改写成当前版本。服务协议37、采集协议15拒绝旧检查点；格式更新不等于来源准入通过。
 
 ## 历史指数成员重建
 
-`membership_history` 提供格式1的完整名单、原子变更批次、区间完整性审核及报告，规则版本`membership-history-1`。仅向前重建；更正链显式指定；重复事件幂等。`unspecified`边界不能推断。使用既有A股交易日历，可知时间按北京时间09:30开盘核验。事实覆盖与当时可知分别报告。
+`membership_history` 提供格式2的完整名单、原子变更批次、区间完整性审核及报告，规则版本`membership-history-2`。仅向前重建；更正链显式指定；重复事件幂等。`unspecified`边界不能推断。使用既有A股交易日历，可知时间按北京时间09:30开盘核验。事实覆盖与当时可知分别报告。
 
 `PoolExpression::History { version }`引用不可变历史，继续输出`PoolMembership`。普通手工增删不代表证据审核。Core不读文件或联网。
 
@@ -130,3 +130,14 @@ flowchart LR
 同一事件修订出现矛盾生效日期时，保留所有冲突边界，从最早受影响交易日起阻断；反向导入得到相同结果，不能用后写记录裁决。
 
 验收：`cargo test -p analytics-core history_`。
+
+
+## 历史成员补证合同 v2
+
+`membership_history` 保持纯逻辑：`resolve_revisions`先按稳定ID及显式替代链选择当前名单/事件，再由`reconstruct`检查批次、快照、类别覆盖和事前可知时间。请求内History、Report为格式2，规则`membership-history-2`；不接受格式1。旧修订缺项进入`trace`，同修订冲突、断链及循环仍阻断对应链。更正使用当前修订自己的`known_at`，不继承旧时间。
+
+`SecurityEvidence`逐证券关联名单名称与代码证明；`Citation.transcription`区分原文和人工图片核对。Core不读取文件或把人工声明当作文件核验。`ReviewOutcome`区分区间完整性、该次有变化、该次明确无变化及尚未核实；单次审议最多覆盖对应开盘日的Review类别，不覆盖临时事件。报告的`subject`、`range`、`categories`、`evidence`及`next_action`共同构成补证清单；诊断数量不等于缺失交易日。
+
+冻结日历必须覆盖锚点及中间交易日，不能把推出前锚点直接映射成缺少中间历史的日历首日。
+
+验收：`cargo test -p analytics-core membership_history --lib`，包括更正旧缺项、晚公布更正、循环链、单次无变化越界与范围外事件。

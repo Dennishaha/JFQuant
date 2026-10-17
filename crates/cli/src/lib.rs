@@ -163,6 +163,28 @@ pub enum IndexHistoryCommand {
         version: String,
         output: PathBuf,
     },
+    /// Compare two current preview jobs without changing the requested range.
+    Compare {
+        #[arg(long)]
+        before: uuid::Uuid,
+        #[arg(long)]
+        after: uuid::Uuid,
+    },
+    /// Local material operation from a structured MaterialAction JSON file.
+    Material {
+        #[arg(long)]
+        request: PathBuf,
+        #[arg(long)]
+        action: PathBuf,
+    },
+    /// Explicit one-time draft migration; writes a new job output, preserving the source.
+    Migrate {
+        #[arg(long)]
+        request: PathBuf,
+        /// Explicitly migrate a frozen v1 artifact, verifying its signature and originals.
+        #[arg(long)]
+        artifact: bool,
+    },
     Capture {
         #[arg(long)]
         url: String,

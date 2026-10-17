@@ -1,4 +1,4 @@
-当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议36、采集协议15、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
+当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议37、采集协议15、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
 
 # analytics-cli / jfquant
 
@@ -105,7 +105,7 @@ DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli
 
 ## 单因子有效性批量测试
 
-`jfquant --workspace /path/to/workspace factors evaluate --request evaluation.json` 提交服务协议36
+`jfquant --workspace /path/to/workspace factors evaluate --request evaluation.json` 提交服务协议37
 的独立测试任务，后续沿用jobs查询、取消和结果读取。请求示例（路径相对工作区）：
 
 ```json
@@ -315,3 +315,37 @@ target/debug/jfquant --workspace WORKSPACE indices history capture --url https:/
 草稿的details.history_request保存为工作区history.json。原文路径相对工作区；导出后的history.json路径则相对导出目录，import负责重定位。validate与preview共用校验。发布返回pool_definition，经现有pools create保存后用于研究。文件字段id/path/sha256/source_url/format/coverage_source；未知时间使用null，未知边界使用unspecified，不能填造日期。本功能不连接付费MSCI API。
 
 验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli history_cli --lib`。
+
+
+### 历史成员补证 v2
+
+所有操作使用共享worker；结构化文件均为工作区相对路径。以下命令返回后台任务ID，使用`jobs wait ID --timeout 60`读取持久化结果：
+
+```sh
+jfquant --workspace /research indices history migrate --request history-v1.json
+jfquant --workspace /research indices history material --request history-v2.json --action material-action.json
+jfquant --workspace /research indices history capture --url https://example.com/roster.png --document-format png
+jfquant --workspace /research indices history preview --index INDEX --market MARKET --request history-v2.json
+jfquant --workspace /research indices history compare --before PREVIEW_TASK --after PREVIEW_TASK
+```
+
+`migrate`明确仅接收格式1，输出新`history-request-v2.json`并保留旧文件；缺少的逐证券证明、定位和审核不会自动生成。正常命令仅接收格式2。新产物重新发布，旧任务保留。迁移冻结产物时显式增加`--artifact --request .jfquant/histories/OLD_ID/artifact.json`，先核对旧签名和证据哈希，再生成待补的新请求；不能信任旧报告放行。
+
+`material-action.json`可分别使用：
+
+```json
+{"action":"inspect","document":null}
+```
+```json
+{"action":"register","id":"roster","path":"original.png","url":"https://example.com/roster.png","format":"png"}
+```
+```json
+{"action":"extract","document":"pdf","page":1,"image":0,"format":"jpeg"}
+```
+```json
+{"action":"review","transcription":"reading-1","reviewer":"审核人"}
+```
+
+每次材料操作返回新的`history_request`，并在`output`指向的任务目录保存`history-request-v2.json`，可直接复制为下一步草稿；原草稿不原地修改。先在请求`transcriptions`填写原图ID、哈希、像素区域和录入文字，再显式review。人工含义确认不替代名单、生效时间或完整事件链。单个可信来源可用；不新增事前可知时间放行方式。补证清单见`history_report.issues`，历史失败在`trace`。
+
+验收：`cargo test -p analytics-cli indices --lib`；包内离线迁移/图片/PDF/发布/股票池闭环使用`bash crates/app/packaging/verify-history.sh /path/JFQuant.app /tmp/history-check`。

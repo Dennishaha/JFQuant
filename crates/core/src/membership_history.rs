@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Reconstruction semantics included in every frozen artifact.
-pub const RULES_VERSION: &str = "membership-history-1";
+pub const RULES_VERSION: &str = "membership-history-2";
 /// Market boundary; an after-close state first applies at the next trading open.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
@@ -29,6 +29,9 @@ pub struct Moment {
 impl Moment {
     /// First applicable trading open in the supplied complete calendar.
     pub fn opening(&self, calendar: &[Date]) -> Option<Date> {
+        if self.date < *calendar.first()? {
+            return None;
+        }
         calendar.iter().copied().find(|d| match self.boundary {
             Boundary::Unspecified => false,
             Boundary::BeforeOpen => *d >= self.date,
@@ -44,11 +47,62 @@ pub struct Citation {
     pub document: String,
     /// Exact excerpt, allowing whitespace normalization only.
     pub excerpt: String,
+    /// Reviewed image transcription, or None for original text.
+    pub transcription: Option<String>,
+}
+/// Explicit identity association; different documents may prove name and code.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SecurityEvidence {
+    /// Internal date-effective instrument.
+    pub instrument: String,
+    /// Name appearing in the membership document and identity reference.
+    pub name: String,
+    /// Membership/name references.
+    pub membership: Vec<Citation>,
+    /// References jointly associating this name with its exchange code.
+    pub identity: Vec<Citation>,
+}
+/// Outcome of one identified periodic review, never a whole-quarter assertion.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ReviewOutcome {
+    /// Existing range/category completeness assessment.
+    Coverage,
+    /// A periodic review has identified changes, bound to event IDs.
+    Changes {
+        /// Named periodic review.
+        review_id: String,
+        /// Verified effective boundary.
+        at: Moment,
+        /// Exact current event IDs.
+        events: BTreeSet<String>,
+    },
+    /// Explicit evidence states no membership changes for this review only.
+    NoChange {
+        /// Named periodic review.
+        review_id: String,
+        /// Verified effective boundary.
+        at: Moment,
+    },
+    /// Unverified material cannot supply any coverage.
+    Unverified {
+        /// Named periodic review still requiring evidence.
+        review_id: String,
+    },
 }
 /// A fully enumerated roster at an explicit boundary.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Anchor {
+    /// Explicit revision, starting at one.
+    pub revision: u32,
+    /// Preceding revision explicitly replaced.
+    pub supersedes: Option<u32>,
+    /// References explaining this correction; required after revision one.
+    pub correction: Vec<Citation>,
+    /// Per-security identity associations.
+    pub securities: Vec<SecurityEvidence>,
     /// Stable identity.
     pub id: String,
     /// Membership state boundary.
@@ -93,6 +147,10 @@ impl Category {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Event {
+    /// References explaining this correction; required after revision one.
+    pub correction: Vec<Citation>,
+    /// Per-security identity associations.
+    pub securities: Vec<SecurityEvidence>,
     /// Stable event identity; identical repeats are idempotent.
     pub id: String,
     /// Explicit revision number.
@@ -116,6 +174,8 @@ pub struct Event {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Review {
+    /// Scope and result; periodic observations do not establish interim coverage.
+    pub outcome: ReviewOutcome,
     /// Stable review identity.
     pub id: String,
     /// Reviewed effective trading-date interval.
@@ -133,7 +193,7 @@ pub struct Review {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct History {
-    /// Format 1 only.
+    /// Format 2 only.
     pub schema_version: u32,
     /// Publisher's index identifier, verified against the selected configuration.
     pub official_code: String,
@@ -153,6 +213,8 @@ pub struct History {
 /// Stable structured issue, shared by all clients.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Issue {
+    /// Logical object independent of diagnostic ID formatting.
+    pub subject: String,
     /// Stable subject/category identifier.
     pub id: String,
     /// Diagnostic category.
@@ -163,6 +225,10 @@ pub struct Issue {
     pub range: Option<DateRange>,
     /// Suggested corrective action.
     pub next_action: String,
+    /// Evidence references already supplied for this subject.
+    pub evidence: Vec<String>,
+    /// Missing event categories, when diagnosing continuity.
+    pub categories: BTreeSet<Category>,
 }
 /// One continuously proven interval, independently publishable.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -175,7 +241,7 @@ pub struct Segment {
 /// Factual coverage, completeness and point-in-time readiness remain separate.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Report {
-    /// Format 1.
+    /// Format 2.
     pub schema_version: u32,
     /// Rules contract.
     pub rules_version: String,
@@ -187,10 +253,13 @@ pub struct Report {
     pub missing_dates: BTreeSet<Date>,
     /// Independent diagnostic issues.
     pub issues: Vec<Issue>,
+    /// Superseded deficiencies retained separately from current blockers.
+    pub trace: Vec<Issue>,
 }
 /// Append a stable issue without erasing other independently discoverable problems.
 pub fn issue(issues: &mut Vec<Issue>, subject: &str, reason: &str, range: Option<DateRange>) {
     issues.push(Issue {
+        subject: subject.into(),
         id: format!(
             "{subject}:{reason}:{}",
             range
@@ -200,12 +269,179 @@ pub fn issue(issues: &mut Vec<Issue>, subject: &str, reason: &str, range: Option
         reason: reason.into(),
         details: None,
         range,
-        next_action:
-            "provide_verified_identity_boundary_or_complete_source_and_reconcile_conflicts".into(),
+        next_action: match reason {
+            "anchor_effective_boundary_unverified" | "event_effective_boundary_unverified" => {
+                "link_evidence_for_explicit_open_or_close_boundary"
+            }
+            "anchor_precedes_frozen_calendar" => {
+                "select_frozen_calendar_covering_anchor_and_intervening_sessions"
+            }
+            "point_in_time_unverified" => "link_original_publication_time_before_task_open",
+            "missing_event_categories" => {
+                "review_complete_delivery_for_listed_range_and_categories"
+            }
+            "evidence_verification_failed" => {
+                "restore_original_bytes_or_register_verified_new_document"
+            }
+            "identity_or_citation_unverified" => {
+                "associate_verified_index_identity_and_exact_references"
+            }
+            "security_identity_or_roster_reference_unverified" => {
+                "associate_each_member_name_and_date_effective_code"
+            }
+            "revision_chain_invalid" => {
+                "resolve_conflicting_revision_and_explicit_correction_references"
+            }
+            "capture_content_unusable" => {
+                "capture_actual_document_body_or_supply_verified_original"
+            }
+            _ => "inspect_subject_evidence_and_resolve_reported_conflict",
+        }
+        .into(),
+        evidence: vec![],
+        categories: BTreeSet::new(),
     });
+}
+/// Deterministic revision selection shared by reconstruction and evidence verification.
+pub struct ResolvedHistory {
+    /// Only unique current revisions (unresolved chains remain invalid).
+    pub history: History,
+    /// Structural revision conflicts.
+    pub issues: Vec<Issue>,
+    /// Superseded semantic deficiencies, never current approvals.
+    pub trace: Vec<Issue>,
+    /// Logical subjects whose revision chain cannot be used.
+    pub invalid: BTreeSet<String>,
+}
+/// Select first, then validate semantics. No file or hash failure is erased here.
+pub fn resolve_revisions(history: &History) -> ResolvedHistory {
+    fn select<T: Clone + PartialEq>(
+        items: &[T],
+        fields: impl Fn(&T) -> (&str, u32, Option<u32>, &[Citation], &Moment),
+        issues: &mut Vec<Issue>,
+        trace: &mut Vec<Issue>,
+        invalid: &mut BTreeSet<String>,
+    ) -> Vec<T> {
+        let mut grouped = BTreeMap::<&str, BTreeMap<u32, &T>>::new();
+        for item in items {
+            let (id, revision, _, _, _) = fields(item);
+            if let Some(old) = grouped.entry(id).or_default().insert(revision, item)
+                && old != item
+            {
+                invalid.insert(id.to_owned());
+            }
+        }
+        let mut selected = vec![];
+        for (id, versions) in grouped {
+            let mut previous = None;
+            for (revision, item) in &versions {
+                let (_, _, supersedes, correction, _) = fields(item);
+                if *revision == 0
+                    || previous.is_none() && *revision != 1
+                    || supersedes != previous
+                    || previous.is_some() && correction.is_empty()
+                {
+                    invalid.insert(id.to_owned());
+                }
+                previous = Some(*revision);
+            }
+            if invalid.contains(id) {
+                issue(issues, id, "revision_chain_invalid", None);
+                selected.extend(items.iter().filter(|i| fields(i).0 == id).cloned());
+            } else if let Some((last, current)) = versions.last_key_value() {
+                selected.push((*current).clone());
+                for (revision, old) in &versions {
+                    if revision != last {
+                        let (_, _, _, _, at) = fields(old);
+                        issue(
+                            trace,
+                            &format!("{id}@{revision}"),
+                            "superseded_revision",
+                            Some(DateRange {
+                                start: at.date,
+                                end: at.date,
+                            }),
+                        );
+                        if at.boundary == Boundary::Unspecified {
+                            issue(
+                                trace,
+                                &format!("{id}@{revision}"),
+                                "superseded_boundary_unverified",
+                                Some(DateRange {
+                                    start: at.date,
+                                    end: at.date,
+                                }),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        selected
+    }
+    let mut resolved = ResolvedHistory {
+        history: history.clone(),
+        issues: vec![],
+        trace: vec![],
+        invalid: BTreeSet::new(),
+    };
+    resolved.history.anchors = select(
+        &history.anchors,
+        |a| (&a.id, a.revision, a.supersedes, &a.correction, &a.at),
+        &mut resolved.issues,
+        &mut resolved.trace,
+        &mut resolved.invalid,
+    );
+    resolved.history.events = select(
+        &history.events,
+        |e| (&e.id, e.revision, e.supersedes, &e.correction, &e.at),
+        &mut resolved.issues,
+        &mut resolved.trace,
+        &mut resolved.invalid,
+    );
+    resolved
 }
 fn known_before_open(known: Option<DateTime<Utc>>, day: Date) -> bool {
     known.is_some_and(|k| k <= day.and_hms_opt(1, 30, 0).unwrap().and_utc())
+}
+fn failure_day(at: &Moment, calendar: &[Date]) -> Option<Date> {
+    if at.date < calendar[0] {
+        return None;
+    }
+    at.opening(calendar)
+        .or_else(|| calendar.iter().copied().find(|d| *d >= at.date))
+}
+fn anchor_context(
+    a: &Anchor,
+    calendar: &[Date],
+    issues: &mut Vec<Issue>,
+    conflicted: &mut BTreeSet<Date>,
+) {
+    if a.at.boundary == Boundary::Unspecified {
+        issue(
+            issues,
+            &a.id,
+            "anchor_effective_boundary_unverified",
+            Some(DateRange {
+                start: a.at.date,
+                end: a.at.date,
+            }),
+        );
+        if let Some(day) = failure_day(&a.at, calendar) {
+            conflicted.insert(day);
+        }
+    }
+    if a.at.date < calendar[0] {
+        issue(
+            issues,
+            &a.id,
+            "anchor_precedes_frozen_calendar",
+            Some(DateRange {
+                start: a.at.date,
+                end: calendar[0],
+            }),
+        );
+    }
 }
 fn index_anchors(
     history: &History,
@@ -217,7 +453,11 @@ fn index_anchors(
     let mut anchors = BTreeMap::<Date, Anchor>::new();
     let mut conflicted = BTreeSet::new();
     for a in &history.anchors {
+        anchor_context(a, calendar, issues, &mut conflicted);
         if invalid.contains(&a.id) {
+            if let Some(d) = failure_day(&a.at, calendar) {
+                conflicted.insert(d);
+            }
             continue;
         }
         if a.id.is_empty()
@@ -228,6 +468,9 @@ fn index_anchors(
                 .any(|id| crate::pool::validate_instrument(id).is_err())
         {
             issue(issues, &a.id, "invalid_anchor", None);
+            if let Some(day) = failure_day(&a.at, calendar) {
+                conflicted.insert(day);
+            }
             continue;
         }
         if let Some(old) = seen.insert(a.id.clone(), a.clone())
@@ -258,16 +501,6 @@ fn index_anchors(
             } else {
                 anchors.insert(day, a.clone());
             }
-        } else if a.at.boundary == Boundary::Unspecified {
-            issue(
-                issues,
-                &a.id,
-                "anchor_effective_boundary_unverified",
-                Some(DateRange {
-                    start: a.at.date,
-                    end: a.at.date,
-                }),
-            );
         }
     }
     (anchors, conflicted)
@@ -302,10 +535,7 @@ fn index_events(
             // Keep both boundaries: the conflicting revision must not be resolved
             // by import order, even when the retained variant takes effect later.
             for at in [&old.at, &e.at] {
-                if let Some(day) = at
-                    .opening(calendar)
-                    .or_else(|| calendar.iter().copied().find(|d| *d >= at.date))
-                {
+                if let Some(day) = failure_day(at, calendar) {
                     bad_days.insert(day);
                 }
             }
@@ -326,26 +556,10 @@ fn index_events(
     }
     let mut batches = BTreeMap::<Date, Vec<Event>>::new();
     for (id, versions) in revisions {
-        let mut prev = None;
-        if versions
-            .first_key_value()
-            .is_some_and(|(revision, _)| *revision != 1)
-        {
-            bad_events.insert(id.clone());
-        }
-        for e in versions.values() {
-            if e.supersedes != prev {
-                bad_events.insert(id.clone());
-            }
-            prev = Some(e.revision);
-        }
         if bad_events.contains(&id) {
             issue(issues, &id, "event_invalid_or_revision_conflict", None);
             for e in versions.values() {
-                if let Some(day) =
-                    e.at.opening(calendar)
-                        .or_else(|| calendar.iter().copied().find(|d| *d >= e.at.date))
-                {
+                if let Some(day) = failure_day(&e.at, calendar) {
                     bad_days.insert(day);
                 }
             }
@@ -357,11 +571,12 @@ fn index_events(
     }
     (batches, bad_days)
 }
-fn valid_reviews<'a>(
-    history: &'a History,
+fn valid_reviews(
+    history: &History,
+    calendar: &[Date],
     invalid: &BTreeSet<String>,
     issues: &mut Vec<Issue>,
-) -> Vec<&'a Review> {
+) -> Vec<Review> {
     let mut reviews = vec![];
     let mut review_ids = BTreeMap::new();
     let mut bad_reviews = BTreeSet::new();
@@ -388,10 +603,112 @@ fn valid_reviews<'a>(
                 Some(r.range.clone()),
             );
         } else {
-            reviews.push(*r);
+            match &r.outcome {
+                ReviewOutcome::Coverage => reviews.push((*r).clone()),
+                ReviewOutcome::Unverified { .. } => issue(
+                    issues,
+                    &r.id,
+                    "periodic_review_unverified",
+                    Some(r.range.clone()),
+                ),
+                ReviewOutcome::NoChange { review_id, at }
+                | ReviewOutcome::Changes { review_id, at, .. } => {
+                    let events: BTreeSet<_> = history
+                        .events
+                        .iter()
+                        .filter(|e| e.category == Category::Review && e.at == *at)
+                        .map(|e| e.id.clone())
+                        .collect();
+                    let correct = match &r.outcome {
+                        ReviewOutcome::NoChange { .. } => events.is_empty(),
+                        ReviewOutcome::Changes {
+                            events: expected, ..
+                        } => !expected.is_empty() && *expected == events,
+                        _ => false,
+                    };
+                    if review_id.trim().is_empty()
+                        || at.boundary == Boundary::Unspecified
+                        || !r.range.contains(at.date)
+                        || !correct
+                    {
+                        issue(
+                            issues,
+                            &r.id,
+                            "periodic_review_conflict",
+                            Some(DateRange {
+                                start: at.opening(calendar).unwrap_or(at.date),
+                                end: at.opening(calendar).unwrap_or(at.date),
+                            }),
+                        );
+                    } else if let Some(day) = at.opening(calendar) {
+                        let mut scoped = (*r).clone();
+                        scoped.range = DateRange {
+                            start: day,
+                            end: day,
+                        };
+                        scoped.categories = BTreeSet::from([Category::Review]);
+                        reviews.push(scoped);
+                    }
+                }
+            }
         }
     }
     reviews
+}
+fn coverage_issues(report: &mut Report, dates: &[Date], reviews: &[Review], history: &History) {
+    let mut gaps: Vec<(DateRange, BTreeSet<Category>)> = vec![];
+    let mut last_missing = false;
+    for day in dates {
+        if !report.missing_dates.contains(day) {
+            last_missing = false;
+            continue;
+        }
+        let covered: BTreeSet<_> = reviews
+            .iter()
+            .filter(|r| r.range.contains(*day))
+            .flat_map(|r| r.categories.iter().copied())
+            .collect();
+        let missing = Category::all()
+            .difference(&covered)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if last_missing
+            && let Some((range, categories)) = gaps.last_mut()
+            && *categories == missing
+        {
+            range.end = *day;
+        } else {
+            gaps.push((
+                DateRange {
+                    start: *day,
+                    end: *day,
+                },
+                missing,
+            ));
+        }
+        last_missing = true;
+    }
+    for (range, categories) in gaps {
+        issue(
+            &mut report.issues,
+            "coverage",
+            if categories.is_empty() {
+                "missing_verified_anchor_or_event_chain"
+            } else {
+                "missing_event_categories"
+            },
+            Some(range),
+        );
+        report.issues.last_mut().unwrap().categories = categories;
+    }
+    if !report.missing_dates.is_empty() {
+        issue(
+            &mut report.issues,
+            "coverage",
+            "incomplete_event_chain_or_anchor",
+            Some(history.requested.clone()),
+        );
+    }
 }
 /// Reconstruct only from verified subjects. Storage excludes subjects with invalid evidence.
 pub fn reconstruct(
@@ -399,7 +716,7 @@ pub fn reconstruct(
     calendar: &[Date],
     invalid: &BTreeSet<String>,
 ) -> Result<Report, String> {
-    if history.schema_version != 1
+    if history.schema_version != 2
         || history.requested.start > history.requested.end
         || calendar.is_empty()
         || calendar.windows(2).any(|w| w[0] >= w[1])
@@ -414,17 +731,30 @@ pub fn reconstruct(
     if dates.is_empty() {
         return Err("history has no requested trading dates".into());
     }
+    let resolved = resolve_revisions(history);
+    let history = &resolved.history;
+    let invalid: &BTreeSet<String> = &invalid.union(&resolved.invalid).cloned().collect();
     let mut report = Report {
-        schema_version: 1,
+        schema_version: 2,
         rules_version: RULES_VERSION.into(),
         requested: history.requested.clone(),
         segments: vec![],
         missing_dates: dates.iter().copied().collect(),
-        issues: vec![],
+        issues: resolved.issues,
+        trace: resolved.trace,
     };
     let (anchors, conflicted) = index_anchors(history, calendar, invalid, &mut report.issues);
-    let (batches, bad_days) = index_events(history, calendar, invalid, &mut report.issues);
-    let reviews = valid_reviews(history, invalid, &mut report.issues);
+    let (batches, mut bad_days) = index_events(history, calendar, invalid, &mut report.issues);
+    let reviews = valid_reviews(history, calendar, invalid, &mut report.issues);
+    for r in &report.issues {
+        if r.reason == "periodic_review_conflict"
+            && let Some(range) = &r.range
+            && range.start >= calendar[0]
+            && let Some(day) = calendar.iter().copied().find(|d| *d >= range.start)
+        {
+            bad_days.insert(day);
+        }
+    }
     // Independently start each anchor. A later complete anchor can establish a new segment.
     let ordered: Vec<_> = anchors.iter().collect();
     let mut proven = BTreeMap::<Date, (BTreeSet<String>, bool)>::new();
@@ -457,7 +787,7 @@ pub fn reconstruct(
             *d >= **first && *d <= history.requested.end && next.is_none_or(|n| *d <= n)
         }) {
             if day > **first {
-                if bad_days.contains(&day) {
+                if bad_days.contains(&day) || conflicted.contains(&day) {
                     chain = false;
                 }
                 if let Some(events) = batches.get(&day) {
@@ -507,7 +837,9 @@ pub fn reconstruct(
                 }
             }
             if next == Some(day) {
-                if members != ordered[i + 1].1.members || conflicted.contains(&day) {
+                // A checkpoint can contradict a proven chain, not an already broken one.
+                // Unknown changes inside a later gap do not invalidate the proven prefix.
+                if chain && (members != ordered[i + 1].1.members || conflicted.contains(&day)) {
                     candidate.clear();
                     issue(
                         &mut report.issues,
@@ -582,14 +914,7 @@ pub fn reconstruct(
             );
         }
     }
-    if !report.missing_dates.is_empty() {
-        issue(
-            &mut report.issues,
-            "coverage",
-            "incomplete_event_chain_or_anchor",
-            Some(history.requested.clone()),
-        );
-    }
+    coverage_issues(&mut report, &dates, &reviews, history);
     report.issues.sort_by(|a, b| a.id.cmp(&b.id));
     report.issues.dedup();
     Ok(report)
@@ -608,13 +933,14 @@ mod tests {
     }
     fn citations() -> Vec<Citation> {
         vec![Citation {
+            transcription: None,
             document: "original".into(),
             excerpt: "original".into(),
         }]
     }
     fn fixture() -> History {
         History {
-            schema_version: 1,
+            schema_version: 2,
             official_code: "746059".into(),
             index_name: "Index".into(),
             identity: citations(),
@@ -623,6 +949,10 @@ mod tests {
                 end: d("2021-10-12"),
             },
             anchors: vec![Anchor {
+                revision: 1,
+                supersedes: None,
+                correction: vec![],
+                securities: vec![],
                 id: "a".into(),
                 at: Moment {
                     date: d("2021-09-30"),
@@ -634,6 +964,7 @@ mod tests {
             }],
             events: vec![],
             reviews: vec![Review {
+                outcome: ReviewOutcome::Coverage,
                 id: "r".into(),
                 range: DateRange {
                     start: d("2021-09-30"),
@@ -648,6 +979,8 @@ mod tests {
     }
     fn event() -> Event {
         Event {
+            correction: vec![],
+            securities: vec![],
             id: "e".into(),
             revision: 1,
             supersedes: None,
@@ -747,6 +1080,7 @@ mod tests {
         let mut corrected = e.clone();
         corrected.revision = 2;
         corrected.supersedes = Some(1);
+        corrected.correction = citations();
         corrected.add = BTreeSet::from(["SZ000002".into()]);
         h.events = vec![corrected.clone(), e.clone()];
         assert!(run(&h).missing_dates.is_empty());
@@ -802,5 +1136,136 @@ mod tests {
                 .iter()
                 .any(|i| i.reason == "anchor_effective_boundary_unverified")
         );
+    }
+    #[test]
+    fn history_superseded_missing_boundary_and_late_correction() {
+        let mut h = fixture();
+        let mut old = event();
+        old.at.boundary = Boundary::Unspecified;
+        let mut corrected = old.clone();
+        corrected.revision = 2;
+        corrected.supersedes = Some(1);
+        corrected.correction = citations();
+        corrected.at.boundary = Boundary::AfterClose;
+        corrected.known_at = Some("2021-10-11T10:00:00Z".parse().unwrap());
+        h.events = vec![old, corrected];
+        let r = run(&h);
+        assert!(r.missing_dates.is_empty());
+        assert!(
+            !r.issues
+                .iter()
+                .any(|i| i.reason == "event_effective_boundary_unverified")
+        );
+        assert!(
+            r.trace
+                .iter()
+                .any(|i| i.reason == "superseded_boundary_unverified")
+        );
+        assert!(!r.segments[0].point_in_time_dates.contains(&d("2021-10-08")));
+        assert!(r.segments[0].point_in_time_dates.contains(&d("2021-10-12")));
+        let mut corrected = h.anchors[0].clone();
+        h.anchors[0].at.boundary = Boundary::Unspecified;
+        corrected.revision = 2;
+        corrected.supersedes = Some(1);
+        corrected.correction = citations();
+        h.anchors.push(corrected);
+        assert!(run(&h).missing_dates.is_empty());
+    }
+    #[test]
+    fn history_no_change_only_covers_named_review_not_interim_range() {
+        let mut h = fixture();
+        h.reviews[0].outcome = ReviewOutcome::NoChange {
+            review_id: "quarter".into(),
+            at: h.anchors[0].at.clone(),
+        };
+        assert_eq!(run(&h).missing_dates.len(), 3);
+        h.reviews[0].outcome = ReviewOutcome::Unverified {
+            review_id: "quarter".into(),
+        };
+        assert!(
+            run(&h)
+                .issues
+                .iter()
+                .any(|i| i.reason == "periodic_review_unverified")
+        );
+        h.reviews[0].outcome = ReviewOutcome::NoChange {
+            review_id: "quarter".into(),
+            at: event().at,
+        };
+        h.events.push(event());
+        assert!(
+            run(&h)
+                .issues
+                .iter()
+                .any(|i| i.reason == "periodic_review_conflict")
+        );
+    }
+    #[test]
+    fn history_cyclic_and_broken_anchor_revision_cannot_supersede() {
+        let mut h = fixture();
+        let mut a = h.anchors[0].clone();
+        a.revision = 2;
+        a.supersedes = Some(2);
+        a.correction = citations();
+        h.anchors.push(a);
+        assert!(run(&h).segments.is_empty());
+        assert!(
+            run(&h)
+                .issues
+                .iter()
+                .any(|i| i.reason == "revision_chain_invalid")
+        );
+    }
+    #[test]
+    fn history_calendar_cannot_jump_from_prelaunch_anchor_to_first_available_session() {
+        let mut h = fixture();
+        h.anchors[0].at.date = d("2021-08-31");
+        let r = run(&h);
+        assert!(r.segments.is_empty());
+        assert!(
+            r.issues
+                .iter()
+                .any(|i| i.reason == "anchor_precedes_frozen_calendar")
+        );
+    }
+    #[test]
+    fn history_invalid_prior_calendar_subject_does_not_poison_new_complete_anchor() {
+        let mut h = fixture();
+        let mut e = event();
+        e.at.date = d("2021-08-31");
+        e.at.boundary = Boundary::Unspecified;
+        h.events.push(e);
+        let mut old = h.anchors[0].clone();
+        old.id = "prior".into();
+        old.at.date = d("2021-08-31");
+        old.at.boundary = Boundary::Unspecified;
+        h.anchors.push(old);
+        let r = reconstruct(
+            &h,
+            &calendar(),
+            &BTreeSet::from(["prior".into(), "e".into()]),
+        )
+        .unwrap();
+        assert!(r.missing_dates.is_empty());
+        assert!(
+            r.issues
+                .iter()
+                .any(|i| i.reason == "anchor_effective_boundary_unverified")
+        );
+    }
+    #[test]
+    fn history_later_gap_and_changed_checkpoint_preserve_proven_prefix() {
+        let mut h = fixture();
+        h.reviews[0].range.end = d("2021-10-08");
+        let mut later = h.anchors[0].clone();
+        later.id = "after-gap".into();
+        later.at.date = d("2021-10-12");
+        later.members = BTreeSet::from(["SZ000001".into()]);
+        h.anchors.push(later);
+        let r = run(&h);
+        assert_eq!(r.segments.len(), 2);
+        assert_eq!(r.segments[0].membership.coverage.end, d("2021-10-08"));
+        assert_eq!(r.segments[1].membership.coverage.start, d("2021-10-12"));
+        assert_eq!(r.missing_dates, BTreeSet::from([d("2021-10-11")]));
     }
 }

@@ -264,6 +264,7 @@ dependencies = [
  "chrono",
  "encoding_rs",
  "flate2",
+ "image",
  "parquet",
  "rustix 1.1.5",
  "serde",
@@ -2615,6 +2616,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]

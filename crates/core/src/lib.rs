@@ -18,6 +18,7 @@ pub mod corporate_account;
 pub mod execution;
 pub mod indices;
 pub mod market_rules;
+pub mod membership_history;
 pub mod pool;
 pub mod research_quality;
 pub mod rights;

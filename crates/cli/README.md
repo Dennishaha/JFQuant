@@ -1,6 +1,17 @@
-当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议33、采集协议15、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
+当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议36、采集协议15、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
 
 # analytics-cli / jfquant
+
+## MSCI 官方收盘采集
+
+配置可填写 `{"msci":"746059"}` 映射，明确 CNY、price 与官方代码。目录中口径未确认的身份不可重定义，可沿用具体变体 `msci_a50_cny_price`。使用 `indices validate/import` 保存新版本后执行：
+
+```sh
+jfquant --workspace "$JFQUANT_WORKSPACE" indices collect-msci "$INDEX_VERSION" --calendar-market "$MARKET_VERSION" --start 2021-09-17 --end 2026-10-12
+jfquant --workspace "$JFQUANT_WORKSPACE" jobs wait "$TASK_ID"
+```
+
+命令显式联网并返回后台任务ID，参考市场日历必须覆盖请求；无需 Python 或密钥。仅提供指数收盘，历史成员与股票行情仍执行原准入检查。列表、结构校验、配置导入保持离线。验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli msci --lib`。
 
 独立clap命令行客户端，和App共用同一工作区服务。stdout只输出JSON，长任务立即返回
 `task_id`；jobs命令用于等待、读取状态、日志、结果和取消。无需打开GUI或运行Codex。
@@ -94,7 +105,7 @@ DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli
 
 ## 单因子有效性批量测试
 
-`jfquant --workspace /path/to/workspace factors evaluate --request evaluation.json` 提交服务协议33
+`jfquant --workspace /path/to/workspace factors evaluate --request evaluation.json` 提交服务协议36
 的独立测试任务，后续沿用jobs查询、取消和结果读取。请求示例（路径相对工作区）：
 
 ```json
@@ -286,3 +297,21 @@ JSON 使用 `IndexConfig` 格式1（App 可生成示例）；禁止附加脚本�
 目前适配器支持 CNY 价格指数；TDX 使用 SH/SZ/BJ 代码，HiThink 可指定其确切指数代码。
 行情、当前成分、历史成员是独立能力，无法通过配置添加新的供应商接口。
 验收：`cargo test -p analytics-cli runtime_indices`。
+
+## 通用历史成分重建
+
+`indices history`提交共享后台任务，用`jobs wait ID`读取最终details。草稿、预览、状态离线，只有capture联网。
+
+```sh
+target/debug/jfquant --workspace WORKSPACE indices history draft --index INDEX_VERSION --market MARKET_VERSION --start 2021-09-17 --end 2026-10-12
+target/debug/jfquant --workspace WORKSPACE indices history preview --index INDEX_VERSION --market MARKET_VERSION --request history.json
+target/debug/jfquant --workspace WORKSPACE indices history publish --index INDEX_VERSION --market MARKET_VERSION --request history.json --start PROVEN_START --end PROVEN_END
+target/debug/jfquant --workspace WORKSPACE indices history status HISTORY_VERSION
+target/debug/jfquant --workspace WORKSPACE indices history export HISTORY_VERSION exported-history
+target/debug/jfquant --workspace WORKSPACE indices history import --index INDEX_VERSION --market MARKET_VERSION exported-history/history.json
+target/debug/jfquant --workspace WORKSPACE indices history capture --url https://example.org/original.pdf --document-format pdf
+```
+
+草稿的details.history_request保存为工作区history.json。原文路径相对工作区；导出后的history.json路径则相对导出目录，import负责重定位。validate与preview共用校验。发布返回pool_definition，经现有pools create保存后用于研究。文件字段id/path/sha256/source_url/format/coverage_source；未知时间使用null，未知边界使用unspecified，不能填造日期。本功能不连接付费MSCI API。
+
+验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli history_cli --lib`。

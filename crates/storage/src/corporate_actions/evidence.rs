@@ -116,7 +116,7 @@ fn download(spec: &DocumentSpec, path: &Path) -> io::Result<(u16, Option<i32>)> 
         response.status.code(),
     ))
 }
-fn extract(path: &Path) -> io::Result<Value> {
+pub(crate) fn extract(path: &Path) -> io::Result<Value> {
     let parsed = crate::transport::curl(
         Command::new(crate::collector::runtime()?)
             .args(["-I", "-B", "-c", EXTRACT])

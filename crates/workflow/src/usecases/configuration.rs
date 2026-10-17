@@ -12,6 +12,9 @@ pub(super) fn execute(
         WorkflowRequest::Index { request: operation } => {
             use crate::indices::IndexOperation;
             details = match operation {
+                IndexOperation::History { request } => {
+                    crate::membership_history::execute(w, request, run, context)?
+                }
                 IndexOperation::Import { .. } => {
                     let config = serde_json::from_value(run.request["index_import"].clone())?;
                     context.check()?;
@@ -48,6 +51,26 @@ pub(super) fn execute(
                     context.check()?;
                     atomic_json(&w.resolve(path), &v.config)?;
                     json!({"output":path,"index_version":v})
+                }
+                IndexOperation::CollectMsci {
+                    version,
+                    calendar_market,
+                    start,
+                    end,
+                } => {
+                    let output = crate::indices::collect_msci(
+                        w,
+                        run,
+                        version,
+                        calendar_market,
+                        analytics_core::DateRange {
+                            start: *start,
+                            end: *end,
+                        },
+                        context,
+                    )?;
+                    data = output.data;
+                    output.details
                 }
                 IndexOperation::Verify {
                     provider,

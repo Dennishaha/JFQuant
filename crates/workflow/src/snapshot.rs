@@ -35,6 +35,12 @@ pub fn snapshot(workspace: &Workspace, request: &WorkflowRequest) -> Result<Valu
         _ => {}
     };
     let versions = match request {
+        WorkflowRequest::Index {
+            request:
+                crate::indices::IndexOperation::CollectMsci {
+                    calendar_market, ..
+                },
+        } => vec![version_metadata(workspace, calendar_market, "market")?],
         WorkflowRequest::Evidence { request } => request
             .actions()
             .map(|id| version_metadata(workspace, id, "actions"))
@@ -103,6 +109,12 @@ pub fn snapshot(workspace: &Workspace, request: &WorkflowRequest) -> Result<Valu
     };
     let mut frozen = json!({"request":request,"inputs":versions,"app_version":env!("CARGO_PKG_VERSION"),"formula_version":formula_version,"pool_definition": match request { WorkflowRequest::Research{template,..}|WorkflowRequest::TrainResearch{template,..} if !template.pool_version.starts_with("builtin:") && !template.pool_version.starts_with("index:") => Some(workspace.pool(&template.pool_version)?), _ => None }});
     if let WorkflowRequest::Index {
+        request: crate::indices::IndexOperation::History { request: operation },
+    } = request
+    {
+        frozen["membership_history"] = crate::membership_history::freeze(workspace, operation)?;
+    }
+    if let WorkflowRequest::Index {
         request: crate::indices::IndexOperation::Import { path },
     } = request
     {
@@ -128,6 +140,30 @@ pub fn snapshot(workspace: &Workspace, request: &WorkflowRequest) -> Result<Valu
         frozen["index_adapter_signature"] = serde_json::json!(
             analytics_storage::collector::index_adapter_signature(*provider)
         );
+    }
+    if let WorkflowRequest::Index {
+        request:
+            crate::indices::IndexOperation::CollectMsci {
+                version,
+                calendar_market,
+                start,
+                end,
+            },
+    } = request
+    {
+        let v = workspace.index(version)?;
+        analytics_storage::msci::validate(&v.config)?;
+        let market = version_metadata(workspace, calendar_market, "market")?;
+        let ds = analytics_storage::daily::DailyDataset::open(workspace.resolve(market.path))?;
+        analytics_storage::msci::calendar(
+            &ds.calendar,
+            &analytics_core::DateRange {
+                start: *start,
+                end: *end,
+            },
+        )?;
+        frozen["index_version"] = serde_json::to_value(v)?;
+        frozen["index_adapter_signature"] = json!(analytics_storage::msci::signature());
     }
     if let WorkflowRequest::BacktestPredictions { source, .. } = request {
         let root = workspace.resolve(format!(".jfquant/runs/{source}"));

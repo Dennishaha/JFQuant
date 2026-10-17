@@ -23,6 +23,11 @@ pub struct IndexVersion {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum IndexOperation {
+    /// Shared history maintenance; never implies a paid MSCI API request.
+    History {
+        /// Explicit operation and frozen input facts.
+        request: Box<crate::membership_history::Operation>,
+    },
     /// Builtin seeds and all immutable workspace versions.
     List,
     /// Validate and save a new immutable version.
@@ -60,6 +65,18 @@ pub enum IndexOperation {
         /// Also acquire observation-date members, never historical backfill.
         current_members: bool,
     },
+    /// Capture official MSCI CNY price closes using a frozen market's exchange calendar.
+    /// This source supplies neither OHLC nor member history.
+    CollectMsci {
+        /// Immutable index configuration containing an exact `msci` mapping.
+        version: String,
+        /// Registered market supplying the task's exchange calendar.
+        calendar_market: String,
+        /// First requested date.
+        start: Date,
+        /// Last requested date.
+        end: Date,
+    },
 }
 fn locator_key(provider: &str, code: &str) -> String {
     if provider == "hithink" {
@@ -88,14 +105,7 @@ impl Workspace {
     pub fn save_index(&self, config: IndexConfig) -> Result<IndexVersion> {
         config.validate()?;
         for p in config.mappings.keys() {
-            validate_index(
-                &config,
-                match p.as_str() {
-                    "hithink" => Provider::Hithink,
-                    "tdxaidata" => Provider::Tdxaidata,
-                    _ => return Err("unsupported index adapter".into()),
-                },
-            )?;
+            analytics_storage::collector::validate_index_mapping(&config, p)?;
         }
         for existing in self.indices()? {
             if existing.config.definition.id != config.definition.id
@@ -233,6 +243,40 @@ pub fn collection(
     };
     r.validate()?;
     Ok(r)
+}
+
+pub(crate) fn collect_msci(
+    w: &Workspace,
+    run: &crate::RunRecord,
+    version: &str,
+    calendar_market: &str,
+    range: analytics_core::DateRange,
+    context: &analytics_core::task::TaskContext,
+) -> Result<crate::WorkflowOutcome> {
+    let v = w.index(version)?;
+    if serde_json::to_value(&v)? != run.request["index_version"]
+        || run.request["index_adapter_signature"] != analytics_storage::msci::signature()
+    {
+        return Err("frozen MSCI index or adapter changed".into());
+    }
+    let reference = crate::usecases::version(w, calendar_market, "market")?;
+    let ds = analytics_storage::daily::DailyDataset::open(w.resolve(&reference.path))?;
+    let staging = w.resolve(format!(".jfquant/staging/msci-{}", run.id));
+    let root =
+        analytics_storage::msci::collect(&v.config, &range, &ds.calendar, &staging, context)?;
+    let mut source: serde_json::Value =
+        serde_json::from_slice(&fs::read(staging.join("jfquant_source.json"))?)?;
+    source["calendar_reference"] = serde_json::json!({"market":reference.id,"signature":reference.signature,"calendar_sha256":crate::signature(&ds.calendar)?});
+    atomic_json(&staging.join("jfquant_source.json"), &source)?;
+    let report: serde_json::Value =
+        serde_json::from_slice(&fs::read(staging.join("report.json"))?)?;
+    let relative = root.strip_prefix(&staging)?.to_owned();
+    context.check()?;
+    let output = w.resolve(format!("data/msci-index-{}", run.id));
+    fs::rename(staging, &output)?;
+    let data = Some(w.register(&output.join(relative))?);
+    let details = serde_json::json!({"schema_version":1,"index_version":v,"provider":"msci","adapter_signature":analytics_storage::msci::signature(),"requested":range,"calendar_market":calendar_market,"report":report,"historical_members_supported":false});
+    Ok(crate::WorkflowOutcome { data, details })
 }
 
 #[cfg(test)]
@@ -374,5 +418,53 @@ mod tests {
         let portable: IndexConfig =
             serde_json::from_slice(&fs::read(w.resolve("portable-index.json")).unwrap()).unwrap();
         assert_eq!(w.save_index(portable).unwrap().id, id);
+    }
+    #[test]
+    fn msci_task_freezes_calendar_config_and_adapter_without_network_queries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let w = Workspace::open(tmp.path()).unwrap();
+        let (market, _, _) = crate::demo::create(&w).unwrap();
+        let mut c = custom();
+        c.definition.official_code = "746059".into();
+        c.mappings = BTreeMap::from([("msci".into(), "746059".into())]);
+        let index = w.save_index(c.clone()).unwrap();
+        let request = crate::WorkflowRequest::Index {
+            request: IndexOperation::CollectMsci {
+                version: index.id.clone(),
+                calendar_market: market.id.clone(),
+                start: "2007-01-02".parse().unwrap(),
+                end: "2007-01-12".parse().unwrap(),
+            },
+        };
+        let frozen = crate::snapshot(&w, &request).unwrap();
+        assert_eq!(frozen["inputs"][0]["signature"], market.signature);
+        assert_eq!(
+            frozen["index_version"]["config"],
+            serde_json::to_value(&c).unwrap()
+        );
+        let mut edited = c;
+        edited.definition.name = "Display edit".into();
+        w.save_index(edited).unwrap();
+        assert_eq!(frozen["index_version"]["id"], index.id);
+        let mut record = w.begin(uuid::Uuid::new_v4(), "index", frozen).unwrap();
+        record.request["index_adapter_signature"] = "stale".into();
+        let error = crate::usecases::execute(
+            &w,
+            &request,
+            &record,
+            &analytics_core::task::TaskContext::default(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("frozen MSCI"));
+        assert!(!w.resolve(format!("data/msci-index-{}", record.id)).exists());
+        let invalid = crate::WorkflowRequest::Index {
+            request: IndexOperation::CollectMsci {
+                version: index.id,
+                calendar_market: market.id,
+                start: "2000-01-01".parse().unwrap(),
+                end: "2007-01-12".parse().unwrap(),
+            },
+        };
+        assert!(crate::snapshot(&w, &invalid).is_err());
     }
 }

@@ -72,6 +72,19 @@ pub enum Command {
 }
 #[derive(Debug, Subcommand)]
 pub enum IndexCommand {
+    /// Evidence-backed index membership reconstruction.
+    #[command(subcommand)]
+    History(IndexHistoryCommand),
+    /// Capture official MSCI CNY price closes with a registered exchange calendar (no members/OHLC).
+    CollectMsci {
+        version: String,
+        #[arg(long)]
+        calendar_market: String,
+        #[arg(long)]
+        start: String,
+        #[arg(long)]
+        end: String,
+    },
     /// List builtin seeds and immutable workspace versions without network acquisition.
     List,
     /// Save portable JSON through the shared worker (same as import).
@@ -93,6 +106,68 @@ pub enum IndexCommand {
         end: String,
         #[arg(long)]
         current_members: bool,
+    },
+}
+/// Shared native history tasks; previews never perform implicit acquisition.
+#[derive(Debug, Subcommand)]
+pub enum IndexHistoryCommand {
+    Draft {
+        #[arg(long)]
+        index: String,
+        #[arg(long)]
+        market: String,
+        #[arg(long)]
+        start: String,
+        #[arg(long)]
+        end: String,
+    },
+    Validate {
+        #[arg(long)]
+        index: String,
+        #[arg(long)]
+        market: String,
+        #[arg(long)]
+        request: PathBuf,
+    },
+    Preview {
+        #[arg(long)]
+        index: String,
+        #[arg(long)]
+        market: String,
+        #[arg(long)]
+        request: PathBuf,
+    },
+    Publish {
+        #[arg(long)]
+        index: String,
+        #[arg(long)]
+        market: String,
+        #[arg(long)]
+        request: PathBuf,
+        #[arg(long)]
+        start: String,
+        #[arg(long)]
+        end: String,
+    },
+    Import {
+        #[arg(long)]
+        index: String,
+        #[arg(long)]
+        market: String,
+        path: PathBuf,
+    },
+    Status {
+        version: String,
+    },
+    Export {
+        version: String,
+        output: PathBuf,
+    },
+    Capture {
+        #[arg(long)]
+        url: String,
+        #[arg(long)]
+        document_format: String,
     },
 }
 #[derive(Debug, Subcommand)]

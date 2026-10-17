@@ -223,6 +223,34 @@ fn research_request(
     r.benchmark = template.benchmark.clone();
     r.pool_exit_policy = template.pool_exit_policy;
     let (pool, frozen) = w.resolve_pool(&template.pool_version, &market.id)?;
+    if !crate::membership_history::history_inputs(&frozen)?.is_empty() {
+        let ds = DailyDataset::open(w.resolve(&market.path))?;
+        let submitted: WorkflowRequest = serde_json::from_value(run.request["request"].clone())?;
+        let train_only = matches!(submitted, WorkflowRequest::TrainResearch { .. });
+        let folds = if train_only {
+            template
+                .schedule
+                .resolve_for_training(&ds.calendar, template.warmup_sessions())?
+        } else {
+            let tail = ds
+                .last_valid_close_date(&template.benchmark)?
+                .ok_or("benchmark has no valid close")?;
+            template.schedule.resolve_for_input_check(
+                &ds.calendar,
+                template.warmup_sessions(),
+                tail,
+            )?
+        };
+        let ranges: Vec<_> = folds
+            .into_iter()
+            .flat_map(|f| {
+                std::iter::once(f.actual.train)
+                    .chain(f.actual.validation)
+                    .chain((!train_only).then_some(f.actual.test))
+            })
+            .collect();
+        crate::membership_history::verify_task_use(w, &frozen, &market.id, &ranges)?;
+    }
     r.pool_signature = signature(&frozen)?;
     r.pool = Some(pool);
     r.universe_id = template.pool_version.clone();
@@ -263,6 +291,15 @@ pub fn research_requirements_with_actions(
         .schedule
         .resolve_with_warmup(&dataset.calendar, t.warmup_sessions())?;
     let (pool, frozen) = w.resolve_pool(&t.pool_version, market)?;
+    let ranges: Vec<_> = folds
+        .iter()
+        .flat_map(|f| {
+            std::iter::once(f.actual.train.clone())
+                .chain(f.actual.validation.clone())
+                .chain(std::iter::once(f.actual.test.clone()))
+        })
+        .collect();
+    crate::membership_history::verify_task_use(w, &frozen, market, &ranges)?;
     let lo = folds
         .iter()
         .map(|f| f.warmup_start)

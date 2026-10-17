@@ -70,9 +70,9 @@ pub(super) fn maintenance(
             let selected=state.index_versions.iter().find(|v|v.id==state.index_version || (v.builtin && state.index_version==format!("builtin:{}",v.config.definition.id))).cloned();
             if let Some(v)=selected {
                 ui.label(format!("{} · {} · {}",v.config.data_key,v.config.definition.currency,v.config.definition.return_basis));
-                ui.label("行情与当前成分可通过已有接口验证；历史成分须由所选数据版本提供。");
+                ui.label("按所选适配器能力采集；MSCI 仅提供收盘，历史成分须由所选数据版本提供。");
                 if ui.button("编辑此配置").clicked() {state.index_editor=serde_json::to_string_pretty(&v.config).unwrap_or_default();}
-                if ui.button("加入行情采集列表").clicked() {
+                if ui.add_enabled(v.config.mappings.contains_key(state.collection_provider.name()),egui::Button::new("加入行情采集列表")).clicked() {
                     add_symbol(&mut state.collection_symbols,&v.config.data_key);
                     add_symbol(&mut state.collection_benchmarks,&v.config.data_key);
                     state.collection_index_inputs.insert(v.config.data_key.clone(),v.config.clone());
@@ -91,14 +91,25 @@ pub(super) fn maintenance(
                 c.definition.id="my_index".into();c.definition.name="自定义指数".into();c.definition.official_code="请填写官方代码".into();c.definition.symbol=None;c.data_key="IDX_my_index".into();c.mappings.clear();
                 state.index_editor=serde_json::to_string_pretty(&c).unwrap_or_default();
             }
-            ui.label("配置 JSON（供应商映射为 hithink 或 tdxaidata；仅接受已有适配器支持的 CNY 价格指数）");
+            ui.label("配置 JSON（映射支持 hithink、tdxaidata、msci；MSCI 仅采集 CNY 价格指数收盘，不提供成员或成交行情）");
             ui.add(egui::TextEdit::multiline(&mut state.index_editor).code_editor().desired_rows(10));
             if ui.button("校验并保存新版本").clicked() {
                 match serde_json::from_str(&state.index_editor) {Ok(config)=>operation=Some(IndexOperation::Save {config:Box::new(config)}),Err(e)=>state.error=Some(e.to_string())}
             }
             ui.horizontal(|ui| {ui.label("验证开始");ui.text_edit_singleline(&mut state.start);ui.label("结束");ui.text_edit_singleline(&mut state.end);});
+            if state.index_versions.iter().any(|v| v.id == state.index_version && v.config.mappings.contains_key("msci")) {
+                ui.label("MSCI 官方收盘：使用数据页选定市场的交易日历，保留原始响应与哈希；不会补造历史成员。");
+                ui.label(format!("交易日历市场：{}", state.market));
+                if ui.add_enabled(!state.market.is_empty(), egui::Button::new("从 MSCI 官方采集收盘行情")).clicked() {
+                    match (state.start.parse(),state.end.parse()) {
+                        (Ok(start),Ok(end))=>operation=Some(IndexOperation::CollectMsci {version:state.index_version.clone(),calendar_market:state.market.clone(),start,end}),
+                        _=>state.error=Some("指数采集日期无效".into())
+                    }
+                }
+            }
             ui.checkbox(&mut state.index_current_members,"同时采集当前成分（仅观察日）");
-            if ui.button("使用当前采集供应商验证并采集").clicked() {
+            let configured_provider = state.index_versions.iter().any(|v|v.id==state.index_version && v.config.mappings.contains_key(state.collection_provider.name()));
+            if ui.add_enabled(configured_provider,egui::Button::new("使用当前采集供应商验证并采集")).clicked() {
                 match (state.start.parse(),state.end.parse()) {
                     (Ok(start),Ok(end))=>operation=Some(IndexOperation::Verify {version:state.index_version.clone(),provider:state.collection_provider,start,end,current_members:state.index_current_members}),
                     _=>state.error=Some("指数验证日期无效".into())
@@ -107,12 +118,14 @@ pub(super) fn maintenance(
             if state.details.get("requested").is_some() && (
                 state.details["requested"]["start"].as_str()!=Some(state.start.as_str()) ||
                 state.details["requested"]["end"].as_str()!=Some(state.end.as_str()) ||
-                state.details["provider"]!=serde_json::to_value(state.collection_provider).unwrap_or_default() ||
+                (state.details["provider"]!="msci" && state.details["provider"]!=serde_json::to_value(state.collection_provider).unwrap_or_default()) ||
+                (state.details["provider"]=="msci" && state.details["calendar_market"].as_str()!=Some(state.market.as_str())) ||
                 state.details["index_version"]["id"].as_str()!=Some(state.index_version.as_str())) {
                 ui.colored_label(egui::Color32::YELLOW,"供应商、日期或所选版本已变化，原验证范围已过期。");
             }
+            let expected_adapter = if state.details["provider"]=="msci" {analytics_storage::msci::signature()} else {analytics_storage::collector::index_adapter_signature(state.collection_provider).into()};
             if let Some(signature)=state.details["adapter_signature"].as_str()
-                && signature!=analytics_storage::collector::index_adapter_signature(state.collection_provider) {
+                && signature!=expected_adapter {
                 ui.colored_label(egui::Color32::YELLOW,"采集实现已变化，原验证报告已过期。");
             }
             if state.details.get("index_version").is_some() {
@@ -122,7 +135,10 @@ pub(super) fn maintenance(
             }
         });
     });
-    operation.map(|request| WorkflowRequest::Index { request })
+    let history = super::history::maintenance(ui, state, enabled);
+    operation
+        .map(|request| WorkflowRequest::Index { request })
+        .or(history)
 }
 pub(super) fn research_selectors(
     ui: &mut egui::Ui,

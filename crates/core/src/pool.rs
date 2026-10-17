@@ -7,6 +7,11 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PoolExpression {
+    /// Evidence-verified immutable reconstructed history.
+    History {
+        /// Content-derived history artifact ID.
+        version: String,
+    },
     /// Historical intervals from an immutable market version.
     Universe {
         /// Immutable source version.
@@ -139,6 +144,14 @@ impl PoolDefinition {
                 return Err("pool expression too deep".into());
             }
             match e {
+                PoolExpression::History { version } => {
+                    if !version.starts_with("history-")
+                        || version.len() != 72
+                        || !version[8..].bytes().all(|b| b.is_ascii_hexdigit())
+                    {
+                        return Err("invalid history version".into());
+                    }
+                }
                 PoolExpression::Universe { version, universe } => {
                     if version.is_empty()
                         || universe.is_empty()
@@ -216,6 +229,18 @@ impl PoolDefinition {
             end: Date,
         ) -> Result<(), String> {
             match e {
+                PoolExpression::History { version } => {
+                    load(
+                        &PoolExpression::Universe {
+                            version: version.clone(),
+                            universe: String::new(),
+                        },
+                        out,
+                        resolve,
+                        start,
+                        end,
+                    )?;
+                }
                 PoolExpression::Universe { version, universe } => {
                     let key = (version.clone(), universe.clone());
                     if let std::collections::btree_map::Entry::Vacant(entry) = out.entry(key) {
@@ -250,6 +275,9 @@ impl PoolDefinition {
             sources: &BTreeMap<(String, String), PoolMembership>,
         ) -> BTreeSet<String> {
             match e {
+                PoolExpression::History { version } => {
+                    sources[&(version.clone(), String::new())].on(day)
+                }
                 PoolExpression::Universe { version, universe } => {
                     sources[&(version.clone(), universe.clone())].on(day)
                 }

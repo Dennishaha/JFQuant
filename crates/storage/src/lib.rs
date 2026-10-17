@@ -16,6 +16,8 @@ pub mod collector;
 pub mod corporate_actions;
 pub mod daily;
 pub mod hithink;
+pub mod membership_history;
+pub mod msci;
 pub mod qlib;
 pub mod tdx_status;
 pub mod trading_status;

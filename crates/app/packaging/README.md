@@ -38,7 +38,7 @@ LightGBM 4.7.0来自哈希锁定wheel，AKQuant 0.3.66按源码锁构建配股�
 本机审核不能替代另一台干净Apple Silicon/macOS14机器的安装、运行、取消及离线读取。
 开发签名不等同Developer ID或Apple公证；安装方式见INSTALL.txt。
 
-当前格式及协议以 workflow 常量为准（服务协议29）；打包CLI验收覆盖完整输入/因子/样本检查、模型复用、已发布预测复用和完整结果格式；采集模块改动后必须同步重建共享Python中的采集包。打包必须等待使用开发Python目录的采集任务结束，避免重建运行时影响请求。
+当前格式及协议以 workflow 常量为准（服务协议36）；打包CLI验收覆盖完整输入/因子/样本检查、模型复用、已发布预测复用和完整结果格式；采集模块改动后必须同步重建共享Python中的采集包。打包必须等待使用开发Python目录的采集任务结束，避免重建运行时影响请求。
 
 打包验收核对当前服务协议／采集13、来源策略2的HiThink默认角色和空执行资料来源，并验证两种私有Key入口、废弃命令拒绝、包内Python及原生研究流程。
 
@@ -64,3 +64,6 @@ Company-event execution extends the existing private native patch. Build inputs 
 指数运行时配置离线验收：`crates/app/packaging/verify-indices.sh "$PWD/target/distribution/JFQuant.app" "$PWD/target/index-runtime-smoke"`。
 仅使用包内 CLI/Python，验证离线目录、自定义供应商代码、导入导出和研究模板；无真实网络或凭据需求。
 实际指数行情验证另以 `indices verify` 显式运行，记录请求与实际范围，不能用此离线测试证明供应商覆盖。
+
+历史成分离线验收：`bash crates/app/packaging/verify-history.sh "$PWD/target/distribution/JFQuant.app" "$PWD/target/history-runtime-smoke"`。
+打包脚本自动调用；仅使用包内 CLI 和运行时，验证完整名单、原子增删、完整性审核、发布、股票池解析、原始下载删除后的冻结副本读取、导入导出及篡改拒绝。测试不证明任何真实指数的连续覆盖；正式材料采集须显式使用 `indices history capture --url ... --document-format pdf`，再审核引用与适用边界。

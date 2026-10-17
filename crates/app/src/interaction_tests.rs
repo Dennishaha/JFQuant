@@ -2037,3 +2037,85 @@ fn runtime_index_editor_submits_shared_save_without_touching_models() {
     }
     assert_eq!(h.app.state.platform.template.config.factor_ids, before);
 }
+
+#[test]
+fn runtime_index_msci_collection_uses_selected_calendar_and_shared_task() {
+    let (mut h, _tmp) = platform_harness(Panel::Dataset);
+    h.ctx.all_styles_mut(|s| s.animation_time = 0.0);
+    let mut config = analytics_core::indices::builtin_config("csi1000").unwrap();
+    config.definition.id = "app_msci".into();
+    config.definition.symbol = None;
+    config.definition.official_code = "746059".into();
+    config.data_key = "IDX_app_msci".into();
+    config.mappings = std::collections::BTreeMap::from([("msci".into(), "746059".into())]);
+    h.app.state.platform.index_version = "index-fixture".into();
+    h.app.state.platform.index_versions = vec![analytics_workflow::indices::IndexVersion {
+        id: "index-fixture".into(),
+        signature: String::new(),
+        calculation_signature: String::new(),
+        builtin: false,
+        config,
+    }];
+    h.app.state.platform.market = "market-fixture".into();
+    h.app.state.platform.start = "2026-03-30".into();
+    h.app.state.platform.end = "2026-03-31".into();
+    h.click("维护指数配置");
+    h.click("从 MSCI 官方采集收盘行情");
+    match h.commands.try_recv().unwrap() {
+        WorkerCommand::ExecuteWorkflow { request, .. } => match *request {
+            analytics_workflow::WorkflowRequest::Index {
+                request:
+                    analytics_workflow::indices::IndexOperation::CollectMsci {
+                        version,
+                        calendar_market,
+                        start,
+                        end,
+                    },
+            } => {
+                assert_eq!(version, "index-fixture");
+                assert_eq!(calendar_market, "market-fixture");
+                assert_eq!(start.to_string(), "2026-03-30");
+                assert_eq!(end.to_string(), "2026-03-31");
+            }
+            other => panic!("unexpected workflow {other:?}"),
+        },
+        other => panic!("unexpected command {other:?}"),
+    }
+}
+
+#[test]
+fn history_editor_submits_shared_draft_without_network_or_model_changes() {
+    let (mut h, _tmp) = platform_harness(Panel::Dataset);
+    h.ctx.all_styles_mut(|s| s.animation_time = 0.0);
+    h.app.state.platform.index_version = "builtin:csi300".into();
+    h.app.state.platform.market = "market-fixture".into();
+    h.app.state.platform.start = "2021-09-17".into();
+    h.app.state.platform.end = "2026-10-12".into();
+    let original = serde_json::to_value(&h.app.state.platform.template).unwrap();
+    h.click("历史成分重建");
+    h.click("生成历史成员草稿");
+    match h.commands.try_recv().unwrap() {
+        WorkerCommand::ExecuteWorkflow { request, .. } => match *request {
+            analytics_workflow::WorkflowRequest::Index {
+                request: analytics_workflow::indices::IndexOperation::History { request },
+            } => match *request {
+                analytics_workflow::membership_history::Operation::Draft {
+                    index,
+                    market,
+                    range,
+                } => {
+                    assert_eq!(index, "builtin:csi300");
+                    assert_eq!(market, "market-fixture");
+                    assert_eq!(range.start.to_string(), "2021-09-17");
+                }
+                other => panic!("unexpected history operation {other:?}"),
+            },
+            other => panic!("unexpected workflow {other:?}"),
+        },
+        other => panic!("unexpected worker {other:?}"),
+    }
+    assert_eq!(
+        serde_json::to_value(&h.app.state.platform.template).unwrap(),
+        original
+    );
+}

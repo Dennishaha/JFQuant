@@ -16,6 +16,8 @@ pub mod factor_groups;
 pub mod indices;
 pub mod input_check;
 pub mod maintenance;
+/// Evidence-backed historical index members and immutable reconstruction artifacts.
+pub mod membership_history;
 /// Immutable date-effective stock pools.
 pub mod pools;
 /// Independently validated acquisition checkpoints.

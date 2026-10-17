@@ -44,4 +44,21 @@ t=json.load(open(r/'template.json'))
 assert t['benchmark']=='IDX_packaged_index' and t['pool_version']=='index:packaged_index'
 PY
 run_cli indices verify --help > "$check_root/verify-help.txt"
+"$python" -I -B - "$check_root/workspace/custom.json" "$check_root/workspace/msci.json" <<'PY'
+import json,sys
+c=json.load(open(sys.argv[1]))
+c['definition'].update(id='packaged_msci',name='Packaged MSCI close fixture',official_code='746059')
+c['data_key']='IDX_packaged_msci'
+c['mappings']={'msci':'746059'}
+json.dump(c,open(sys.argv[2],'w'))
+PY
+run_cli indices validate msci.json > "$check_root/msci-validated.json"
+run_cli indices import msci.json > "$check_root/msci-imported.json"
+run_cli indices collect-msci --help > "$check_root/msci-help.txt"
+"$python" -I -B - "$check_root" <<'PY'
+import json,sys,pathlib
+r=pathlib.Path(sys.argv[1])
+assert json.load(open(r/'msci-validated.json'))['data_ready'] is False
+assert '--calendar-market' in (r/'msci-help.txt').read_text()
+PY
 echo "Packaged runtime index configuration verified: $check_root"

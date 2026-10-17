@@ -204,6 +204,18 @@ pub fn validate_index(
     }
     Ok(())
 }
+/// Validate an index mapping using its owning adapter, including close-only MSCI history.
+pub fn validate_index_mapping(
+    config: &analytics_core::indices::IndexConfig,
+    provider: &str,
+) -> io::Result<()> {
+    match provider {
+        "msci" => crate::msci::validate(config),
+        "hithink" => validate_index(config, Provider::Hithink),
+        "tdxaidata" => validate_index(config, Provider::Tdxaidata),
+        _ => Err(invalid("unsupported index adapter")),
+    }
+}
 /// Hash of every bundled collector implementation file, frozen into acquired source packages.
 pub fn collector_signature() -> String {
     let mut hash = Sha256::new();

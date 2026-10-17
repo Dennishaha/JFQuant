@@ -102,16 +102,23 @@ impl Workspace {
         }
         let p = self.pool(id)?;
         let inputs = std::cell::RefCell::new(std::collections::BTreeMap::new());
+        let histories = std::cell::RefCell::new(std::collections::BTreeMap::new());
         let membership = p
             .definition
             .evaluate(&dataset.calendar, |version_id, universe| {
+                if universe.is_empty() {
+                    let a = self.history(version_id).map_err(|e| e.to_string())?;
+                    let membership = a.segment.membership.clone();
+                    histories.borrow_mut().insert(a.id.clone(), a);
+                    return Ok(membership);
+                }
                 let v = version(self, version_id, "market").map_err(|e| e.to_string())?;
                 inputs.borrow_mut().insert(v.id.clone(), v.clone());
                 DailyDataset::open(self.resolve(v.path))
                     .and_then(|d| d.pool(universe))
                     .map_err(|e| e.to_string())
             })?;
-        let frozen = serde_json::json!({"version":p,"membership":membership,"inputs":inputs.into_inner().into_values().collect::<Vec<_>>()});
+        let frozen = serde_json::json!({"resolution_schema_version":1,"version":p,"membership":membership,"inputs":inputs.into_inner().into_values().collect::<Vec<_>>(),"histories":histories.into_inner().into_values().collect::<Vec<_>>()});
         Ok((membership, frozen))
     }
     /// Date preview using the same resolver as research.

@@ -121,7 +121,7 @@ impl IndexConfig {
             return Err("custom index cannot occupy a builtin or stock key".into());
         }
         for (provider, code) in &self.mappings {
-            if !matches!(provider.as_str(), "hithink" | "tdxaidata") {
+            if !matches!(provider.as_str(), "hithink" | "tdxaidata" | "msci") {
                 return Err("unsupported index provider".into());
             }
             validate_locator(code)?;

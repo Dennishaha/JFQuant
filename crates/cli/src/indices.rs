@@ -30,15 +30,8 @@ pub(super) fn offline(cli: &Cli) -> Result<Option<Value>, ServiceError> {
         let config: analytics_core::indices::IndexConfig = read(&root, path)?;
         config.validate().map_err(invalid)?;
         for provider in config.mappings.keys() {
-            analytics_storage::collector::validate_index(
-                &config,
-                if provider == "hithink" {
-                    analytics_storage::collector::Provider::Hithink
-                } else {
-                    analytics_storage::collector::Provider::Tdxaidata
-                },
-            )
-            .map_err(invalid)?;
+            analytics_storage::collector::validate_index_mapping(&config, provider)
+                .map_err(invalid)?;
         }
         return Ok(Some(
             json!({"valid":true,"data_ready":false,"calculation_signature":analytics_workflow::signature(&config.calculation_contract()).map_err(invalid)?}),
@@ -50,6 +43,78 @@ pub(super) fn prepare(client: &Client, command: IndexCommand) -> Result<Action, 
     use analytics_workflow::indices::IndexOperation;
     let mut synchronous = true;
     let operation = match command {
+        IndexCommand::History(command) => {
+            use analytics_workflow::membership_history::Operation as H;
+            let op = match command {
+                IndexHistoryCommand::Draft {
+                    index,
+                    market,
+                    start,
+                    end,
+                } => H::Draft {
+                    index,
+                    market,
+                    range: analytics_core::DateRange {
+                        start: start.parse().map_err(invalid)?,
+                        end: end.parse().map_err(invalid)?,
+                    },
+                },
+                IndexHistoryCommand::Validate {
+                    index,
+                    market,
+                    request,
+                }
+                | IndexHistoryCommand::Preview {
+                    index,
+                    market,
+                    request,
+                } => H::Preview {
+                    index,
+                    market,
+                    request: Box::new(read(&client.root, &request)?),
+                },
+                IndexHistoryCommand::Publish {
+                    index,
+                    market,
+                    request,
+                    start,
+                    end,
+                } => H::Publish {
+                    index,
+                    market,
+                    request: Box::new(read(&client.root, &request)?),
+                    range: analytics_core::DateRange {
+                        start: start.parse().map_err(invalid)?,
+                        end: end.parse().map_err(invalid)?,
+                    },
+                },
+                IndexHistoryCommand::Import {
+                    index,
+                    market,
+                    path,
+                } => H::Import {
+                    index,
+                    market,
+                    path,
+                },
+                IndexHistoryCommand::Status { version } => H::Status { version },
+                IndexHistoryCommand::Export { version, output } => H::Export {
+                    version,
+                    path: output,
+                },
+                IndexHistoryCommand::Capture {
+                    url,
+                    document_format,
+                } => H::Capture {
+                    url,
+                    format: document_format,
+                },
+            };
+            synchronous = false;
+            IndexOperation::History {
+                request: Box::new(op),
+            }
+        }
         IndexCommand::List => return Ok(Action::Read(client.call(Rpc::Indices)?)),
         IndexCommand::Import { path } => IndexOperation::Save {
             config: Box::new(read(&client.root, &path)?),
@@ -80,9 +145,101 @@ pub(super) fn prepare(client: &Client, command: IndexCommand) -> Result<Action, 
                 current_members,
             }
         }
+        IndexCommand::CollectMsci {
+            version,
+            calendar_market,
+            start,
+            end,
+        } => {
+            synchronous = false;
+            IndexOperation::CollectMsci {
+                version,
+                calendar_market,
+                start: start.parse().map_err(invalid)?,
+                end: end.parse().map_err(invalid)?,
+            }
+        }
     };
     Ok(Action::Task {
         request: WorkflowRequest::Index { request: operation },
         synchronous,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn history_cli_requires_explicit_inputs_and_publish_range() {
+        assert!(
+            Cli::try_parse_from([
+                "jfquant",
+                "indices",
+                "history",
+                "preview",
+                "--index",
+                "builtin:csi300",
+                "--market",
+                "market-fixture",
+                "--request",
+                "history.json"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "jfquant",
+                "indices",
+                "history",
+                "publish",
+                "--index",
+                "builtin:csi300",
+                "--market",
+                "market-fixture",
+                "--request",
+                "history.json"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "jfquant",
+                "indices",
+                "history",
+                "capture",
+                "--url",
+                "https://example.com/source.pdf",
+                "--document-format",
+                "pdf"
+            ])
+            .is_ok()
+        );
+    }
+    #[test]
+    fn msci_cli_requires_explicit_calendar_and_has_no_arbitrary_url() {
+        let base = [
+            "jfquant",
+            "indices",
+            "collect-msci",
+            "index-fixture",
+            "--start",
+            "2026-03-30",
+            "--end",
+            "2026-03-31",
+        ];
+        assert!(Cli::try_parse_from(base).is_err());
+        let args: Vec<_> = base
+            .into_iter()
+            .chain(["--calendar-market", "market-fixture"])
+            .collect();
+        assert!(matches!(
+            Cli::try_parse_from(&args).unwrap().command,
+            Command::Indices {
+                command: Some(IndexCommand::CollectMsci { .. })
+            }
+        ));
+        assert!(
+            Cli::try_parse_from(args.into_iter().chain(["--url", "https://example.com"])).is_err()
+        );
+    }
 }

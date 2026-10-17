@@ -14,6 +14,7 @@ use std::{
 };
 use uuid::Uuid;
 mod evidence;
+mod history;
 mod indices;
 mod reads;
 pub struct PlatformState {
@@ -59,6 +60,7 @@ pub struct PlatformState {
         std::collections::BTreeMap<String, analytics_core::indices::IndexConfig>,
     pub index_versions: Vec<analytics_workflow::indices::IndexVersion>,
     pub index_editor: String,
+    pub history_tools: history::Tools,
     pub index_path: String,
     pub index_version: String,
     pub index_current_members: bool,
@@ -136,6 +138,7 @@ impl Default for PlatformState {
             collection_index_inputs: Default::default(),
             index_versions: vec![],
             index_editor: String::new(),
+            history_tools: Default::default(),
             index_path: "index.json".into(),
             index_version: String::new(),
             index_current_members: false,

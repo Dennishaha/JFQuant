@@ -1033,6 +1033,15 @@ pub fn snapshot(w: &crate::Workspace, job: &Job) -> Result<Value> {
                 inputs.push(crate::version_metadata(w, a, "actions")?);
             }
             let (_, p) = w.resolve_pool(&plan.pool_version, market)?;
+            let m = crate::version(w, market, "market")?;
+            let ds = DailyDataset::open(w.resolve(m.path))?;
+            let ranges: Vec<_> = plan
+                .schedule
+                .resolve(&ds.calendar)?
+                .into_iter()
+                .flat_map(|f| std::iter::once(f.train).chain(f.validation))
+                .collect();
+            crate::membership_history::verify_task_use(w, &p, market, &ranges)?;
             (p, Value::Null)
         }
         Job::Backtest { plan } | Job::BacktestInputs { plan, .. } => {
@@ -1044,6 +1053,13 @@ pub fn snapshot(w: &crate::Workspace, job: &Job) -> Result<Value> {
                 plan,
                 &w.resolve(&m.path),
                 Some(&resolved),
+            )?;
+            let effective: DateRange = serde_json::from_value(selected["effective_range"].clone())?;
+            crate::membership_history::verify_task_use(
+                w,
+                &p,
+                &plan.market,
+                std::slice::from_ref(&effective),
             )?;
             inputs.push(m);
             inputs.push(crate::version_metadata(w, &plan.actions, "actions")?);
@@ -1114,6 +1130,11 @@ pub fn execute(
     context: &analytics_core::task::TaskContext,
 ) -> Result<Value> {
     let frozen = &run.request["independent"];
+    if !crate::membership_history::history_inputs(&frozen["pool"])?.is_empty()
+        && snapshot(w, job)? != *frozen
+    {
+        return Err("independent frozen inputs changed since submission".into());
+    }
     let out = w.resolve(&run.output);
     fs::create_dir_all(&out)?;
     match job {

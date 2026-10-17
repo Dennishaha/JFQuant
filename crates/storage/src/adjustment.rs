@@ -132,20 +132,21 @@ impl AdjustmentRecord {
                 AdjustmentBasis::PriceIndex { source }
                     if source == "hithink.a-share-index.prices.historical" =>
                 {
-                    crate::collector::Provider::Hithink
+                    "hithink"
                 }
                 AdjustmentBasis::PriceIndex { source } if source == "tdxaidata.get_market_data" => {
-                    crate::collector::Provider::Tdxaidata
+                    "tdxaidata"
                 }
+                AdjustmentBasis::PriceIndex { source } if source == crate::msci::SOURCE => "msci",
                 _ => {
                     return Err(invalid(
                         "runtime index requires supported price-index basis",
                     ));
                 }
             };
-            crate::collector::validate_index(index, provider)?;
+            crate::collector::validate_index_mapping(index, provider)?;
             if index.data_key != self.instrument_id
-                || index.mappings.get(provider.name()) != Some(&self.source_symbol)
+                || index.mappings.get(provider) != Some(&self.source_symbol)
             {
                 return Err(invalid("index contract binding mismatch"));
             }
@@ -190,6 +191,7 @@ impl AdjustmentRecord {
                     || !matches!(
                         source.as_str(),
                         "hithink.a-share-index.prices.historical"
+                            | crate::msci::SOURCE
                             | "tdxaidata.get_market_data"
                             | "JFQuant Qlib price-index recovery-v1"
                             | "JFQuant analytics-workflow synthetic-demo-v1"

@@ -1,6 +1,12 @@
-当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议33、采集协议15、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
+当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议36、采集协议15、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
 
 # analytics-desktop
+
+## MSCI 官方收盘入口
+
+“维护指数配置”中，所选配置有 `msci` 映射时显示“从 MSCI 官方采集收盘行情”。使用数据页已选市场的交易日历和页面日期，提交共享 `IndexOperation::CollectMsci`，沿用进度、取消和结果展示。UI线程不联网。指数版本、日期、日历市场或适配器改变时报告过期；收盘采集不生成成员历史或可撮合 OHLC。
+
+验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-desktop runtime_index_msci`。
 
 macOS优先的egui桌面客户端，提供数据、查询、因子、建模、研究和运行记录界面。
 所有计算通过同一工作区服务，App不持有DuckDB、LightGBM或Python对象。
@@ -42,7 +48,7 @@ DUCKDB_DOWNLOAD_LIB=1 cargo nextest run -p analytics-desktop
 当前结果对未模拟特殊事件显示“回测完成，含未模拟事件”，并保留未解决普通问题的阻断状态。
 核对规则、格式6与复现命令见storage/workflow组件README。验收包含公共任务、结果警告与旧格式隔离。
 
-原生刷新现在以3个证券工作线程获取行情和公司行动，沿用监督进程、检查点、取消及完整发布校验。后端`RefreshRequest`允许1—8线程及显式跨任务分片复用；公共`RefreshCoverage`只读RPC可读取进度、历史成员覆盖及候选可用池，报告不自动授权训练或改变股票池。CLI命令及完整验收见[工作流README](../workflow/README.md)。服务协议33。
+原生刷新现在以3个证券工作线程获取行情和公司行动，沿用监督进程、检查点、取消及完整发布校验。后端`RefreshRequest`允许1—8线程及显式跨任务分片复用；公共`RefreshCoverage`只读RPC可读取进度、历史成员覆盖及候选可用池，报告不自动授权训练或改变股票池。CLI命令及完整验收见[工作流README](../workflow/README.md)。服务协议36。
 
 “更新行动”按钮使用同一Rust动作分片流程，保持当前登记行情，重新获取事件；不读废弃动作版本作为补采输入。
 
@@ -59,7 +65,7 @@ Packaged CLI acceptance also invokes `research verify --task <UUID>` after the t
 
 因子页提供只读Alpha158/GTJA191组，以及复制、改名、编辑说明、筛选、保存、删除自定义组；
 “应用到研究配置”只替换因子选择，保留日期和股票池。修改内置组必须先复制。
-“因子有效性测试”独立发送服务协议33的EvaluateFactors任务，支持进度和取消；默认5日、5分层、
+“因子有效性测试”独立发送服务协议36的EvaluateFactors任务，支持进度和取消；默认5日、5分层、
 30个日内有效样本。报告展示覆盖率、配对率、有效天数、IC、RankIC、RankIC IR、正RankIC比例、
 高减低收益，展开查看每日统计与分层收益，可导出JSON及逐项加入自定义选择后保存。
 结果使用冻结参数，即使表单后来改变也不会改写报告；模型训练仍保留原入口。
@@ -93,7 +99,7 @@ Packaged CLI acceptance also invokes `research verify --task <UUID>` after the t
 
 A/B可重叠，横截面计算互相隔离；B不参与验证或早停。首日没有合法模型则拒绝回测。
 账户跨模型连续运行；报告显示曾见/未见标的及同一账户贡献，预测可独立重放。
-旧“年度研究/仅训练/已有模型回测”入口保持原配置语义。服务协议33，结果20仅读取当前格式。
+旧“年度研究/仅训练/已有模型回测”入口保持原配置语义。服务协议36，结果20仅读取当前格式。
 
 ```bash
 DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-desktop independent_training_and_backtest_editors
@@ -169,3 +175,9 @@ build/distribution commands remain the packaging commands above.
 保存产生不可变版本，旧任务读取冻结快照。编辑内容与原报告不一致时显示过期提示；
 新任务重新校验，不依赖单独的通过标记。验证结果见运行记录，包含实际覆盖和能力边界。
 验收：`cargo test -p analytics-desktop runtime_index_editor`，包内命令见 CLI README。
+
+## 历史成分维护
+
+数据页“历史成分重建”调用共享后台任务。选择指数、市场及日期，生成草稿并载入结果；可编辑完整名单、变更表、原文引用及审核范围，高级JSON维护可知时间及修订链。报告分别展示事实连续区间、未知日期和可知时间。发布重验所选范围，输出可载入既有股票池编辑器的定义。原文采集显式联网；导入导出及状态离线，输入变化显示过期。UI不持有数据库或模型句柄，无需用户修改Rust。
+
+验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-desktop history_editor`。

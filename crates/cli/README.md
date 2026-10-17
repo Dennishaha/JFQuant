@@ -75,7 +75,7 @@ jfquant data refresh --template workflow.json --market MARKET_ID --workers 3 --r
 DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli
 ```
 
-服务协议30；升级时先等待或取消旧版本任务，再停止旧服务。旧协议客户端不能连接新协议服务。采集协议13与公司行动格式7同步升级；特征顺序和公式版本未改变。
+服务协议31；升级时先等待或取消旧版本任务，再停止旧服务。旧协议客户端不能连接新协议服务。采集协议13，当前公司行动发布格式10／修订5；特征顺序和公式版本未改变。
 
 分区位于不同本地工作区时，可用`--sources-manifest sources.json`汇总覆盖，或`--reuse-shards-manifest sources.json`复用；JSON数组元素为当前工作区任务UUID字符串，或`{"workspace":"/absolute/workspace","task_id":"UUID"}`。只读验证原生任务、同一不可变基础数据/窗口/基准及证券子集；不修改来源工作区。尚有分区待检查的证券不被误列为缺失。复用仍由采集器重新验证全部身份及哈希。
 
@@ -156,7 +156,7 @@ Preview返回异步任务ID，沿用jobs wait/results/cancel，结果明确为�
 
 ## 独立模型训练与 B 股票池回测
 
-新命令使用服务协议30；保留原 `research train/backtest/run` 的配置与执行方式。
+新命令使用服务协议31；保留原 `research train/backtest/run` 的配置与执行方式。
 新训练计划格式1没有测试日期；回测计划独立指定 B、日期和行情。
 App研究页“独立训练与跨池回测”可导入、编辑和导出相同 JSON。
 
@@ -221,7 +221,7 @@ jfquant --workspace W research model-backtest --plan backtest-B.json --corporate
 jfquant --workspace W data evidence status --actions ACTION_VERSION --task TERMINAL_TASK_UUID
 ```
 
-Use `evidence_only` to avoid research transition assumptions. Old plans are rejected; regenerate them, preserving requested dates and model selection. Research transitions do not prove missing earlier coverage. Reports distinguish candidate events, actual exposed securities, fractional loss and synthetic fees; an incomplete preflight is not a published backtest return. Protocol 30 requires updating the service with the CLI.
+Use `evidence_only` to avoid research transition assumptions. Old plans are rejected; regenerate them, preserving requested dates and model selection. Research transitions do not prove missing earlier coverage. Reports distinguish candidate events, actual exposed securities, fractional loss and synthetic fees; an incomplete preflight is not a published backtest return. Protocol 31 requires updating the service with the CLI.
 
 ## Cross-security evidence maintenance
 
@@ -230,3 +230,13 @@ Use `evidence_only` to avoid research transition assumptions. Old plans are reje
 `data reconcile-actions` 同时导入 `data collect --kind actions --provider tdxaidata` 完成分片中的 GP29 证据；即使该分片没有完整分红交收历史，独立认证的停牌日期仍可用于账户估值，历史失败保持。无须修改行情文件或运行定制数据脚本。
 
 `data inspect-actions` 的 `stock_status.unavailable` 返回离线核对中无法解释的状态响应及原文凭据，和已验证的 `capability` 分开显示；空/错误响应不赋予停牌资格，部分成功可独立发布。
+
+## 停牌证据与行情补录
+
+服务协议31，行动修订5／格式10；旧协议客户端不可连接。`data evidence import-status --actions VERSION --task CAPTURE` 只导入认证GP29状态，不重新协调公司行动。公告区间通过原有 `data evidence draft --actions VERSION --request review.json [--task TASK]` 和 `data revise-actions` 发布，review.suspensions包含 instrument/start/resume/reason/start_evidence/resume_evidence，证据字段为 document_id/quote/unit。
+
+`data evidence draft --market VERSION --request repair.json [--task TASK]` 预览同一行情修订；`data revise-market --market VERSION --request repair.json` 重核验并原子发布。repair 格式1：base_path（工作区相对行情目录）、base_sha256（原目录哈希）、selections，每项含 source_path、source_sha256（补采行情父目录含原文收据的完整树哈希）、instrument、dates、fields。字段为 open/high/low/close/volume/amount；研究和执行都必须可用。候选来源须为登记的原生行情版本，无隐式切源。新版本重新计算完整研究上下文，模型复用仍按原合同。
+
+候选缺口见 execution_quote_diagnostics.json；实际账户缺价见 execution_valuation_gaps.json。前者不代表实际持仓，后者只汇总独立可确定的问题，后续依赖状态明确等待核验。未认证时不发布收益。
+
+人工审核 distribution_conflict 不要求多个来源一致：在修订5事件中使用现金型 Differential，并分别提供 `cash_per_share` 与 `terms.reference.cash` 的字段引用，单位分别为 `gross_CNY_per_CDR`／`reference_CNY_per_CDR`（普通股使用 old_share）。登记日、支付日和问题哈希必须完整匹配，使用现有 draft / revise-actions；不存在跳过证据的强制通过参数。

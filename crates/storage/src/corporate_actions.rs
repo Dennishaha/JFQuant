@@ -195,12 +195,12 @@ impl ActionBundle {
     }
 
     fn validate_identity(&self) -> io::Result<()> {
-        if !matches!(self.schema_version, 5..=9)
+        if !matches!(self.schema_version, 5..=10)
             || (self.downloader != "JFQuant analytics-storage corporate-actions"
                 && self.downloader != "JFQuant analytics-workflow synthetic-demo-v1")
         {
             return Err(invalid(
-                "unsupported_data_format: action bundle requires supported format 5/6/7/8/9 and known source",
+                "unsupported_data_format: action bundle requires supported format 5/6/7/8/9/10 and known source",
             ));
         }
         analytics_core::source_map::reject_removed_sources(
@@ -396,7 +396,7 @@ impl ActionBundle {
     /// Read without silently upgrading a historical schema.
     pub fn read(path: &Path) -> io::Result<Self> {
         let raw: Value = serde_json::from_slice(&fs::read(path)?).map_err(invalid)?;
-        if matches!(raw["schema_version"].as_u64(), Some(6..=9))
+        if matches!(raw["schema_version"].as_u64(), Some(6..=10))
             && raw["actions"].as_array().is_none_or(|rows| {
                 rows.iter()
                     .any(|a| !a["cash_per_share"].is_string() || !a["shares_per_share"].is_string())

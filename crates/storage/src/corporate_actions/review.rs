@@ -1,6 +1,9 @@
 //! Immutable, evidence-backed event corrections; never delete a failure marker alone.
 use super::*;
+mod distribution;
 mod participants;
+mod suspensions;
+pub use suspensions::SuspensionRevision;
 mod validation;
 pub use participants::{Participant, Participants};
 use std::path::PathBuf;
@@ -114,6 +117,7 @@ pub(super) fn verify_structured_revisions(bundle: &ActionBundle, root: &Path) ->
     let mut affected = BTreeSet::new();
     let mut retired = BTreeSet::new();
     let mut outputs = Vec::new();
+    let mut status_proofs = BTreeSet::new();
     for name in bundle
         .raw_sha256
         .keys()
@@ -124,16 +128,25 @@ pub(super) fn verify_structured_revisions(bundle: &ActionBundle, root: &Path) ->
         if let Some(events) = receipt["request"]["events"].as_array() {
             outputs.extend(events.iter().map(|r| r["replacement"].clone()));
         }
-        if receipt["request"]["schema_version"] == 4 {
+        if receipt["request"]["schema_version"]
+            .as_u64()
+            .is_some_and(|v| v >= 4)
+        {
             validation::replay(bundle, root, &receipt)?;
         }
-        if !matches!(receipt["request"]["schema_version"].as_u64(), Some(2..=4)) {
+        if !matches!(receipt["request"]["schema_version"].as_u64(), Some(2..=5)) {
             continue;
         }
         let request: RevisionRequest =
             serde_json::from_value(receipt["request"].clone()).map_err(invalid)?;
+        for suspension in &request.suspensions {
+            status_proofs.insert(format!(
+                "announcement-suspension-v1:{}",
+                digest(suspension)?
+            ));
+        }
         for revision in &request.events {
-            if request.schema_version == 4 {
+            if request.schema_version >= 4 {
                 affected.insert(revision.replacement.id.clone());
                 if let Some(old) = revision
                     .original_id
@@ -151,6 +164,17 @@ pub(super) fn verify_structured_revisions(bundle: &ActionBundle, root: &Path) ->
                     .ok_or_else(|| invalid("structured revision path missing"))?;
                 verify_structured(bundle, &revision.replacement, path, value, reference)?;
                 affected.insert(revision.replacement.id.clone());
+            }
+        }
+    }
+    if let Some(data) = &bundle.execution_data {
+        for key in data
+            .capabilities
+            .keys()
+            .filter(|k| k.starts_with("announcement-suspension-v1:"))
+        {
+            if bundle.schema_version < 10 || !status_proofs.contains(key) {
+                return Err(invalid("announcement_suspension_without_verified_revision"));
             }
         }
     }
@@ -283,6 +307,9 @@ pub struct IssueResolution {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RevisionRequest {
+    /// Reviewed bounded full-day suspensions, independent of corporate-action history.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suspensions: Vec<SuspensionRevision>,
     /// Version-3 separately captured, replay-verified structured action facts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structured_manifest: Option<PathBuf>,
@@ -750,10 +777,11 @@ pub fn apply(
         &serde_json::to_value(request).map_err(invalid)?,
     )
     .map_err(invalid)?;
-    if !matches!(request.schema_version, 1..=4)
+    if !matches!(request.schema_version, 1..=5)
         || (request.events.is_empty()
             && request.coverage_reviews.is_empty()
-            && !(request.schema_version == 4 && request.structured_manifest.is_some()))
+            && request.suspensions.is_empty()
+            && !(request.schema_version >= 4 && request.structured_manifest.is_some()))
     {
         return Err(invalid("invalid/empty action revision"));
     }
@@ -780,7 +808,7 @@ pub fn apply(
     let manifest_value: Value =
         serde_json::from_slice(&fs::read(&request.evidence_manifest)?).map_err(invalid)?;
     let documents = if request.schema_version >= 2
-        && matches!(manifest_value["schema_version"].as_u64(), Some(7..=9))
+        && matches!(manifest_value["schema_version"].as_u64(), Some(7..=10))
     {
         let authenticated = ActionBundle::read(&request.evidence_manifest)?;
         if digest(&authenticated)? != digest(source)?
@@ -799,14 +827,22 @@ pub fn apply(
     if request.schema_version < 4 && request.events.iter().any(|r| r.participants.is_some()) {
         return Err(invalid("participant evidence requires revision 4"));
     }
+    if request.schema_version < 5 && !request.suspensions.is_empty() {
+        return Err(invalid("suspensions require revision 5"));
+    }
     let problems = validation::against_documents(source, request, &documents)?;
     if !problems.is_empty() {
         return Err(invalid(serde_json::to_string(&problems).map_err(invalid)?));
     }
     let mut bundle = source.clone();
-    if request.schema_version == 4 {
-        bundle.schema_version = 9;
+    if request.schema_version >= 4 {
+        bundle.schema_version =
+            source
+                .schema_version
+                .max(if request.schema_version >= 5 { 10 } else { 9 });
     }
+    suspensions::apply(&mut bundle, request, &documents)?;
+    crate::trading_status::StatusIndex::build(&bundle)?;
     let mut attached = BTreeMap::new();
     if let Some(path) = &request.structured_manifest {
         if request.schema_version < 3 {
@@ -818,7 +854,7 @@ pub fn apply(
         let root = path
             .parent()
             .ok_or_else(|| invalid("structured evidence root missing"))?;
-        if request.schema_version == 4 {
+        if request.schema_version >= 4 {
             participants::attach_successors(source, &mut bundle, &evidence, &prefix)?;
         }
         for (id, report) in &evidence.field_facts {
@@ -860,6 +896,10 @@ pub fn apply(
     let evidence_source = bundle.clone();
     let mut changed = BTreeSet::new();
     let mut used = BTreeSet::new();
+    for suspension in &request.suspensions {
+        used.insert(suspension.start_evidence.document_id.clone());
+        used.insert(suspension.resume_evidence.document_id.clone());
+    }
     let manifest: Value =
         serde_json::from_slice(&fs::read(&request.evidence_manifest)?).map_err(invalid)?;
     for review in &request.coverage_reviews {
@@ -1011,7 +1051,7 @@ pub fn apply(
                 .fields
                 .get(field)
                 .ok_or_else(|| invalid(format!("changed field lacks evidence: {field}")))?;
-            if request.schema_version == 4 {
+            if request.schema_version >= 4 {
                 verify_leaf_document(&documents, proof, a, field, revision.participants.as_ref())?;
                 used.insert(proof.document_id.clone());
                 continue;
@@ -1065,11 +1105,15 @@ pub fn apply(
             .iter()
             .find(|i| !i.id.is_empty() && i.id == resolution.id)
             .ok_or_else(|| invalid("issue resolution requires a stable existing issue"))?;
+        if issue.code == "distribution_conflict" {
+            distribution::verify(issue, request, &documents)?;
+        }
         if resolution.reason.trim().is_empty()
             || resolution.expected_sha256 != digest(issue)?
             || !matches!(
                 issue.code.as_str(),
                 "source_event_conflict"
+                    | "distribution_conflict"
                     | "cninfo_history_gap"
                     | "cninfo_event_date_missing"
                     | "cninfo_event_chronology_conflict"
@@ -1199,7 +1243,17 @@ pub fn apply(
             bundle.raw_sha256.insert(name.into(), hash);
         }
     }
-    let receipt = serde_json::json!({"schema_version":1,"coverage_validation_version":2,"source_sha256":digest(source)?,"request":request,"source_events":source.actions,"captured_documents":selected_documents,"collection_receipts":collection_receipts,"collector_completion":manifest["complete"],"evidence_manifest_sha256":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(&manifest_bytes))),"applied_at":chrono::Utc::now().to_rfc3339()});
+    let mut receipt = serde_json::json!({"schema_version":1,"coverage_validation_version":2,"source_sha256":digest(source)?,"request":request,"source_events":source.actions,"captured_documents":selected_documents,"collection_receipts":collection_receipts,"collector_completion":manifest["complete"],"evidence_manifest_sha256":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(&manifest_bytes))),"applied_at":chrono::Utc::now().to_rfc3339()});
+    let resolved = source
+        .execution_issues
+        .iter()
+        .filter(|i| {
+            i.code == "distribution_conflict" && request.resolve_issues.iter().any(|r| r.id == i.id)
+        })
+        .collect::<Vec<_>>();
+    if !resolved.is_empty() {
+        receipt["distribution_review"] = serde_json::json!({"schema_version":1,"issues":resolved});
+    }
     let name = format!("review-{}.json", &digest(&receipt)?[7..23]);
     let bytes = serde_json::to_vec_pretty(&receipt).map_err(invalid)?;
     bundle.raw_sha256.insert(
@@ -1335,6 +1389,7 @@ mod tests {
         let original = digest(&a).unwrap();
         a.pay_date = Some("2024-06-06".parse().unwrap());
         let mut request = RevisionRequest {
+            suspensions: vec![],
             structured_manifest: None,
             coverage_reviews: Vec::new(),
             schema_version: 1,
@@ -1463,6 +1518,7 @@ mod coverage_tests {
         };
         write(&shard);
         let mut request = RevisionRequest {
+            suspensions: vec![],
             structured_manifest: None,
             schema_version: 1,
             evidence_manifest: evidence.join("announcements.json"),

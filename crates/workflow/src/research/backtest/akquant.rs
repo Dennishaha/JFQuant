@@ -122,7 +122,10 @@ pub(super) fn simulate(
     let mut lots = BTreeMap::new();
     let mut suspension_marks = Vec::new();
     let mut suspension_traded_days = Vec::new();
+    let mut quote_diagnostics = vec![];
+    let mut quote_conflicts = 0;
     let mut execution_closes = BTreeMap::new();
+    let status_index = analytics_storage::trading_status::StatusIndex::build(book)?;
     let corporate = rights.as_ref().map(|l| &l.corporate);
     for id in &symbols {
         let mut closes = vec![None; dataset.calendar.len()];
@@ -164,15 +167,24 @@ pub(super) fn simulate(
                     .iter()
                     .find(|e| e.instrument == *id && *date > e.last_trade_date && *date < e.date)
             });
-            let status_day = transition_mark.is_some()
-                || analytics_storage::tdx_status::suspension_day(book, id, *date);
+            let status_day = transition_mark.is_some() || status_index.suspended(id, *date);
             let volume = if id == &request.benchmark {
                 Some(0.)
             } else {
                 volume.get(day)
             };
+            if let Err(error) = status_index.check_quote(id, *date, volume) {
+                if scope.get(id).is_some_and(|r| r.contains(*date)) || id == &request.benchmark {
+                    quote_conflicts += 1;
+                    quote_diagnostics.push(serde_json::json!({"id":crate::signature(&(id,date,"suspension_quote_conflict"))?,"instrument":id,"date":date,"kind":"source_conflict","reason":error.to_string(),"exposure":"candidate_only","evidence":status_index.evidence(id,*date),"required_fact":"consistent_full_session_status_and_traded_volume","next_action":"resolve_conflicting_status_or_quote_evidence"}));
+                }
+                continue;
+            }
             let usage = bar_use(status_day, &prices, volume);
             if usage == BarUse::Missing {
+                if scope.get(id).is_some_and(|r| r.contains(*date)) || id == &request.benchmark {
+                    quote_diagnostics.push(serde_json::json!({"id":crate::signature(&(id,date,"execution_quote"))?,"instrument":id,"date":date,"kind":if status_day{"valuation_anchor_or_quote_invalid"}else{"missing_quote_or_unlinked_status"},"exposure":"candidate_only","required_fact":"verified_raw_bar_or_suspension","evidence":status_index.evidence(id,*date),"next_action":"inspect_or_capture_then_draft"}));
+                }
                 continue;
             }
             let suspended = usage == BarUse::Valuation;
@@ -197,7 +209,7 @@ pub(super) fn simulate(
                     mark = action.reference_price(mark)?;
                 }
                 prices = vec![Some(mark); 4];
-                suspension_marks.push(serde_json::json!({"instrument":id,"date":date,"mark":mark,"volume":0,"policy":"GP29-confirmed-suspension-day;no-observed-trading;valuation-only;not-a-market-quote"}));
+                suspension_marks.push(serde_json::json!({"instrument":id,"date":date,"mark":mark,"volume":0,"policy":"verified-suspension-day;no-observed-trading;valuation-only;not-a-market-quote","evidence":status_index.evidence(id,*date)}));
             }
             last_close = prices[3];
             closes[day] = prices[3];
@@ -216,6 +228,10 @@ pub(super) fn simulate(
         execution_closes.insert(id.clone(), closes);
     }
     save(
+        request.output.join("execution_quote_diagnostics.json"),
+        &serde_json::json!({"schema_version":1,"candidate_gaps":quote_diagnostics,"actual_exposure":"not_yet_verified","published_return":false}),
+    )?;
+    save(
         request.output.join("suspension_valuation_marks.json"),
         &suspension_marks,
     )?;
@@ -223,6 +239,9 @@ pub(super) fn simulate(
         request.output.join("suspension_traded_days.json"),
         &suspension_traded_days,
     )?;
+    if quote_conflicts > 0 {
+        return Err(format!("suspension_quote_conflict: {quote_conflicts} task-dependent sessions; see execution_quote_diagnostics.json").into());
+    }
     let mut warnings = checks
         .iter()
         .filter(|c| c.code == "special_event_coverage_unknown")

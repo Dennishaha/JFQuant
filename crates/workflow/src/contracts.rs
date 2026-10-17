@@ -329,7 +329,14 @@ pub enum WorkflowRequest {
         /// Matching resumable task.
         resume: Option<Uuid>,
     },
-    /// Explicitly compose original Qlib raw recovery with a frozen independent coefficient version.
+    /// Publish a verified immutable missing-cell market view.
+    ReviseMarket {
+        /// Frozen registered base market.
+        market: String,
+        /// Explicit selected native captures and missing cells.
+        request: analytics_storage::market_view::supplement::SupplementView,
+    },
+    /// Compose original Qlib raw recovery with a frozen independent coefficient version.
     ComposeMarket {
         /// Original registered Qlib snapshot.
         market: String,
@@ -527,6 +534,7 @@ impl WorkflowRequest {
             Self::DownloadMarket { tag, .. } => format!("下载行情快照 {tag}"),
             Self::CollectActions { .. } => "公司行动采集".into(),
             Self::CollectCoefficients { .. } => "独立复权系数采集".into(),
+            Self::ReviseMarket { .. } => "行情缺口证据修订".into(),
             Self::ComposeMarket { .. } => "组合研究行情版本".into(),
             Self::CollectQuotes { .. } => "独立行情采集".into(),
             Self::CollectMarket { .. } => "行情采集".into(),

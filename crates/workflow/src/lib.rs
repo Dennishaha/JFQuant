@@ -71,3 +71,5 @@ use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, fs, path::Path};
 #[cfg(test)]
 use uuid::Uuid;
+
+mod market_revisions;

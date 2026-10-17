@@ -637,6 +637,32 @@ pub fn apply(
     Ok(bundle)
 }
 
+/// Import authenticated native suspension facts without re-running event reconciliation.
+pub fn import_status(
+    source: &Path,
+    evidence: &Path,
+    output: &Path,
+    context: &analytics_core::task::TaskContext,
+) -> io::Result<()> {
+    let mut book = ActionBundle::read(source)?;
+    super::evidence::copy_tree(
+        source
+            .parent()
+            .ok_or_else(|| invalid("source_parent_missing"))?,
+        output,
+    )?;
+    native_evidence(evidence, output, &mut book.raw_sha256)?;
+    status::attach(evidence, output, &mut book)?;
+    context.check().map_err(invalid)?;
+    book.downloaded_at = chrono::Utc::now().to_rfc3339();
+    fs::write(
+        output.join("actions.json"),
+        serde_json::to_vec_pretty(&book).map_err(invalid)?,
+    )?;
+    ActionBundle::read(&output.join("actions.json"))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

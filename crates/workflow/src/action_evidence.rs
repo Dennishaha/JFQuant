@@ -15,6 +15,22 @@ pub(crate) mod status;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EvidenceRequest {
+    /// Preview verified raw quote repairs for research and account execution.
+    MarketDraft {
+        /// Registered frozen base market.
+        market: String,
+        /// Versioned explicit native selections.
+        request: Box<analytics_storage::market_view::supplement::SupplementView>,
+        /// Optional terminal task binding the report context.
+        task: Option<Uuid>,
+    },
+    /// Import status evidence without reconciling corporate-action terms.
+    ImportStatus {
+        /// Current registered action version.
+        actions: String,
+        /// Terminal native action capture.
+        task: Uuid,
+    },
     /// Capture explicitly selected PDFs without claiming a complete announcement search.
     Capture {
         /// Public selected-document specification.
@@ -63,7 +79,9 @@ pub enum EvidenceRequest {
 impl EvidenceRequest {
     pub(crate) fn actions(&self) -> Option<&str> {
         match self {
-            Self::Status { actions, .. } | Self::Draft { actions, .. } => Some(actions),
+            Self::Status { actions, .. }
+            | Self::Draft { actions, .. }
+            | Self::ImportStatus { actions, .. } => Some(actions),
             _ => None,
         }
     }
@@ -74,7 +92,7 @@ impl EvidenceRequest {
                 .cloned()
                 .map(|p| evidence_path(w, p).map(|p| p.parent().unwrap().to_path_buf()))
                 .collect(),
-            Self::Recover { task } | Self::Retry { task } => {
+            Self::Recover { task } | Self::Retry { task } | Self::ImportStatus { task, .. } => {
                 let root = recovery_root(w, *task)?;
                 if fs::symlink_metadata(&root)?.file_type().is_symlink() {
                     return Err("evidence root cannot be a link".into());
@@ -156,6 +174,12 @@ pub(crate) fn freeze(w: &Workspace, request: &EvidenceRequest) -> Result<Value> 
             json!({"source_record_sha256":analytics_storage::market_view::file_hash(&path)?}),
         );
     }
+    if let EvidenceRequest::MarketDraft {
+        task: Some(task), ..
+    } = request
+    {
+        inputs.push(status::freeze(w, *task)?);
+    }
     if let EvidenceRequest::Status {
         task: Some(task), ..
     }
@@ -200,6 +224,38 @@ pub(crate) fn execute(
     let root = w.resolve(&run.output);
     let mut data = None;
     let details = match request {
+        EvidenceRequest::MarketDraft {
+            market,
+            request,
+            task,
+        } => {
+            let mut report = crate::market_revisions::preview(w, market, request)?;
+            report["task"] = serde_json::to_value(task)?;
+            if let Some(task) = task {
+                report["task_context"] = status::freeze(w, *task)?;
+            }
+            atomic_json(&root.join("validation-receipt.json"), &report)?;
+            report
+        }
+        EvidenceRequest::ImportStatus { actions, task } => {
+            let source = crate::usecases::version(w, actions, "actions")?;
+            let record: RunRecord = serde_json::from_slice(&fs::read(
+                w.resolve(format!(".jfquant/runs/{task}/run.json")),
+            )?)?;
+            let input = crate::usecases::reconciliation_evidence_root(w, *task, &record)?;
+            let staging = w.resolve(format!(".jfquant/staging/status-import-{}", run.id));
+            analytics_storage::corporate_actions::reconcile::import_status(
+                &w.resolve(source.path),
+                &input,
+                &staging,
+                context,
+            )?;
+            context.check()?;
+            let output = w.resolve(format!("data/status-import-{}", run.id));
+            fs::rename(staging, &output)?;
+            data = Some(w.register(&output.join("actions.json"))?);
+            json!({"schema_version":1,"status_only":true,"corporate_action_terms_unchanged":true,"source_task":task})
+        }
         EvidenceRequest::Capture { request } => {
             evidence::capture(request, &root.join("captured"), context)?
         }
@@ -293,7 +349,8 @@ pub(crate) fn execute(
                 analytics_core::pool::validate_instrument(id)?;
                 (
                     review::RevisionRequest {
-                        schema_version: 4,
+                        suspensions: vec![],
+                        schema_version: 5,
                         evidence_manifest: evidence_manifest
                             .clone()
                             .ok_or("draft scaffold requires evidence manifest")?,
@@ -380,7 +437,8 @@ pub(crate) fn execute(
             } else if request.is_some()
                 && (!draft.events.is_empty()
                     || !draft.coverage_reviews.is_empty()
-                    || (draft.schema_version == 4 && draft.structured_manifest.is_some()))
+                    || !draft.suspensions.is_empty()
+                    || (draft.schema_version >= 4 && draft.structured_manifest.is_some()))
             {
                 match review::apply(
                     &book,

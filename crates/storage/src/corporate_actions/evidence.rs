@@ -444,6 +444,7 @@ mod tests {
         book.actions.push(event.clone());
         event.cash_per_share = "0.3".into();
         let req = review::RevisionRequest {
+            suspensions: vec![],
             schema_version: 3,
             evidence_manifest: "announcements.json".into(),
             structured_manifest: None,

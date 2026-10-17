@@ -193,8 +193,20 @@ Announcement PDF extraction is shared between complete CNINFO searches and selec
 
 ## 跨证券修订核验
 
-公司行动格式9／修订4增加基于原文的参与方关联，允许已核实后继公告证明交收字段；预览、发布和加载重放使用同一验证器。`review::validate_proposal` 汇总独立字段问题，身份前置失败标为 waiting_identity；`evidence::combine` 保留完整查询范围及部分捕获边界，不将选定公告升级为全历史证据。接口与验收见 corporate_actions/review 的组件 README。
+公司行动格式10／修订5支持基于原文的参与方关联，允许已核实后继公告证明交收字段；预览、发布和加载重放使用同一验证器。`review::validate_proposal` 汇总独立字段问题，身份前置失败标为 waiting_identity；`evidence::combine` 保留完整查询范围及部分捕获边界，不将选定公告升级为全历史证据。接口与验收见 corporate_actions/review 的组件 README。
 
 提交只核对行动 manifest 的规范签名（`ActionBundle::snapshot_content`），不在持有服务控制锁时重放全部证据；worker 仍通过 `ActionBundle::read` 与 acquisition 检查核验原始字节。快照身份不是准入结论，证据篡改必须在 worker 阻断，不能用元数据缓存替代完整核验。
 
 离线 `data reconcile-actions --evidence-task TASK` 现同步导入完成分片中的已认证 GP29 停复牌证据。公司行动历史采集失败不使独立停牌证据失效，也不借此解除历史覆盖缺口。原生参数、响应、分片哈希一并冻结，读取重放；源证券之外的附件与冲突的已有状态凭据拒绝发布。此路径不修改原始日线、因子或模型。验收：`cargo test -p analytics-storage status_survives`，验证历史失败保留、估值依据可重放与篡改拒绝。
+
+## 证据驱动补齐（修订5／行动10）
+
+公告停复牌通过既有 RevisionRequest.suspensions 审核；start 含当天开市，resume 不含当天，两个边界分别引用原始文档、原文和含义。只接受明确全天／开市边界，不从出版日期推断，也不将空行情当停牌。发布与 ActionBundle::read 重放引用及HTTP/文件哈希；原历史失败、条款冲突和原行情保持。StatusIndex 每任务构建一次，区分公告全天事实和GP29日内可能边界；全天证明与正成交量冲突则阻断。
+
+不可变 market_supplement.json 视图1依赖原快照和已采集来源目录及哈希，Selection 指定证券、日期、原始字段。重放检查证券、单位、已有值、OHLCV及原始归一化因子，只补空值，研究与执行共用原价事实；不拼接供应商复权价。缺少原口径因子则研究保持不可用。文件字段与 Rust 公共类型见 market_view::supplement；各级依赖均重新核验，原始二进制不变。
+
+验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-storage paired_disclosures`、`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-storage repairs_share`。
+
+补录分别报告 execution_ready（原价事实）与 research_ready（原归一化合同）；本版面向研究和执行同时发布，研究口径未通过时保持阻断。补录成交额／成交量后，仅在相关日期按原有原价×因子合同补算缺失 VWAP，已有 VWAP 不变；供应商价格合同中明确不可用的 VWAP 继续为空。矛盾的公告停复牌边界与全天停牌日正成交量均阻断，不按来源优先级覆盖。
+
+差异化现金分红人工审核沿用修订5：一份完整、已认证的正式实施公告即可；不要求多供应商一致。distribution_conflict 仅在原问题哈希及证券／除息日匹配、现金型 Differential、实际派息与参考现金分别引用并标明相同计量单位、登记／支付日期完整时允许显式关闭。新增分派审核收据1保存原问题，读取重验；其他问题、覆盖和失败记录保留。无通用强制通过开关。验收：`cargo test -p analytics-storage single_official_document`。

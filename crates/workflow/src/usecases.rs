@@ -125,7 +125,8 @@ pub(crate) fn version(workspace: &Workspace, id: &str, kind: &str) -> Result<Dat
         if data.details["content_sha256"] != market_content_hash(&path)? {
             return Err("registered market bytes changed; register it as a new version".into());
         }
-        if path.join("market_view.json").is_file() {
+        if path.join("market_view.json").is_file() || path.join("market_supplement.json").is_file()
+        {
             DailyDataset::open(&path)?;
         }
     } else if kind == "coefficients" {
@@ -173,6 +174,9 @@ fn execute_scoped(
         | WorkflowRequest::CollectQuotes { .. }
         | WorkflowRequest::CollectMarket { .. }
         | WorkflowRequest::DownloadActions { .. } => acquisition::execute(w, request, run, context),
+        WorkflowRequest::ReviseMarket { market, request } => {
+            crate::market_revisions::publish(w, market, request, run, context)
+        }
         WorkflowRequest::Evidence { request } => {
             crate::action_evidence::execute(w, request, run, context)
         }

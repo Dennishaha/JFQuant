@@ -80,6 +80,7 @@ pub struct DailyDataset {
     read_range: Option<DateRange>,
     input_scope: Option<BTreeMap<String, BTreeMap<String, std::collections::BTreeSet<usize>>>>,
     view: Option<crate::market_view::MarketView>,
+    supplements: Vec<crate::market_view::supplement::Cell>,
     field_cache: std::cell::RefCell<BTreeMap<(String, String), DailyField>>,
     bar_cache: std::cell::RefCell<BTreeMap<String, Arc<Vec<DailyBar>>>>,
     adjustment_cache: std::cell::RefCell<BTreeMap<String, AdjustmentRecord>>,
@@ -340,6 +341,7 @@ impl DailyDataset {
                 _ => &self.root,
             })?),
             view: self.view.clone(),
+            supplements: self.supplements.clone(),
             source_map: Default::default(),
             read_range: self.read_range.clone(),
             input_scope,
@@ -390,6 +392,61 @@ impl DailyDataset {
         Ok(field)
     }
 
+    fn with_supplements(
+        &self,
+        id: &str,
+        name: &str,
+        base: DailyField,
+        research: bool,
+    ) -> io::Result<DailyField> {
+        if self.supplements.is_empty() {
+            return Ok(base);
+        }
+        let mut values = (0..self.calendar.len())
+            .map(|i| base.get(i))
+            .collect::<Vec<_>>();
+        for cell in self
+            .supplements
+            .iter()
+            .filter(|c| c.instrument == id && c.field == name)
+        {
+            let day = self
+                .calendar
+                .binary_search(&cell.date)
+                .map_err(|_| invalid("supplement_calendar_changed"))?;
+            if values[day].is_none() {
+                values[day] = Some(if research { cell.research } else { cell.raw });
+            }
+        }
+        Ok(DailyField { start: 0, values })
+    }
+    /// Unadjusted turnover in CNY; normalized amount remains in thousands of CNY.
+    pub fn raw_amount(&self, id: &str) -> io::Result<DailyField> {
+        let base = match &self.kind {
+            DailyKind::Qlib(_) => {
+                let field = self.field_base(id, "amount")?;
+                DailyField {
+                    start: 0,
+                    values: (0..self.calendar.len())
+                        .map(|i| field.get(i).map(|v| v * 1000.))
+                        .collect(),
+                }
+            }
+            DailyKind::Parquet(_) => {
+                let bars = self.bars(id)?;
+                let mut values = vec![None; self.calendar.len()];
+                for b in bars.iter() {
+                    let i = self
+                        .calendar
+                        .binary_search(&b.trade_date)
+                        .map_err(|_| invalid("amount_date_outside_calendar"))?;
+                    values[i] = b.amount;
+                }
+                DailyField { start: 0, values }
+            }
+        };
+        self.with_supplements(id, "amount", base, false)
+    }
     /// Open the current canonical format or the supported Qlib binary format.
     pub fn open(root: impl AsRef<Path>) -> io::Result<Self> {
         let root = root.as_ref().canonicalize()?;
@@ -412,6 +469,13 @@ impl DailyDataset {
                     }
                 }
             }
+        }
+        if root.join("market_supplement.json").is_file() {
+            let (base, cells) = crate::market_view::supplement::SupplementView::read(&root)?;
+            let mut dataset = Self::open(base)?;
+            // Keep the underlying provider root; the requested view identity is frozen by the workflow.
+            dataset.supplements.extend(cells);
+            return Ok(dataset);
         }
         if root.join("market_view.json").is_file() {
             let (view, base) = crate::market_view::MarketView::read(&root)?;
@@ -478,6 +542,7 @@ impl DailyDataset {
                 read_range: None,
                 input_scope: None,
                 view: None,
+                supplements: vec![],
                 field_cache: Default::default(),
                 bar_cache: Default::default(),
                 adjustment_cache: Default::default(),
@@ -494,6 +559,7 @@ impl DailyDataset {
                 read_range: None,
                 input_scope: None,
                 view: None,
+                supplements: vec![],
                 field_cache: Default::default(),
                 bar_cache: Default::default(),
                 adjustment_cache: Default::default(),
@@ -915,6 +981,10 @@ impl DailyDataset {
     }
     /// Actual traded shares; no research volume normalization enters execution.
     pub fn raw_volume(&self, id: &str) -> io::Result<DailyField> {
+        let base = self.raw_volume_base(id)?;
+        self.with_supplements(id, "volume", base, false)
+    }
+    fn raw_volume_base(&self, id: &str) -> io::Result<DailyField> {
         if self.needs_binding(id) {
             return self.bound_field(id, "__raw_volume");
         }
@@ -1148,6 +1218,45 @@ impl DailyDataset {
     }
     /// Normalized factor fields with the same rebase/price-volume contract for both formats.
     pub fn field(&self, id: &str, name: &str) -> io::Result<DailyField> {
+        let base = self.field_base(id, name)?;
+        let mut result = self.with_supplements(id, name, base, true)?;
+        // Only derive VWAP where a verified turnover/volume repair supplies its
+        // inputs. Supplier-price contracts deliberately leave VWAP unavailable.
+        if name == "vwap" && !self.uses_supplier_prices(id) {
+            let days = self
+                .supplements
+                .iter()
+                .filter(|c| c.instrument == id && matches!(c.field.as_str(), "volume" | "amount"))
+                .map(|c| c.date)
+                .collect::<std::collections::BTreeSet<_>>();
+            if !days.is_empty() {
+                let amount = self.raw_amount(id)?;
+                let volume = self.raw_volume(id)?;
+                let factor = self.field(id, "factor")?;
+                let mut values = (0..self.calendar.len())
+                    .map(|i| result.get(i))
+                    .collect::<Vec<_>>();
+                for date in days {
+                    let i = self
+                        .calendar
+                        .binary_search(&date)
+                        .map_err(|_| invalid("supplement_calendar_changed"))?;
+                    if values[i].is_none() {
+                        values[i] = amount
+                            .get(i)
+                            .zip(volume.get(i))
+                            .zip(factor.get(i))
+                            .filter(|((a, v), f)| *a > 0. && *v > 0. && *f > 0.)
+                            .map(|((a, v), f)| a / v * f)
+                            .filter(|v| v.is_finite());
+                    }
+                }
+                result = DailyField { start: 0, values };
+            }
+        }
+        Ok(result)
+    }
+    fn field_base(&self, id: &str, name: &str) -> io::Result<DailyField> {
         if self.needs_binding(id) {
             return self.bound_field(id, name);
         }
@@ -1286,6 +1395,10 @@ impl DailyDataset {
     }
     /// Verified unadjusted field for the execution ledger.
     pub fn raw_field(&self, id: &str, name: &str) -> io::Result<DailyField> {
+        let base = self.raw_field_base(id, name)?;
+        self.with_supplements(id, name, base, false)
+    }
+    fn raw_field_base(&self, id: &str, name: &str) -> io::Result<DailyField> {
         if self.needs_binding(id) {
             return self.bound_field(id, &format!("__raw_{name}"));
         }

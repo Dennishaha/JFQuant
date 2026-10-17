@@ -14,6 +14,7 @@ pub struct EvidenceTools {
     manifests: String,
     documents: Vec<serde_json::Value>,
     field_name: String,
+    market_editor: String,
 }
 pub(super) fn controls(
     ui: &mut egui::Ui,
@@ -28,6 +29,21 @@ pub(super) fn controls(
             let manifests=state.platform.evidence_tools.manifests.lines().map(str::trim).filter(|s|!s.is_empty()).map(PathBuf::from).collect();
             submit(state,worker,cancel_slot,WorkflowRequest::Evidence {request:EvidenceRequest::Combine {manifests}});
         }
+        ui.collapsing("行情缺口补录（原快照保持不变）",|ui| {
+            ui.label("选择已采集的行情、日期和字段；研究口径验证失败时不能发布。行情变化后重算研究结果。");
+            if ui.button("载入行情补录请求JSON").clicked() && let Some(path)=rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file() {match fs::read_to_string(path){Ok(text)=>state.platform.evidence_tools.market_editor=text,Err(e)=>state.platform.error=Some(e.to_string())}}
+            ui.text_edit_multiline(&mut state.platform.evidence_tools.market_editor);
+            if ui.button("预览研究与执行行情补录").clicked() && valid_task(state) {match serde_json::from_str(&state.platform.evidence_tools.market_editor){Ok(request)=>submit(state,worker,cancel_slot,WorkflowRequest::Evidence{request:EvidenceRequest::MarketDraft{market:state.platform.market.clone(),request:Box::new(request),task:state.platform.evidence_tools.status_task.trim().parse().ok()}}),Err(e)=>state.platform.error=Some(e.to_string())}}
+            if ui.button("重新核验并发布行情新版本").clicked(){match serde_json::from_str(&state.platform.evidence_tools.market_editor){Ok(request)=>submit(state,worker,cancel_slot,WorkflowRequest::ReviseMarket{market:state.platform.market.clone(),request}),Err(e)=>state.platform.error=Some(e.to_string())}}
+            let report=state.platform.details.get("details").unwrap_or(&state.platform.details);
+            if report.get("request_sha256").is_some(){
+                let stale=market_preview_stale(report,&state.platform.market,&state.platform.evidence_tools.market_editor,&state.platform.evidence_tools.status_task);
+                if stale {ui.colored_label(egui::Color32::YELLOW,"行情预览已过期：请重新核验");}
+                ui.label(format!("研究可用：{}；执行可用：{}",report["research_ready"],report["execution_ready"]));
+                ui.collapsing("候选单元格与原价／研究值",|ui|{ui.label(report["cells"].to_string());});
+                ui.collapsing("未解决问题",|ui|{ui.label(report["problems"].to_string());});
+            }
+        });
         ui.label("选定公告只补充该文档，不代表整段历史完整。原始版本与失败任务记录保留。");
         ui.horizontal(|ui| {
             if ui.button("查看所选版本证据缺口").clicked(){submit(state,worker,cancel_slot,WorkflowRequest::Evidence{request:EvidenceRequest::Status{actions:state.platform.actions.clone(),instrument:None,task:None}});}
@@ -62,6 +78,7 @@ pub(super) fn controls(
             ui.label("已结束的采集任务ID");ui.text_edit_singleline(&mut state.platform.evidence_tools.recover_task);
             if ui.button("核验并恢复已完成证据").clicked(){match state.platform.evidence_tools.recover_task.trim().parse(){Ok(task)=>submit(state,worker,cancel_slot,WorkflowRequest::Evidence{request:EvidenceRequest::Recover{task}}),Err(_)=>state.platform.error=Some("采集任务ID无效".into())}}
         });
+        if ui.button("仅导入停复牌证据，不重新协调行动条款").clicked(){match state.platform.evidence_tools.recover_task.trim().parse(){Ok(task)=>submit(state,worker,cancel_slot,WorkflowRequest::Evidence{request:EvidenceRequest::ImportStatus{actions:state.platform.actions.clone(),task}}),Err(_)=>state.platform.error=Some("原采集任务ID无效".into())}}
         if ui.button("按原请求重试采集并复用检查点").clicked(){match state.platform.evidence_tools.recover_task.trim().parse(){Ok(task)=>submit(state,worker,cancel_slot,WorkflowRequest::Evidence{request:EvidenceRequest::Retry{task}}),Err(_)=>state.platform.error=Some("原采集任务ID无效".into())}}
         ui.horizontal(|ui| {
             if ui.button("生成本证券修订草稿").clicked(){if !valid_task(state){return;}submit(state,worker,cancel_slot,WorkflowRequest::Evidence{request:EvidenceRequest::Draft{task:state.platform.evidence_tools.status_task.trim().parse().ok(),actions:state.platform.actions.clone(),request:None,instrument:Some(state.platform.action_review_instrument.clone()),evidence_manifest:Some(PathBuf::from(&state.platform.action_evidence_manifest))}});}
@@ -120,6 +137,20 @@ pub(super) fn controls(
     });
 }
 
+fn market_preview_stale(
+    report: &serde_json::Value,
+    market: &str,
+    editor: &str,
+    task: &str,
+) -> bool {
+    report["market"].as_str() != Some(market)
+        || serde_json::from_str::<serde_json::Value>(editor)
+            .ok()
+            .as_ref()
+            != Some(&report["request"])
+        || report["task"].as_str().unwrap_or("") != task.trim()
+}
+
 fn report_stale(report: &serde_json::Value, actions: &str, task: &str, market: &str) -> bool {
     report["actions"].as_str() != Some(actions)
         || report["current"]["task"].as_str() != Some(task.trim())
@@ -141,7 +172,21 @@ pub(super) fn event_terms_editor(
         if let Some(events) = request["events"].as_array_mut() {
             events.push(analytics_storage::corporate_actions::evidence::conversion_template(""));
         }
-        request["schema_version"] = 4.into();
+        request["schema_version"] = 5.into();
+        *editor = serde_json::to_string_pretty(&request).unwrap();
+    }
+    let mut status_changed = false;
+    ui.collapsing("公告停复牌区间审核",|ui| {
+        ui.small("区间从停牌日开市开始，到复牌日开市前结束；必须分别关联原始边界引用，不修改行情。");
+        if ui.button("新增有边界证据的停牌区间").clicked(){if !request["suspensions"].is_array(){request["suspensions"]=serde_json::json!([]);}request["suspensions"].as_array_mut().unwrap().push(serde_json::json!({"instrument":"","start":"","resume":"","reason":"","start_evidence":{"document_id":"","quote":"","unit":"session_open"},"resume_evidence":{"document_id":"","quote":"","unit":"session_open"}}));status_changed=true;}
+        for (i,item) in request["suspensions"].as_array_mut().into_iter().flatten().enumerate(){ui.push_id(("suspension",i),|ui|{
+            for (key,label) in [("instrument","证券"),("start","停牌首日"),("resume","复牌首日"),("reason","审核理由")] {let mut value=item[key].as_str().unwrap_or("").to_owned();ui.label(label);if ui.text_edit_singleline(&mut value).changed(){item[key]=value.into();status_changed=true;}}
+            ui.push_id("start",|ui|{ui.label("停牌原文");status_changed|=proof_editor(ui,&mut item["start_evidence"],&tools.documents);});
+            ui.push_id("resume",|ui|{ui.label("复牌原文");status_changed|=proof_editor(ui,&mut item["resume_evidence"],&tools.documents);});
+        });}
+    });
+    if status_changed {
+        request["schema_version"] = 5.into();
         *editor = serde_json::to_string_pretty(&request).unwrap();
     }
     let Some(events) = request["events"].as_array_mut() else {
@@ -206,7 +251,7 @@ pub(super) fn event_terms_editor(
         }
     });
     if changed {
-        request["schema_version"] = 4.into();
+        request["schema_version"] = 5.into();
         *editor = serde_json::to_string_pretty(&request).unwrap();
     }
 }
@@ -286,6 +331,15 @@ fn valid_task(state: &mut AppState) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn market_preview_tracks_request_market_and_task() {
+        let report = serde_json::json!({"market":"m1","request":{"schema_version":1},"task":"t1"});
+        let editor = report["request"].to_string();
+        assert!(!market_preview_stale(&report, "m1", &editor, "t1"));
+        assert!(market_preview_stale(&report, "m2", &editor, "t1"));
+        assert!(market_preview_stale(&report, "m1", "{}", "t1"));
+        assert!(market_preview_stale(&report, "m1", &editor, "t2"));
+    }
     #[test]
     fn draft_receipt_expires_when_editor_actions_or_task_changes() {
         let draft = serde_json::json!({"schema_version":4,"events":[]});

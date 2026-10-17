@@ -48,6 +48,9 @@ pub fn snapshot(workspace: &Workspace, request: &WorkflowRequest) -> Result<Valu
             }
             v
         }
+        WorkflowRequest::ReviseMarket { market, .. } => {
+            vec![version_metadata(workspace, market, "market")?]
+        }
         WorkflowRequest::ComposeMarket {
             market,
             coefficients,

@@ -1,5 +1,6 @@
 //! Immutable explicit composition: restore Qlib raw values with its ORIGINAL scale,
 //! then use independent coefficients for research. Source binaries are never overwritten.
+pub mod supplement;
 use crate::adjustment::AdjustmentAnchor;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

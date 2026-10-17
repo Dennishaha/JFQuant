@@ -139,6 +139,12 @@ pub enum DataCommand {
         #[arg(long)]
         market: Option<String>,
     },
+    ReviseMarket {
+        #[arg(long)]
+        market: String,
+        #[arg(long)]
+        request: PathBuf,
+    },
     ReviseActions {
         #[arg(long)]
         actions: String,
@@ -168,6 +174,13 @@ pub enum DataCommand {
 /// Agent-friendly operations sharing the desktop evidence worker.
 #[derive(Debug, Subcommand)]
 pub enum EvidenceCommand {
+    /// Import only independently verified native suspension facts.
+    ImportStatus {
+        #[arg(long)]
+        actions: String,
+        #[arg(long)]
+        task: Uuid,
+    },
     /// Combine verified captures from different issuers without claiming coverage.
     Combine {
         #[arg(long, num_args = 2..)]
@@ -200,8 +213,10 @@ pub enum EvidenceCommand {
     },
     /// Generate a scaffold, or rebase and validate reviewed proposals without publishing.
     Draft {
-        #[arg(long)]
-        actions: String,
+        #[arg(long, required_unless_present = "market", conflicts_with = "market")]
+        actions: Option<String>,
+        #[arg(long, requires = "request")]
+        market: Option<String>,
         #[arg(long)]
         request: Option<PathBuf>,
         #[arg(long, required_unless_present = "request")]
@@ -1005,12 +1020,13 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
             DataCommand::Evidence(command) => {
                 use analytics_workflow::action_evidence::EvidenceRequest;
                 let request=match command {
+                    EvidenceCommand::ImportStatus {actions,task} => EvidenceRequest::ImportStatus{actions,task},
                     EvidenceCommand::Combine { manifests } => EvidenceRequest::Combine{manifests},
                     EvidenceCommand::Capture { request } => EvidenceRequest::Capture{request:read(&client.root,&request)?},
                     EvidenceCommand::Recover { task } => EvidenceRequest::Recover{task},
                     EvidenceCommand::Retry { task } => EvidenceRequest::Retry{task},
                     EvidenceCommand::Status {actions,instrument,task} => EvidenceRequest::Status{actions,instrument,task},
-                    EvidenceCommand::Draft {actions,request,instrument,evidence_manifest,task} => EvidenceRequest::Draft{actions,request:request.map(|p|read(&client.root,&p).map(Box::new)).transpose()?,instrument,evidence_manifest,task},
+                    EvidenceCommand::Draft {actions,market,request,instrument,evidence_manifest,task} => if let Some(market)=market {EvidenceRequest::MarketDraft{market,request:Box::new(read(&client.root,&request.unwrap())?),task}} else {EvidenceRequest::Draft{actions:actions.unwrap(),request:request.map(|p|read(&client.root,&p).map(Box::new)).transpose()?,instrument,evidence_manifest,task}},
                 };
                 workflow(WorkflowRequest::Evidence{request})
             }
@@ -1039,6 +1055,7 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
                 evidence_tasks,
                 market,
             }),
+            DataCommand::ReviseMarket {market,request} => workflow(WorkflowRequest::ReviseMarket{market,request:read(&client.root,&request)?}),
             DataCommand::ReviseActions { actions, request } => {
                 workflow(WorkflowRequest::ReviseActions {
                     actions,

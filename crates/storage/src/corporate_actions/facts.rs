@@ -824,6 +824,7 @@ mod tests {
         let mut replacement = original.clone();
         replacement.record_date = Some("2022-01-18".parse().unwrap());
         let mut request = RevisionRequest {
+            suspensions: vec![],
             structured_manifest: None,
             schema_version: 2,
             evidence_manifest: tmp.path().join("actions.json"),

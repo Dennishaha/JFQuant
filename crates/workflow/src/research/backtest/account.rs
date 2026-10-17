@@ -158,6 +158,12 @@ pub(super) fn reconcile(
         positions.retain(|_, q| q.abs() > 1e-8);
         let mut equity = cash;
         let mut prices = BTreeMap::new();
+        let missing=positions.keys().filter(|id|closes.get(*id).and_then(|v|v.get(index)).copied().flatten().is_none()).map(|id|json!({"id":crate::signature(&(id,date,"execution_valuation")).unwrap(),"instrument":id,"date":date,"quantity":positions[id],"kind":"missing_verified_valuation","required_fact":"verified_raw_close_or_suspension_mark","next_action":"link_evidence_or_repair_market_then_rerun"})).collect::<Vec<_>>();
+        if !missing.is_empty() {
+            let report = json!({"schema_version":1,"published_return":false,"actual_gaps":missing,"affected_security_count":missing.len(),"later_state":"waiting_for_prior_valuation_verification","waiting_from":date,"candidate_report":"execution_quote_diagnostics.json"});
+            save(root.join("execution_valuation_gaps.json"), &report)?;
+            return Err(format!("execution_valuation_missing: {} {date}; {} independently known holdings; later state awaits verification",missing[0]["instrument"].as_str().unwrap_or("unknown"),missing.len()).into());
+        }
         for (id, qty) in &positions {
             let price = closes
                 .get(id)

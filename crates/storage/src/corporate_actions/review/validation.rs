@@ -50,7 +50,7 @@ pub fn validate_proposal(
     source: &ActionBundle,
     request: &RevisionRequest,
 ) -> io::Result<Vec<Diagnostic>> {
-    if request.schema_version != 4 {
+    if request.schema_version < 4 {
         if request.events.iter().any(|e| e.participants.is_some()) {
             return Err(invalid("participant evidence requires revision 4"));
         }
@@ -64,13 +64,49 @@ pub(super) fn against_documents(
     request: &RevisionRequest,
     documents: &BTreeMap<String, (Value, String)>,
 ) -> io::Result<Vec<Diagnostic>> {
-    if request.schema_version != 4 {
+    if request.schema_version < 4 {
         return Ok(vec![]);
     }
     let mut out = vec![];
+    for suspension in &request.suspensions {
+        if let Err(e) = super::suspensions::verify(suspension, documents) {
+            out.push(Diagnostic {
+                id: digest(suspension)?,
+                instrument: suspension.instrument.clone(),
+                event_id: None,
+                field: "suspensions".into(),
+                kind: "invalid_evidence".into(),
+                reason: e.to_string(),
+                evidence: vec![
+                    suspension.start_evidence.document_id.clone(),
+                    suspension.resume_evidence.document_id.clone(),
+                ],
+                next_action: "link_verified_suspension_boundaries".into(),
+            });
+        }
+    }
     for revision in &request.events {
         task_context_check()?;
         out.extend(event_problems(source, revision, documents)?);
+    }
+    for resolution in &request.resolve_issues {
+        if let Some(issue) = source
+            .execution_issues
+            .iter()
+            .find(|i| i.id == resolution.id && i.code == "distribution_conflict")
+            && let Err(error) = super::distribution::verify(issue, request, documents)
+        {
+            out.push(Diagnostic {
+                id: digest(&(issue.id.clone(), "distribution_resolution"))?,
+                instrument: issue.instrument.clone(),
+                event_id: None,
+                field: "resolve_issues".into(),
+                kind: "invalid_evidence".into(),
+                reason: error.to_string(),
+                evidence: issue.evidence.clone(),
+                next_action: "review_actual_and_reference_cash_separately".into(),
+            });
+        }
     }
     let root = request.evidence_manifest.parent().unwrap();
     for review in &request.coverage_reviews {
@@ -275,6 +311,8 @@ pub(super) fn replay(bundle: &ActionBundle, root: &Path, receipt: &Value) -> io:
             return Err(invalid("review_duplicate_document"));
         }
     }
+    super::suspensions::replay(bundle, &request, &documents)?;
+    super::distribution::replay(bundle, &request, receipt, &documents)?;
     let mut source = bundle.clone();
     source.actions = serde_json::from_value(receipt["source_events"].clone()).map_err(invalid)?;
     for revision in &request.events {
@@ -347,6 +385,7 @@ mod tests {
             })
             .collect();
         let request = RevisionRequest {
+            suspensions: vec![],
             schema_version: 4,
             evidence_manifest: root.join("capture/announcements.json"),
             structured_manifest: None,

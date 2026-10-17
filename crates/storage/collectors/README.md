@@ -118,3 +118,10 @@ GP29确认停牌日且缺少原始日线/成交量为零时，在日频账户适
 运行时依赖：requests 2.34.2、pandas 3.0.6、pypdf 6.20.1；通达信 SDK 保持 1.2.2。新公告标记 `cninfo-candidates-v5` 并记录 `pypdf_version`；旧公告文本、哈希、引用保留，不按新版重写。Python 独立运行时使用 3.12.15/20261013 构建。验收：`PYTHONPATH=crates/storage/collectors target/collector-build/python/bin/python3 -B -m unittest discover -s crates/storage/collectors/tests`。
 
 新发布的完整覆盖审核要求CNINFO原始查询回执绑定公开的证券/机构、交易所、完整查询和日期参数（coverage_validation_version=2）。固定采集器仅记录该公开接口的白名单表单，不记录供应商认证头或密钥。完整覆盖审核仅接受校验版本2；旧审核或旧采集批次缺少查询绑定时须重新采集并发布，选定PDF仍只能证明单笔事实。
+
+公告候选解析 v7 同时识别“证券代码…变更”和“变更…证券代码”，包括变更简称及代码的实施公告。提案与提示仍保持未核实分类；完整覆盖审核仍要求分页、查询身份及候选集合重放。回归：`PYTHONPATH=crates/storage/collectors target/collector-build/python/bin/python3 -B -m unittest discover -s crates/storage/collectors/tests -p test_announcements.py`。
+分页相同时间戳漂移时，最多三轮重读，只有收齐接口总数对应的唯一公告才完成；同ID元数据冲突、总数变化、空截断页和漏项仍失败。总数明确为0的null公告列表保留为空查询回执，不自动声明无事件。
+
+公告全文查询与选定文档捕获共用 `extract_pdf_text`：PDF 上限64 MiB、4096页，拒绝加密PDF，逐页累计文本上限8 MiB。此上限覆盖大型合并报告，超限仍失败，不跳过候选或宣告覆盖完整。错误区分HTTP状态/主机、PDF头、字节、页数、加密及文本限制。历史查询解析器版本为 `cninfo-candidates-v10`。
+
+Large-document progress: report before each candidate download and after each32 extracted pages (including the final page). Progress reflects completed work; the native no-progress watchdog and cancellation remain enabled. The shared extractor accepts an optional progress callback; selected-document capture keeps its single JSON extraction response.

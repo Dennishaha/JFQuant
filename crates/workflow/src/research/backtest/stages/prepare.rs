@@ -645,6 +645,10 @@ pub(super) fn prepare(
                 end: folds.last().unwrap().actual.test.end,
             },
         )?;
+        save(
+            request.output.join("execution_checks.json"),
+            &execution_checks,
+        )?;
         if execution_checks
             .iter()
             .any(|c| c.status == CheckStatus::Failed)

@@ -6,9 +6,10 @@
   "upstream_tag_commit": "9bb8c9279526126c113c50d690c076396abd0e93",
   "cargo_lock_sha256": "c7042ac4a5aac036501e971a9dd08e550ef13aefadf970676f65706d34fa745d",
   "inputs": {
-    "crates/app/packaging/akquant-rights.patch": "7a173ab8d24bd5243270713f8150acb7ee50b68314a04f5a815cb08be850c348",
+    "crates/app/packaging/akquant-rights.patch": "64bd8db471ae2eb83c966db2983826d14ecd0b5636b437009839fa8650b8934c",
     "crates/core/src/rights.rs": "b47c676c504699f3e37f3593b9a5e8435b79702e6259a85db5de0fb42fb4078a",
-    "crates/core/src/rights_account.rs": "633699c6250e2d0c47b0962f2de64b38c6d0d079f01f391e96ee60b36c9e96d4",
-    "crates/app/packaging/akquant-build-tools.lock": "3a7c6a2aeda3d5815e6e3a5856eab664be917a5e0324c9db62cea2f53802e139"
+    "crates/core/src/rights_account.rs": "d982c23f985499f95ce76b22a3912249f1e5eeb43508388cd465cb8e4f081bf7",
+    "crates/app/packaging/akquant-build-tools.lock": "3a7c6a2aeda3d5815e6e3a5856eab664be917a5e0324c9db62cea2f53802e139",
+    "crates/core/src/corporate_account.rs": "202d72ca164f6c31c4410a1fcd6df88fe043da4da6cf96821962a2b74b26910a"
   }
 }

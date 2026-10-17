@@ -3,7 +3,7 @@ use super::*;
 use analytics_core::actions::EventTerms;
 use analytics_core::admission::{AdmissionCheck, AdmissionStage, CheckStatus};
 use analytics_core::execution::EventCheckPolicy;
-use analytics_storage::corporate_actions::ActionBundle;
+use analytics_storage::corporate_actions::{ActionBundle, dependencies::DependencyIndex};
 
 // Raw execution bars already contain the exchange reference adjustment. A verified
 // cash-only differential therefore projects its actual ordinary-holder cash to Dividend.
@@ -69,27 +69,14 @@ fn check(
         affected_factors: vec![],
     }
 }
-pub(super) fn audited_coverage(book: &ActionBundle, id: &str, range: &DateRange) -> bool {
-    analytics_storage::corporate_actions::dependencies::DependencyIndex::build(book)
-        .and_then(|index| {
-            index.resolve(
-                id,
-                std::slice::from_ref(range),
-                analytics_storage::corporate_actions::EVENT_CATEGORIES,
-                EventCheckPolicy::Audited,
-            )
-        })
-        .is_ok_and(|r| r.ready())
-}
 pub(crate) fn event_checks(
     book: Option<&ActionBundle>,
     scope: &BTreeMap<String, DateRange>,
     policy: EventCheckPolicy,
+    projected: &BTreeSet<String>,
+    index: Option<&DependencyIndex>,
 ) -> Vec<AdmissionCheck> {
     let mut checks = vec![];
-    let index = book
-        .map(analytics_storage::corporate_actions::dependencies::DependencyIndex::build)
-        .transpose();
     for (id, range) in scope {
         let Some(book) = book else {
             checks.push(check(
@@ -101,18 +88,18 @@ pub(crate) fn event_checks(
             ));
             continue;
         };
-        let resolution = index.as_ref().map_err(|e| e.to_string()).and_then(|index| {
-            index
-                .as_ref()
-                .ok_or_else(|| "event version missing".to_string())?
-                .resolve(
-                    id,
-                    std::slice::from_ref(range),
-                    analytics_storage::corporate_actions::EVENT_CATEGORIES,
-                    policy,
-                )
-                .map_err(|e| e.to_string())
-        });
+        let resolution = index
+            .ok_or_else(|| "event version missing".to_string())
+            .and_then(|index| {
+                index
+                    .resolve(
+                        id,
+                        std::slice::from_ref(range),
+                        analytics_storage::corporate_actions::EVENT_CATEGORIES,
+                        policy,
+                    )
+                    .map_err(|e| e.to_string())
+            });
         match resolution {
             Ok(current) => {
                 let code = current
@@ -141,6 +128,25 @@ pub(crate) fn event_checks(
                 vec![],
             )),
         }
+        if policy == EventCheckPolicy::Provider
+            && !index
+                .and_then(|i| {
+                    i.resolve(
+                        id,
+                        std::slice::from_ref(range),
+                        analytics_storage::corporate_actions::EVENT_CATEGORIES,
+                        EventCheckPolicy::Audited,
+                    )
+                    .ok()
+                })
+                .is_some_and(|r| r.ready())
+        {
+            let mut c = check(Some(id.clone()), range, "special_event_coverage_unknown", Some("Complete independently audited event coverage is unavailable; provider policy applies".into()), vec![]);
+            c.category = "account_events".into();
+            c.disposition = ProblemDisposition::Warn;
+            c.status = CheckStatus::NotRun;
+            checks.push(c);
+        }
         for event in book
             .actions
             .iter()
@@ -156,6 +162,8 @@ pub(crate) fn event_checks(
             );
             let (code, error) = if ordinary && invalid.is_some() {
                 ("execution_event_terms_invalid", invalid)
+            } else if projected.contains(&event.id) {
+                ("execution_event_projected", None)
             } else if !supported_distribution(event) {
                 (
                     "execution_event_unsupported",
@@ -184,9 +192,6 @@ pub(crate) fn event_checks(
                 );
                 if code == "execution_event_unsupported" {
                     c.category = "account_events".into();
-                    c.disposition = ProblemDisposition::Warn;
-                    c.status = CheckStatus::NotRun;
-                    c.code = "execution_event_unsupported_skipped".into();
                 }
                 checks.push(c);
             }
@@ -210,8 +215,9 @@ pub(crate) fn event_checks(
             }
             if issue.skipped_by_engine() {
                 c.category = "account_events".into();
-                c.disposition = ProblemDisposition::Warn;
-                c.status = CheckStatus::NotRun;
+                c.disposition = ProblemDisposition::Block;
+                c.status = CheckStatus::Failed;
+                c.code = "execution_unprojected_issue".into();
             }
             checks.push(c);
         }
@@ -281,6 +287,45 @@ pub(super) fn skipped_events(
     }
     events
 }
+pub(crate) struct DependencyProjection {
+    pub scope: BTreeMap<String, DateRange>,
+    pub projected: BTreeSet<String>,
+    pub ledger: Option<analytics_core::rights_account::Ledger>,
+}
+pub(crate) fn dependencies(
+    request: &ResearchRequest,
+    dataset: &DailyDataset,
+    book: Option<&ActionBundle>,
+    pool: &analytics_core::pool::PoolMembership,
+    range: &DateRange,
+) -> Result<DependencyProjection> {
+    let original = scope(pool, range);
+    let projection = book
+        .map(|b| super::rights::input(request, b, dataset, pool, range))
+        .transpose()?
+        .flatten();
+    let projected = projection
+        .as_ref()
+        .map(|l| {
+            l.events
+                .iter()
+                .map(|e| e.id.clone())
+                .chain(l.corporate.events.iter().map(|e| e.id.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let scoped = if super::corporate::enabled(request) {
+        book.map(|b| super::corporate::scope(b, original.clone(), range))
+            .unwrap_or(original)
+    } else {
+        original
+    };
+    Ok(DependencyProjection {
+        scope: scoped,
+        projected,
+        ledger: projection,
+    })
+}
 pub(super) fn checks(
     request: &ResearchRequest,
     dataset: &DailyDataset,
@@ -288,12 +333,35 @@ pub(super) fn checks(
     pool: &analytics_core::pool::PoolMembership,
     range: &DateRange,
 ) -> Result<Vec<AdmissionCheck>> {
-    let scope = scope(pool, range);
+    let original_scope = scope(pool, range);
+    let DependencyProjection {
+        scope,
+        projected,
+        ledger: projection,
+    } = dependencies(request, dataset, book, pool, range)?;
+    if let Some(ledger) = &projection {
+        save(request.output.join("rights_input.json"), ledger)?;
+        save(
+            request.output.join("corporate_event_preview.json"),
+            &serde_json::json!({"schema_version":1,"policy":ledger.corporate.policy,"candidate_events":ledger.corporate.events,"actual_exposure":"not_run"}),
+        )?;
+    }
+    let mut projection_request = request.clone();
+    projection_request.output = PathBuf::new();
+    projection_request.reuse_training = None;
+    projection_request.reuse_predictions = None;
     save(
         request.output.join("execution-dependencies.json"),
-        &serde_json::json!({"schema_version":1,"policy":request.event_check_policy,"scope":scope}),
+        &serde_json::json!({"schema_version":2,"policy":request.event_check_policy,"scope":scope,"original_scope":original_scope,"range":range,"corporate_event_policy":request.corporate_event_policy,"projected":projected,"request":projection_request,"pool":pool,"market_content_sha256":crate::market_content_hash(&request.data_root)?}),
     )?;
-    let mut checks = event_checks(book, &scope, request.event_check_policy);
+    let index = book.map(DependencyIndex::build).transpose()?;
+    let mut checks = event_checks(
+        book,
+        &scope,
+        request.event_check_policy,
+        &projected,
+        index.as_ref(),
+    );
     checks.push(check(
         None,
         range,
@@ -371,6 +439,15 @@ pub(super) fn checks(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn event_checks(
+        book: Option<&ActionBundle>,
+        scope: &BTreeMap<String, DateRange>,
+        policy: EventCheckPolicy,
+        projected: &BTreeSet<String>,
+    ) -> Vec<AdmissionCheck> {
+        let index = book.map(DependencyIndex::build).transpose().unwrap();
+        super::event_checks(book, scope, policy, projected, index.as_ref())
+    }
     fn range(a: &str, b: &str) -> DateRange {
         DateRange {
             start: a.parse().unwrap(),
@@ -393,13 +470,23 @@ mod tests {
         );
         let r = range("2021-01-01", "2021-01-05");
         let scope = BTreeMap::from([("SH600000".into(), r.clone())]);
-        let checks = event_checks(Some(&b), &scope, EventCheckPolicy::Provider);
+        let checks = event_checks(
+            Some(&b),
+            &scope,
+            EventCheckPolicy::Provider,
+            &BTreeSet::new(),
+        );
         assert_eq!(checks.last().unwrap().status, CheckStatus::NotRun);
         assert_eq!(
-            event_checks(Some(&b), &scope, EventCheckPolicy::Audited)
-                .last()
-                .unwrap()
-                .status,
+            event_checks(
+                Some(&b),
+                &scope,
+                EventCheckPolicy::Audited,
+                &BTreeSet::new()
+            )
+            .last()
+            .unwrap()
+            .status,
             CheckStatus::Failed
         );
         let mut snapshots = BTreeMap::from([
@@ -446,9 +533,9 @@ mod tests {
         let mut b = book();
         b.failures.insert("SH600001".into(), "unavailable".into());
         assert!(
-            event_checks(Some(&b), &s, EventCheckPolicy::Provider)
+            event_checks(Some(&b), &s, EventCheckPolicy::Provider, &BTreeSet::new())
                 .iter()
-                .all(|c| c.status == CheckStatus::Passed)
+                .all(|c| c.status != CheckStatus::Failed)
         );
     }
     #[test]
@@ -456,22 +543,22 @@ mod tests {
         let s = BTreeMap::from([("SH600000".into(), range("2012-01-01", "2026-12-31"))]);
         let mut b = book();
         assert_eq!(
-            event_checks(Some(&b), &s, EventCheckPolicy::Provider)[0].status,
+            event_checks(Some(&b), &s, EventCheckPolicy::Provider, &BTreeSet::new())[0].status,
             CheckStatus::Passed
         );
         b.structured_coverage.clear();
         assert_eq!(
-            event_checks(Some(&b), &s, EventCheckPolicy::Provider)[0].code,
+            event_checks(Some(&b), &s, EventCheckPolicy::Provider, &BTreeSet::new())[0].code,
             "execution_structured_coverage_missing"
         );
         b.queried_symbols.clear();
         assert_eq!(
-            event_checks(Some(&b), &s, EventCheckPolicy::Provider)[0].code,
+            event_checks(Some(&b), &s, EventCheckPolicy::Provider, &BTreeSet::new())[0].code,
             "execution_history_not_queried"
         );
         b.failures.insert("SH600000".into(), "failed".into());
         assert_eq!(
-            event_checks(Some(&b), &s, EventCheckPolicy::Provider)[0].code,
+            event_checks(Some(&b), &s, EventCheckPolicy::Provider, &BTreeSet::new())[0].code,
             "execution_source_failed"
         );
     }
@@ -485,23 +572,38 @@ mod tests {
         assert_eq!(event.reference_price(10.).unwrap(), 9.85);
         b.actions.push(event);
         assert!(
-            event_checks(Some(&b), &scope, EventCheckPolicy::Provider)
-                .iter()
-                .all(|c| c.status == CheckStatus::Passed)
+            event_checks(
+                Some(&b),
+                &scope,
+                EventCheckPolicy::Provider,
+                &BTreeSet::new()
+            )
+            .iter()
+            .all(|c| c.status != CheckStatus::Failed)
         );
         assert!(skipped_events(&b, &scope).is_empty());
         b.actions[0].shares_per_share = "invalid".into();
         assert!(
-            event_checks(Some(&b), &scope, EventCheckPolicy::Provider)
-                .iter()
-                .any(|c| c.status == CheckStatus::Failed)
+            event_checks(
+                Some(&b),
+                &scope,
+                EventCheckPolicy::Provider,
+                &BTreeSet::new()
+            )
+            .iter()
+            .any(|c| c.status == CheckStatus::Failed)
         );
         b.actions[0].shares_per_share = "0".into();
         b.actions[0].cash_per_share = "-1".into();
         assert!(
-            event_checks(Some(&b), &scope, EventCheckPolicy::Provider)
-                .iter()
-                .any(|c| c.status == CheckStatus::Failed)
+            event_checks(
+                Some(&b),
+                &scope,
+                EventCheckPolicy::Provider,
+                &BTreeSet::new()
+            )
+            .iter()
+            .any(|c| c.status == CheckStatus::Failed)
         );
     }
     #[test]
@@ -510,13 +612,13 @@ mod tests {
         let mut b = book();
         b.actions.push(serde_json::from_value(serde_json::json!({"id":"SH600000:2013-06-02","instrument":"SH600000","announced":"2013-05-01","record_date":"2013-06-01","ex_date":"2013-06-02","pay_date":null,"listing_date":null,"cash_per_share":0.2,"shares_per_share":0.1,"source":"hithink.events/per-share-v1"})).unwrap());
         assert!(
-            event_checks(Some(&b), &s, EventCheckPolicy::Provider)
+            event_checks(Some(&b), &s, EventCheckPolicy::Provider, &BTreeSet::new())
                 .iter()
-                .all(|c| c.status == CheckStatus::Passed)
+                .all(|c| c.status != CheckStatus::Failed)
         );
         b.actions[0].cash_per_share = (-1.).to_string();
         assert!(
-            event_checks(Some(&b), &s, EventCheckPolicy::Provider)
+            event_checks(Some(&b), &s, EventCheckPolicy::Provider, &BTreeSet::new())
                 .iter()
                 .any(|c| c.code == "execution_event_terms_invalid")
         );

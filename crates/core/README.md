@@ -73,3 +73,9 @@ ModelManifest继续读取格式2，并在格式3保留有序factor_refs和factor
 
 `Schedule::resolve_for_training` 只要求训练和验证的日历覆盖；未执行的未来测试窗口不影响
 独立训练准入。滚动训练沿用既有折选择及历史种子，检查报告只包含实际使用的阶段。
+
+## Company transitions
+
+`corporate_account` supplies a Decimal account journal, embedded in `rights_account::Ledger` so native matching and Rust verification use the same implementation. `Policy::ResearchTransitions` is an explicit simulation choice: terminal raw-close liquidation after fills, same-interest code migration, floor merger conversion and locked successor claims. Reviewed `last_trade_date` is a fact; floor allocation and liquidation are not registrar evidence. Transitions preserve zero-exposure records, reject repeated/out-of-order phases, and commit account changes atomically. Current-date successor quotes alone may mark pending shares; missing quotes carry predecessor value after the disclosed fractional loss.
+
+Run `cargo test -p analytics-core`; acceptance includes final-close settlement, restore/repeat rejection, pre-existing successor positions, fractional loss and missing-current-quote valuation.

@@ -53,7 +53,7 @@ pub(super) fn replay(
             serde_json::from_slice(&fs::read(request.output.join("sample_decisions.json"))?)?;
         admission.decisions.extend(sample_decisions);
         save(request.output.join("admission.json"), &admission)?;
-        execution["unsupported_event_policy"] = "warn_and_skip".into();
+        execution["unsupported_event_policy"] = "block_unprojected_events".into();
         execution["sample_selection_sha256"] = format!(
             "sha256:{:x}",
             analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(&selection)?))

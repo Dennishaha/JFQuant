@@ -90,18 +90,27 @@ pub(super) fn advance(
 pub(super) fn input(
     request: &ResearchRequest,
     book: &analytics_storage::corporate_actions::ActionBundle,
-    calendar: &[Date],
+    dataset: &DailyDataset,
+    pool: &analytics_core::pool::PoolMembership,
     range: &DateRange,
 ) -> Result<Option<Ledger>> {
-    let Some(policy) = &request.rights_policy else {
+    let corporate = super::corporate::input(request, dataset, book, pool, range)?;
+    if request.rights_policy.is_none() && !super::corporate::enabled(request) {
         return Ok(None);
-    };
+    }
+    let policy = request
+        .rights_policy
+        .clone()
+        .unwrap_or(analytics_core::rights::Policy {
+            participation: analytics_core::rights::Participation::Abandon,
+            ..Default::default()
+        });
     let mut events = Vec::new();
     for a in &book.actions {
         let EventTerms::RightsIssueFacts { facts, .. } = &a.terms else {
             continue;
         };
-        if !range.contains(a.ex_date) {
+        if request.rights_policy.is_none() || !range.contains(a.ex_date) {
             continue;
         }
         let record = a
@@ -113,7 +122,8 @@ pub(super) fn input(
             record_date: record,
             ex_date: a.ex_date,
             terms: *facts.clone(),
-            sessions: calendar
+            sessions: dataset
+                .calendar
                 .iter()
                 .copied()
                 .filter(|d| range.contains(*d))
@@ -122,7 +132,8 @@ pub(super) fn input(
     }
     events.sort_by(|a, b| a.id.cmp(&b.id));
     let ledger = Ledger {
-        policy: policy.clone(),
+        policy,
+        corporate,
         events,
         ..Default::default()
     };

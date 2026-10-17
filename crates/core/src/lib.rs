@@ -14,6 +14,7 @@
 
 pub mod actions;
 pub mod admission;
+pub mod corporate_account;
 pub mod execution;
 pub mod market_rules;
 pub mod pool;

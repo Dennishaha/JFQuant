@@ -38,7 +38,7 @@ LightGBM 4.7.0来自哈希锁定wheel，AKQuant 0.3.66按源码锁构建配股�
 本机审核不能替代另一台干净Apple Silicon/macOS14机器的安装、运行、取消及离线读取。
 开发签名不等同Developer ID或Apple公证；安装方式见INSTALL.txt。
 
-当前格式及协议以 workflow 常量为准（服务协议27）；打包CLI验收覆盖完整输入/因子/样本检查、模型复用、已发布预测复用和完整结果格式；采集模块改动后必须同步重建共享Python中的采集包。打包必须等待使用开发Python目录的采集任务结束，避免重建运行时影响请求。
+当前格式及协议以 workflow 常量为准（服务协议29）；打包CLI验收覆盖完整输入/因子/样本检查、模型复用、已发布预测复用和完整结果格式；采集模块改动后必须同步重建共享Python中的采集包。打包必须等待使用开发Python目录的采集任务结束，避免重建运行时影响请求。
 
 打包验收核对当前服务协议／采集13、来源策略2的HiThink默认角色和空执行资料来源，并验证两种私有Key入口、废弃命令拒绝、包内Python及原生研究流程。
 
@@ -58,3 +58,5 @@ AKQuant source receipts now live in `crates/workflow/research/akquant-source.loc
 The research dependency lock is installed alongside the collector lock and copied
 into the runtime as `research-requirements.lock`. Build and verify scripts consume
 these component-owned resources; no lock is owned by the desktop frontend.
+
+Company-event execution extends the existing private native patch. Build inputs now include `core/src/corporate_account.rs`; it is copied alongside the rights modules, never reimplemented in Python. The final native snapshot is exported after final-day transitions. Update input hashes after formatting source, rebuild runtime, then run Python fixtures and Rust replay before packaging.

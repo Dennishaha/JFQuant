@@ -91,6 +91,7 @@ impl ResearchTemplate {
     /// Extract account settings without changing frozen training inputs.
     pub fn execution_settings(&self) -> research::backtest::ResearchExecution {
         research::backtest::ResearchExecution {
+            corporate_event_policy: Default::default(),
             initial_cash_cny: self.initial_cash_cny,
             market_rules: self.market_rules.clone(),
             top_n: self.config.top_n,

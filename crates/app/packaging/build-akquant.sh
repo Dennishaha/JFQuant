@@ -26,7 +26,7 @@ source = source / ('akquant-' + lock['upstream_version'])
 (source / 'jfquant-build-id').write_text('sha256:' + hashlib.sha256((repo / 'crates/workflow/research/akquant-source.lock.json').read_bytes()).hexdigest() + '\n')
 if hashlib.sha256((source / 'Cargo.lock').read_bytes()).hexdigest() != lock['cargo_lock_sha256']:
     raise SystemExit('AKQuant Cargo lock mismatch')
-for name in ('rights', 'rights_account'):
+for name in ('rights', 'rights_account', 'corporate_account'):
     (source / 'src' / (name + '.rs')).write_bytes((repo / 'crates/core/src' / (name + '.rs')).read_bytes())
 PY
 source="$build_root/source/akquant-0.3.66"

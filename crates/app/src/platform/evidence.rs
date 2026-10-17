@@ -109,6 +109,43 @@ fn report_stale(report: &serde_json::Value, actions: &str, task: &str, market: &
                 .as_array()
                 .is_some_and(|vs| !vs.is_empty() && !vs.iter().any(|v| v.as_str() == Some(market))))
 }
+/// Edit facts in the existing revision draft; publication still requires field evidence.
+pub(super) fn event_terms_editor(ui: &mut egui::Ui, editor: &mut String) {
+    let Ok(mut request) = serde_json::from_str::<serde_json::Value>(editor) else {
+        return;
+    };
+    let Some(events) = request["events"].as_array_mut() else {
+        return;
+    };
+    let mut changed = false;
+    ui.collapsing("迁码、换股与退市条款维护", |ui| {
+        ui.small("这里维护事实，不写入模拟舍零或清算假设。修改后仍须补齐 fields 中的公告原文、文档ID和单位；发布会重新核验。");
+        for (i, revision) in events.iter_mut().enumerate() {
+            let event = &mut revision["replacement"];
+            let kind = event["terms"]["kind"].as_str().unwrap_or("").to_owned();
+            if !matches!(kind.as_str(), "conversion" | "delisting") { continue; }
+            ui.push_id(i, |ui| {
+                ui.label(format!("{} · {}", event["instrument"], kind));
+                for (field, label) in [("last_trade_date", "最后实际交易日"), ("successor", "后继证券"), ("ratio", "换股比例"), ("listing_date", "后继股份可交易日")] {
+                    if kind == "delisting" && field != "last_trade_date" { continue; }
+                    let mut value = event["terms"][field].as_str().unwrap_or("").to_owned();
+                    ui.horizontal(|ui| {
+                        ui.label(label);
+                        if ui.text_edit_singleline(&mut value).changed() {
+                            event["terms"][field] = if value.trim().is_empty() { serde_json::Value::Null } else { serde_json::Value::String(value) };
+                            changed = true;
+                        }
+                    });
+                }
+                ui.small(format!("权益生效／终止日：{}；登记日：{}；公告：{}", event["ex_date"], event["record_date"], event["source"]));
+            });
+        }
+    });
+    if changed {
+        *editor = serde_json::to_string_pretty(&request).unwrap();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

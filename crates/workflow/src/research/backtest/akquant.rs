@@ -72,7 +72,19 @@ pub(super) fn simulate(
     }
     validate_rules(request)?;
     let rules = &request.market_rules;
-    let checks = super::execution::checks(request, dataset, book, pool, range)?;
+    for (name, field) in [
+        ("execution_checks.json", "execution_checks_sha256"),
+        (
+            "execution-dependencies.json",
+            "execution_dependencies_sha256",
+        ),
+    ] {
+        if frozen[field] != file_hash(&request.output.join(name))? {
+            return Err("execution_frozen_dependencies_changed".into());
+        }
+    }
+    let checks: Vec<analytics_core::admission::AdmissionCheck> =
+        serde_json::from_slice(&fs::read(request.output.join("execution_checks.json"))?)?;
     if checks
         .iter()
         .any(|c| c.status == analytics_core::admission::CheckStatus::Failed)
@@ -81,11 +93,24 @@ pub(super) fn simulate(
         return Err("data_not_ready: execution inputs changed or are incomplete".into());
     }
     let book = book.ok_or("execution event version missing")?;
-    let rights = super::rights::input(request, book, &dataset.calendar, range)?;
-    if let Some(input) = &rights {
-        save(request.output.join("rights_input.json"), input)?;
-    }
-    let scope = super::execution::scope(pool, range);
+    let rights: Option<analytics_core::rights_account::Ledger> = if frozen["accounting_version"]
+        == "rust-filled-trade-ledger-events-v3"
+    {
+        if frozen["rights_input_sha256"] != file_hash(&request.output.join("rights_input.json"))? {
+            return Err("account_projection_changed_after_admission".into());
+        }
+        let ledger: analytics_core::rights_account::Ledger =
+            serde_json::from_slice(&fs::read(request.output.join("rights_input.json"))?)?;
+        ledger.validate()?;
+        Some(ledger)
+    } else {
+        None
+    };
+    let scope = if super::corporate::enabled(request) {
+        super::corporate::scope(book, super::execution::scope(pool, range), range)
+    } else {
+        super::execution::scope(pool, range)
+    };
     let symbols: BTreeSet<_> = scope
         .keys()
         .cloned()
@@ -98,6 +123,7 @@ pub(super) fn simulate(
     let mut suspension_marks = Vec::new();
     let mut suspension_traded_days = Vec::new();
     let mut execution_closes = BTreeMap::new();
+    let corporate = rights.as_ref().map(|l| &l.corporate);
     for id in &symbols {
         let mut closes = vec![None; dataset.calendar.len()];
         let lot = if id == &request.benchmark {
@@ -133,7 +159,13 @@ pub(super) fn simulate(
         {
             analytics_core::task::TaskContext::current().check()?;
             let mut prices = fields.iter().map(|f| f.get(day)).collect::<Vec<_>>();
-            let status_day = analytics_storage::tdx_status::suspension_day(book, id, *date);
+            let transition_mark = corporate.and_then(|l| {
+                l.events
+                    .iter()
+                    .find(|e| e.instrument == *id && *date > e.last_trade_date && *date < e.date)
+            });
+            let status_day = transition_mark.is_some()
+                || analytics_storage::tdx_status::suspension_day(book, id, *date);
             let volume = if id == &request.benchmark {
                 Some(0.)
             } else {
@@ -150,7 +182,13 @@ pub(super) fn simulate(
             if suspended {
                 // No anchor remains a missing quote; only an actual holding may
                 // turn that into an account valuation failure in the worker.
-                let Some(mut mark) = last_close else { continue };
+                let Some(mut mark) = transition_mark
+                    .map(|e| e.last_close.to_string().parse::<f64>())
+                    .transpose()?
+                    .or(last_close)
+                else {
+                    continue;
+                };
                 for action in book.actions.iter().filter(|a| {
                     a.instrument == *id
                         && a.ex_date == *date
@@ -185,19 +223,24 @@ pub(super) fn simulate(
         request.output.join("suspension_traded_days.json"),
         &suspension_traded_days,
     )?;
-    let mut warnings=scope.iter().filter(|(id, dates)| !super::execution::audited_coverage(book,id,dates)).map(|(id,_)|serde_json::json!({"instrument":id,"code":"special_event_coverage_unknown","message":"AKQuant event-date simulation; complete special-event coverage not verified"})).collect::<Vec<_>>();
+    let mut warnings = checks
+        .iter()
+        .filter(|c| c.code == "special_event_coverage_unknown")
+        .map(|c| serde_json::json!({"instrument":c.security,"code":c.code,"message":c.message}))
+        .collect::<Vec<_>>();
     warnings.extend(super::execution::skipped_events(book, &scope));
     if let Some(input) = &rights {
         warnings.retain(|w| {
-            !input.events.iter().any(|event| {
-                w["id"] == event.id
-                    || (w["instrument"] == event.instrument
-                        && w["date"] == event.ex_date.to_string()
-                        && matches!(
-                            w["category"].as_str(),
-                            Some("rights_issue" | "rights_issue_facts")
-                        ))
-            })
+            !input.corporate.events.iter().any(|e| w["id"] == e.id)
+                && !input.events.iter().any(|event| {
+                    w["id"] == event.id
+                        || (w["instrument"] == event.instrument
+                            && w["date"] == event.ex_date.to_string()
+                            && matches!(
+                                w["category"].as_str(),
+                                Some("rights_issue" | "rights_issue_facts")
+                            ))
+                })
         });
     }
     fs::write(
@@ -309,6 +352,14 @@ pub(super) fn simulate(
         output.join("engine_curve_differences.json"),
         &reconciled.differences,
     )?;
+    if let Some(input) = &rights {
+        let native: analytics_core::rights_account::Ledger =
+            serde_json::from_slice(&fs::read(output.join("rights_state.json"))?)?;
+        save(
+            output.join("corporate_event_report.json"),
+            &super::corporate::report(&input.corporate, &native.corporate)?,
+        )?;
+    }
     let snapshots = reconciled.snapshots;
     if request
         .rights_policy

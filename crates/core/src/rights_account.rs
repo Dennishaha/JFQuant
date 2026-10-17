@@ -294,6 +294,8 @@ pub struct State {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Ledger {
+    /// Shared terminal and successor account journal.
+    pub corporate: crate::corporate_account::Ledger,
     /// Frozen research choices.
     pub policy: Policy,
     /// Frozen event terms.
@@ -310,6 +312,7 @@ pub struct Ledger {
 impl Ledger {
     /// Reject malformed projections before the engine starts.
     pub fn validate(&self) -> Result<()> {
+        self.corporate.validate()?;
         let mut ids = BTreeSet::new();
         for e in &self.events {
             if !ids.insert(&e.id)
@@ -324,6 +327,21 @@ impl Ledger {
             e.terms.validate(Some(e.record_date), e.ex_date)?;
         }
         Ok(())
+    }
+    /// Whether this ledger has any account instructions.
+    pub fn active(&self) -> bool {
+        !self.events.is_empty() || !self.corporate.events.is_empty()
+    }
+    /// Register rights, then perform separately audited closing transitions.
+    pub fn close_account(
+        &mut self,
+        date: Date,
+        cash: &mut Decimal,
+        positions: &mut BTreeMap<String, Decimal>,
+        available: &mut BTreeMap<String, Decimal>,
+    ) -> Result<()> {
+        self.close(date, positions)?;
+        self.corporate.close(date, cash, positions, available)
     }
     /// Called only after all closing fills, never from a lazy Python close callback.
     pub fn close(&mut self, date: Date, positions: &BTreeMap<String, Decimal>) -> Result<()> {
@@ -364,6 +382,7 @@ impl Ledger {
         if self.date.is_some_and(|d| d >= date) {
             return Err("rights_open_repeated_or_out_of_order".into());
         }
+        self.corporate.open(date, positions, available)?;
         self.date = Some(date);
         // Existing settlements can fund today's subscription budget.
         self.settle(date, cash, positions, available)?;
@@ -516,7 +535,7 @@ impl Ledger {
         let Some(date) = self.date else {
             return Ok(Decimal::ZERO);
         };
-        let mut value = Decimal::ZERO;
+        let mut value = self.corporate.value(prices)?;
         for e in &self.events {
             let Some(s) = self.states.get(&e.id) else {
                 continue;

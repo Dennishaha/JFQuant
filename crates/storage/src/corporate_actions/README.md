@@ -184,3 +184,5 @@ DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow
 验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-storage corporate_actions`。包含失败保留但独立覆盖通过、类别/日期差集、无事件完整查询、部分覆盖与原文篡改。
 
 新发布的完整覆盖审核要求CNINFO原始查询回执绑定公开的证券/机构、交易所、完整查询和日期参数（coverage_validation_version=2）。固定采集器仅记录该公开接口的白名单表单，不记录供应商认证头或密钥。完整覆盖审核仅接受校验版本2；旧审核或旧采集批次缺少查询绑定时须重新采集并发布，选定PDF仍只能证明单笔事实。
+
+公告全文查询与选定文档捕获共用 `extract_pdf_text`：PDF 上限64 MiB、4096页，拒绝加密PDF，逐页累计文本上限8 MiB。此上限覆盖大型合并报告，超限仍失败，不跳过候选或宣告覆盖完整。错误区分HTTP状态/主机、PDF头、字节、页数、加密及文本限制。历史查询解析器版本为 `cninfo-candidates-v10`。

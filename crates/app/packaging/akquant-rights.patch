@@ -1003,3 +1003,114 @@
  name = "xxhash-rust"
  version = "0.8.18"
  source = "registry+https://github.com/rust-lang/crates.io-index"
+--- a/src/engine/core.rs
++++ b/src/engine/core.rs
+@@ -218,6 +218,29 @@
+     /// margin they would consume beyond the current portfolio. Reported as the
+     /// account's `frozen_cash`, computed in Rust so it cannot drift from the
+     /// engine's own margin accounting (the Python re-implementation was removed).
++    pub(crate) fn jfquant_cancel_retired(&mut self, date: NaiveDate, closing: bool) -> PyResult<()> {
++        let retired = self.state.portfolio.rights.corporate.retiring(date, closing);
++        let ids = self.state.order_manager.active_orders.iter().filter(|o| retired.contains(&o.symbol)).map(|o| o.id.clone()).collect::<Vec<_>>();
++        for id in ids {
++            if let Some(order) = self.state.order_manager.cancel_active_order(&id, self.context_timestamp()) {
++                self.execution_model.on_cancel(&id);
++                let _ = self.event_manager.send(Event::ExecutionReport(order, None));
++            }
++        }
++        Ok(())
++    }
++    pub(crate) fn jfquant_close_account(&mut self, date: NaiveDate) -> PyResult<()> {
++        if !self.state.portfolio.rights.active() { return Ok(()); }
++        self.jfquant_cancel_retired(date, true)?;
++        let p = &mut self.state.portfolio;
++        let mut positions = p.positions.iter().map(|(k,v)|(k.clone(),*v)).collect();
++        let mut available = p.available_positions.iter().map(|(k,v)|(k.clone(),*v)).collect();
++        Arc::make_mut(&mut p.rights).close_account(date, &mut p.cash, &mut positions, &mut available).map_err(PyValueError::new_err)?;
++        p.positions = Arc::new(positions.into_iter().collect());
++        p.available_positions = Arc::new(available.into_iter().collect());
++        Ok(())
++    }
++
+     pub(crate) fn current_frozen_cash(&self, active_orders: &[Order]) -> Decimal {
+         let stock_ratio_override = if self.risk_manager.config.is_margin_account() {
+             Some(self.risk_manager.config.stock_initial_margin_ratio())
+--- a/src/engine/python.rs
++++ b/src/engine/python.rs
+@@ -1007,12 +1007,20 @@
+     fn configure_jfquant_rights(&mut self, payload: &str) -> PyResult<()> {
+         if self.current_date.is_some() { return Err(pyo3::exceptions::PyValueError::new_err("rights configuration after start")); }
+         let ledger: crate::rights_account::Ledger = serde_json::from_str(payload).map_err(|e|pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+-        if !ledger.states.is_empty() || ledger.date.is_some() || !ledger.closes.is_empty() || !ledger.audit.is_empty() {
++        if !ledger.states.is_empty() || ledger.date.is_some() || !ledger.closes.is_empty() || !ledger.audit.is_empty() || !ledger.corporate.states.is_empty() || !ledger.corporate.opens.is_empty() || !ledger.corporate.closes.is_empty() || !ledger.corporate.audit.is_empty() {
+             return Err(pyo3::exceptions::PyValueError::new_err("rights initial state must be empty"));
+         }
+         ledger.validate().map_err(pyo3::exceptions::PyValueError::new_err)?;
+         self.state.portfolio.rights = std::sync::Arc::new(ledger);
+         Ok(())
++    }
++
++    fn jfquant_account_snapshot(&self) -> PyResult<String> {
++        use rust_decimal::prelude::ToPrimitive;
++        let prices = self.last_prices.read().expect("prices");
++        let p = &self.state.portfolio;
++        let positions = p.positions.iter().filter(|(_,v)| **v != rust_decimal::Decimal::ZERO).map(|(k,v)| (k.clone(),v.to_f64())).collect::<std::collections::BTreeMap<_,_>>();
++        serde_json::to_string(&serde_json::json!({"positions":positions,"cash":p.cash.to_f64(),"equity":p.calculate_equity(&prices,&self.instruments).to_f64()})).map_err(|e|pyo3::exceptions::PyValueError::new_err(e.to_string()))
+     }
+ 
+     fn jfquant_rights_state(&self) -> PyResult<String> {
+@@ -1491,6 +1499,8 @@
+             self.flush_terminal_expiry_events(py, strategy)?;
+         }
+ 
++        if let Some(date) = self.current_date { self.jfquant_close_account(date)?; }
++
+         // Record final snapshot if we have data
+         if self.current_date.is_some()
+             && let Some(timestamp) = self.terminal_result_timestamp()
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -105,3 +105,4 @@
+ 
+ pub mod rights;
+ pub mod rights_account;
++pub mod corporate_account;
+--- a/src/pipeline/stages/data.rs
++++ b/src/pipeline/stages/data.rs
+@@ -339,10 +339,7 @@
+                             &engine.risk_manager.config,
+                         );
+                     }
+-                    if let Some(previous) = previous_trading_date.filter(|_| !engine.state.portfolio.rights.events.is_empty()) {
+-                        let positions = engine.state.portfolio.positions.iter().map(|(k,v)|(k.clone(),*v)).collect();
+-                        std::sync::Arc::make_mut(&mut engine.state.portfolio.rights).close(previous, &positions).map_err(pyo3::exceptions::PyValueError::new_err)?;
+-                    }
++                    if let Some(previous) = previous_trading_date { engine.jfquant_close_account(previous)?; }
+                     engine.current_date = Some(local_date);
+ 
+                     // Process Corporate Actions (Split/Dividend)
+@@ -421,7 +418,8 @@
+                     );
+                     drop(settlement_ctx);
+                     drop(settlement_prices);
+-                    if !engine.state.portfolio.rights.events.is_empty() {
++                    if engine.state.portfolio.rights.active() {
++                        engine.jfquant_cancel_retired(local_date, false)?;
+                         let frozen = engine.current_frozen_cash(&engine.state.order_manager.active_orders);
+                         let orders = serde_json::to_value(&engine.state.order_manager.active_orders).map_err(|e|pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+                         let prices = engine.last_prices.read().expect("prices").iter().map(|(k,v)|(k.clone(),v.to_string())).collect::<std::collections::BTreeMap<_,_>>();
+--- a/src/portfolio.rs
++++ b/src/portfolio.rs
+@@ -218,6 +218,6 @@
+     }
+ 
+     pub fn jfquant_locked_value(&self, prices: &HashMap<String, Decimal>) -> Decimal {
+-        if self.rights.states.values().all(|s|s.subscribed==Decimal::ZERO) { return Decimal::ZERO; }
++        if self.rights.states.values().all(|s|s.subscribed==Decimal::ZERO) && self.rights.corporate.states.values().all(|s|s.delivered || s.old_quantity==Decimal::ZERO) { return Decimal::ZERO; }
+         self.rights.value(&self.rights.events.iter().filter_map(|e|prices.get(&e.instrument).map(|v|(e.instrument.clone(),*v))).collect()).expect("JFQuant rights valuation missing")
+     }
+--- a/src/portfolio.rs
++++ b/src/portfolio.rs
+@@ -268 +268 @@
+-        )
++        ) + self.jfquant_locked_value(prices)

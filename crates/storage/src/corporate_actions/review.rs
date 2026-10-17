@@ -165,6 +165,16 @@ fn changed_leaves(prefix: &str, old: &Value, new: &Value, out: &mut Vec<(String,
         out.push((prefix.into(), new.clone()));
     }
 }
+fn decision_cutoff(event: &CorporateAction) -> Option<Date> {
+    if matches!(
+        event.terms,
+        analytics_core::actions::EventTerms::Conversion { .. }
+    ) {
+        Some(event.ex_date)
+    } else {
+        event.record_date
+    }
+}
 fn verify_leaf_document(
     documents: &BTreeMap<String, (Value, String)>,
     proof: &FieldEvidence,
@@ -179,15 +189,23 @@ fn verify_leaf_document(
         .ok_or_else(|| invalid("missing disclosure date"))?
         .parse()
         .map_err(invalid)?;
-    let settlement = [
-        "terms.facts.allotment_date",
-        "terms.facts.allotment_ratio",
-        "terms.facts.refund_date",
-        "terms.facts.listing_date",
-        "terms.facts.conditional_refund",
-    ]
-    .iter()
-    .any(|p| path == *p || path.starts_with(&format!("{p}.")));
+    let settlement = (path == "ex_date"
+        && matches!(
+            event.terms,
+            analytics_core::actions::EventTerms::Conversion { .. }
+        ))
+        || [
+            "terms.facts.allotment_date",
+            "terms.facts.allotment_ratio",
+            "terms.facts.refund_date",
+            "terms.facts.listing_date",
+            "terms.facts.conditional_refund",
+            "terms.listing_date",
+            "terms.pay_date",
+            "terms.claim_valuation",
+        ]
+        .iter()
+        .any(|p| path == *p || path.starts_with(&format!("{p}.")));
     if document["instrument"] != event.instrument
         || document["candidates"]["stage"] != "implementation"
         || proof.quote.trim().is_empty()
@@ -196,7 +214,7 @@ fn verify_leaf_document(
         || document["url"]
             .as_str()
             .is_none_or(|u| !event.source.contains(u))
-        || (!settlement && event.record_date.is_some_and(|d| announced > d))
+        || (!settlement && decision_cutoff(event).is_some_and(|d| announced > d))
     {
         return Err(invalid("leaf evidence identity/disclosure/quote mismatch"));
     }
@@ -931,7 +949,7 @@ pub fn apply(
                 .ok_or_else(|| invalid("missing announcement date"))?
                 .parse()
                 .map_err(invalid)?;
-            if a.record_date.is_some_and(|d| announced > d) {
+            if decision_cutoff(a).is_some_and(|d| announced > d) {
                 return Err(invalid(
                     "implementation announcement after entitlement date",
                 ));

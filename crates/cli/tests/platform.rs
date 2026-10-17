@@ -1552,7 +1552,7 @@ fn independent_fit_models_preview_and_new_pool_backtest_share_service() {
         })
         .unwrap();
     let plan = BacktestPlan {
-        schema_version: 1,
+        schema_version: 2,
         training: training.parse().unwrap(),
         models: ModelSelection::Rolling,
         pool_version: pool.id,
@@ -1601,7 +1601,10 @@ fn independent_fit_models_preview_and_new_pool_backtest_share_service() {
         "30",
     ]);
     assert_eq!(backtest["record"]["status"], "succeeded", "{backtest}");
-    assert_eq!(backtest["results"]["schema_version"], 19);
+    assert_eq!(
+        backtest["results"]["schema_version"],
+        analytics_workflow::research::backtest::RESEARCH_SCHEMA_VERSION
+    );
 }
 
 #[test]
@@ -1633,7 +1636,7 @@ fn evidence_commands_share_status_and_persist_nonpublishing_scaffolds() {
     let mut owner = w
         .begin(Uuid::new_v4(), "terminal dependency fixture", json!({}))
         .unwrap();
-    std::fs::write(w.resolve(&owner.output).join("execution-dependencies.json"),serde_json::to_vec(&json!({"schema_version":1,"policy":"audited","scope":{"SH600000":{"start":"2009-01-02","end":"2009-01-02"}}})).unwrap()).unwrap();
+    std::fs::write(w.resolve(&owner.output).join("execution-dependencies.json"),serde_json::to_vec(&json!({"schema_version":2,"policy":"audited","scope":{"SH600000":{"start":"2009-01-02","end":"2009-01-02"}}})).unwrap()).unwrap();
     w.finish(&mut owner, analytics_workflow::RunStatus::Succeeded, None)
         .unwrap();
     let task_status = s.json(&[

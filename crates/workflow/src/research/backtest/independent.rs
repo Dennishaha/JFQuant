@@ -286,7 +286,7 @@ pub enum ModelSelection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BacktestPlan {
-    /// Current version, 1.
+    /// Current version, 2.
     pub schema_version: u32,
     /// One completed training task.
     pub training: uuid::Uuid,
@@ -316,7 +316,7 @@ impl BacktestPlan {
     pub fn validate(&self) -> Result<()> {
         self.range.validate()?;
         self.quality_policy.validate()?;
-        if self.schema_version != 1
+        if self.schema_version != 2
             || self.pool_version.is_empty()
             || self.market.is_empty()
             || self.actions.is_empty()
@@ -901,6 +901,7 @@ pub fn backtest(
     r.market_rules = plan.execution.market_rules.clone();
     r.initial_cash_cny = plan.execution.initial_cash_cny;
     r.pool_exit_policy = plan.execution.pool_exit_policy;
+    r.corporate_event_policy = Some(plan.execution.corporate_event_policy);
     r.event_check_policy = plan.event_check_policy;
     let mut folds = segments
         .iter()
@@ -1310,6 +1311,20 @@ pub(super) fn scope_report(output: &Path, execution: &Value) -> Result<Value> {
     let account: Value = serde_json::from_slice(&fs::read(output.join("execution.json"))?)?;
     let pool: analytics_core::pool::PoolMembership =
         serde_json::from_value(account["pool"].clone())?;
+    let corporate: Option<analytics_core::rights_account::Ledger> =
+        if output.join("rights_state.json").is_file() {
+            Some(serde_json::from_slice(&fs::read(
+                output.join("rights_state.json"),
+            )?)?)
+        } else {
+            None
+        };
+    let number = |v: &Value| -> Result<f64> {
+        v.as_f64()
+            .or_else(|| v.as_str()?.parse().ok())
+            .filter(|v| v.is_finite())
+            .ok_or_else(|| "corporate_attribution_number_invalid".into())
+    };
     let mut previous = BTreeMap::<String, f64>::new();
     let mut previous_qty = BTreeMap::<String, f64>::new();
     let mut contributions = [0.; 2];
@@ -1335,7 +1350,30 @@ pub(super) fn scope_report(output: &Path, execution: &Value) -> Result<Value> {
                         .ok_or("valuation missing")?,
             );
         }
+        for (id, value) in snapshot["corporate_pending_values"]
+            .as_object()
+            .into_iter()
+            .flatten()
+        {
+            *values.entry(id.clone()).or_default() += number(value)?;
+        }
         let mut pnl = BTreeMap::<String, f64>::new();
+        if let Some(ledger) = &corporate {
+            for row in
+                ledger.corporate.audit.iter().filter(|r| {
+                    r["date"] == date.to_string() && r["phase"] == "research_liquidation"
+                })
+            {
+                let event = ledger
+                    .corporate
+                    .events
+                    .iter()
+                    .find(|e| row["event"] == e.id)
+                    .ok_or("corporate_attribution_event_missing")?;
+                *pnl.entry(event.instrument.clone()).or_default() +=
+                    number(&row["notional"])? - number(&row["fee"])?;
+            }
+        }
         for (id, v) in &values {
             *pnl.entry(id.clone()).or_default() += v;
         }

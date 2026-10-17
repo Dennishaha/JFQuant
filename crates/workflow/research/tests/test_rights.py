@@ -32,7 +32,7 @@ class RightsTests(unittest.TestCase):
         }.items()}
         terms["refund_date"] = {"state": "not_applicable", "reason": "fixture full successful allocation"}
         terms["conditional_refund"] = {"state": "unknown"}
-        request["rights"] = {"policy": {"participation": "participate", "attempt": "first_day", "insufficient_cash": "partial"},
+        request["rights"] = {"corporate": {"policy": "evidence_only", "events": [], "states": {}, "opens": [], "closes": [], "audit": []}, "policy": {"participation": "participate", "attempt": "first_day", "insufficient_cash": "partial"},
                              "events": [{"id": "SH600000:2021-01-01", "instrument": "SH600000", "record_date": "2020-12-30", "ex_date": "2021-01-01", "terms": terms, "sessions": request["signal_dates"]}],
                              "states": {}, "date": None, "closes": [], "audit": []}
         return request

@@ -129,16 +129,37 @@ fn evaluate_current(
     let index = DependencyIndex::build(book)?;
     let mut execution_scope = BTreeMap::<String, DateRange>::new();
     let mut adjustment_scope = BTreeMap::<String, Vec<DateRange>>::new();
+    let mut projected = BTreeSet::new();
     let mut execution_policy = EventCheckPolicy::default();
     let mut adjustment_policy = EventCheckPolicy::default();
     let mut adjustment_blocking = true;
     if root.join("execution-dependencies.json").is_file() {
         let context = load(&root.join("execution-dependencies.json"))?;
-        if context["schema_version"] != 1 {
-            return Err("unsupported execution dependency context".into());
+        if context["schema_version"] != 2 {
+            return Err("unsupported execution dependency context; rerun input check".into());
         }
         execution_scope = serde_json::from_value(context["scope"].clone())?;
         execution_policy = serde_json::from_value(context["policy"].clone())?;
+        if !context["request"].is_null() {
+            let request: crate::research::backtest::ResearchRequest =
+                serde_json::from_value(context["request"].clone())?;
+            let pool: analytics_core::pool::PoolMembership =
+                serde_json::from_value(context["pool"].clone())?;
+            let range = serde_json::from_value(context["range"].clone())?;
+            let dataset = analytics_storage::daily::DailyDataset::open(&request.data_root)?;
+            if context["market_content_sha256"] != crate::market_content_hash(&request.data_root)? {
+                return Err("task market changed".into());
+            }
+            let resolved = crate::research::backtest::execution::dependencies(
+                &request,
+                &dataset,
+                Some(book),
+                &pool,
+                &range,
+            )?;
+            execution_scope = resolved.scope;
+            projected = resolved.projected;
+        }
     }
     if root.join("adjustment-dependencies.json").is_file() {
         let context = load(&root.join("adjustment-dependencies.json"))?;
@@ -172,6 +193,8 @@ fn evaluate_current(
         Some(book),
         &execution_scope,
         execution_policy,
+        &projected,
+        Some(&index),
     );
     let mut entries = vec![];
     for (id, dates) in &execution_scope {
@@ -245,7 +268,7 @@ mod tests {
             )
             .unwrap();
         let root = w.resolve(&task.output);
-        atomic_json(&root.join("execution-dependencies.json"),&json!({"schema_version":1,"policy":"audited","scope":{id:{"start":"2009-01-02","end":"2009-01-02"}}})).unwrap();
+        atomic_json(&root.join("execution-dependencies.json"),&json!({"schema_version":2,"policy":"audited","scope":{id:{"start":"2009-01-02","end":"2009-01-02"}}})).unwrap();
         assert!(freeze(&w, task.id).is_err());
         w.finish(&mut task, crate::RunStatus::Succeeded, None)
             .unwrap();
@@ -267,7 +290,7 @@ mod tests {
                 .to_string()
                 .contains("no frozen action dependencies")
         );
-        atomic_json(&root.join("execution-dependencies.json"),&json!({"schema_version":1,"policy":"audited","scope":{id:{"start":"2009-01-02","end":"2009-01-02"}}})).unwrap();
+        atomic_json(&root.join("execution-dependencies.json"),&json!({"schema_version":2,"policy":"audited","scope":{id:{"start":"2009-01-02","end":"2009-01-02"}}})).unwrap();
         let before = freeze(&w, task.id).unwrap();
         let ready = evaluate(&w, task.id, &book, None, "version-a").unwrap();
         assert_eq!(ready["ready"], true);
@@ -289,7 +312,7 @@ mod tests {
                 .execute(|| evaluate(&w, task.id, &book, None, "cancelled"))
                 .is_err()
         );
-        atomic_json(&root.join("execution-dependencies.json"),&json!({"schema_version":1,"policy":"audited","scope":{id:{"start":"2009-01-03","end":"2009-01-03"}}})).unwrap();
+        atomic_json(&root.join("execution-dependencies.json"),&json!({"schema_version":2,"policy":"audited","scope":{id:{"start":"2009-01-03","end":"2009-01-03"}}})).unwrap();
         assert_ne!(freeze(&w, task.id).unwrap(), before);
     }
 }

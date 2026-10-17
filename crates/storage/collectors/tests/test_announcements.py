@@ -7,6 +7,120 @@ from jfquant_collectors.announcements import attachment_url, collect, extract_ca
 
 
 class AnnouncementTests(unittest.TestCase):
+    def test_pdf_resource_limits_allow_merger_reports_and_remain_bounded(self):
+        from types import SimpleNamespace
+
+        from jfquant_collectors.announcements import MAX_PDF_BYTES, extract_pdf_text
+
+        page = SimpleNamespace(extract_text=lambda: "证据")
+        with patch("jfquant_collectors.announcements.PdfReader") as reader:
+            reader.return_value = SimpleNamespace(is_encrypted=False, pages=[page] * 2018)
+            self.assertEqual(
+                len(extract_pdf_text(b"%PDF-" + b"x" * (32 * 1024 * 1024)).splitlines()), 2018
+            )
+            reader.return_value.pages = [page] * 4096
+            self.assertEqual(len(extract_pdf_text(b"%PDF-").splitlines()), 4096)
+            reader.return_value.pages = [page] * 65
+            progress = []
+            self.assertEqual(
+                len(
+                    extract_pdf_text(
+                        b"%PDF-", lambda n, total: progress.append((n, total))
+                    ).splitlines()
+                ),
+                65,
+            )
+            self.assertEqual(progress, [(32, 65), (64, 65), (65, 65)])
+            reader.return_value.pages = [page] * 4097
+            with self.assertRaisesRegex(ValueError, "4096 pages"):
+                extract_pdf_text(b"%PDF-")
+            reader.return_value.is_encrypted = True
+            with self.assertRaisesRegex(ValueError, "encrypted"):
+                extract_pdf_text(b"%PDF-")
+            reader.return_value = SimpleNamespace(
+                is_encrypted=False,
+                pages=[SimpleNamespace(extract_text=lambda: "x" * (8 * 1024 * 1024)), page],
+            )
+            with self.assertRaisesRegex(ValueError, "8 MiB"):
+                extract_pdf_text(b"%PDF-")
+            reader.reset_mock()
+            with self.assertRaisesRegex(ValueError, "64 MiB"):
+                extract_pdf_text(b"%PDF-" + b"x" * MAX_PDF_BYTES)
+            with self.assertRaisesRegex(ValueError, "header"):
+                extract_pdf_text(b"not a PDF")
+            reader.assert_not_called()
+
+    def test_page_drift_requires_all_unique_ids_and_conflicts_remain_errors(self):
+        def row(i):
+            return {
+                "secCode": "600000",
+                "orgId": "gssh0600000",
+                "announcementId": str(i),
+                "announcementTitle": "常规公告",
+                "announcementTime": 1717200000000,
+                "adjunctUrl": f"finalpage/2024-06-01/{i}.PDF",
+            }
+
+        class Response:
+            status_code = 200
+
+            def __init__(self, rows, total=31):
+                self.rows, self.total = rows, total
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"totalAnnouncement": self.total, "announcements": self.rows}
+
+        request = {
+            "cache_dir": "/unused/cache",
+            "instruments": ["SH600000"],
+            "start": "2024-01-01",
+            "end": "2024-12-31",
+        }
+        initial = [row(i) for i in range(30)]
+        cases = [
+            (
+                [
+                    Response(initial),
+                    Response([row(29)]),
+                    Response([row(i) for i in range(29)] + [row(30)]),
+                ],
+                None,
+            ),
+            (
+                [Response(initial), Response([{**row(29), "announcementTitle": "冲突公告"}])],
+                "conflicting",
+            ),
+            ([Response(initial), Response([row(29)])] * 3, "incomplete unique"),
+            ([Response(initial), Response([row(30)], total=32)], "changed"),
+            ([Response(None, total=0)], None),
+        ]
+        for responses, error in cases:
+            emitted = []
+            with (
+                self.subTest(error=error),
+                patch(
+                    "jfquant_collectors.announcements.security_identity", return_value="gssh0600000"
+                ),
+                patch(
+                    "jfquant_collectors.announcements.requests.post", side_effect=responses
+                ) as post,
+            ):
+                if error:
+                    with self.assertRaisesRegex(ValueError, error):
+                        collect(request, lambda *a, emitted=emitted, **kw: emitted.append((a, kw)))
+                    self.assertFalse(any(a[0] == "complete" for a, _ in emitted))
+                else:
+                    collect(request, lambda *a, emitted=emitted, **kw: emitted.append((a, kw)))
+                    evidence = next(kw["evidence"] for a, kw in emitted if a[0] == "action_shard")
+                    self.assertTrue(evidence["pagination_complete"])
+                    self.assertEqual(
+                        len(evidence["all_announcements"]), 31 if len(responses) > 1 else 0
+                    )
+                self.assertLessEqual(post.call_count, 6)
+
     def test_dr_directory_identity_keeps_security_and_exchange_checks(self):
         from jfquant_collectors.announcements import security_identity
 
@@ -17,10 +131,13 @@ class AnnouncementTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     security_identity(symbol)
         for org in ("DR21", "DR0000021-extra", "DR/0000021", "dr0000021"):
-            with patch(
-                "jfquant_collectors.announcements.security_directory",
-                return_value=[{**row, "orgId": org}],
-            ), self.assertRaises(ValueError):
+            with (
+                patch(
+                    "jfquant_collectors.announcements.security_directory",
+                    return_value=[{**row, "orgId": org}],
+                ),
+                self.assertRaises(ValueError),
+            ):
                 security_identity("SH603056")
 
     def test_final_rights_documents_are_field_evidence_but_proposals_and_reminders_are_not(self):
@@ -31,13 +148,20 @@ class AnnouncementTests(unittest.TestCase):
 
     def test_broker_directory_namespace_is_opaque_but_code_and_venue_remain_checked(self):
         from jfquant_collectors.announcements import security_identity
+
         table = [{"code": "600958", "category": "A股", "orgId": "qsgn0000065"}]
         with patch("jfquant_collectors.announcements.security_directory", return_value=table):
             self.assertEqual(security_identity("SH600958"), "qsgn0000065")
             with self.assertRaises(ValueError):
                 security_identity("SZ600958")
         for org in ("qsgn/0000065", "qsgn0000065-extra", "qsgn65"):
-            with patch("jfquant_collectors.announcements.security_directory", return_value=[{**table[0], "orgId": org}]), self.assertRaises(ValueError):
+            with (
+                patch(
+                    "jfquant_collectors.announcements.security_directory",
+                    return_value=[{**table[0], "orgId": org}],
+                ),
+                self.assertRaises(ValueError),
+            ):
                 security_identity("SH600958")
 
     def test_pdf_spaces_and_share_listing_wording_keep_exact_evidence(self):
@@ -95,6 +219,13 @@ class AnnouncementTests(unittest.TestCase):
         self.assertTrue(candidate["requires_review"])
         self.assertEqual(
             extract_candidates(text, "证券代码及证券简称变更公告")["stage"], "implementation"
+        )
+        self.assertEqual(
+            extract_candidates(text, "关于变更公司证券简称及证券代码的公告")["stage"],
+            "implementation",
+        )
+        self.assertEqual(
+            extract_candidates(text, "关于拟变更公司证券代码的提示性公告")["stage"], "unverified"
         )
         self.assertEqual(extract_candidates(text, "权益分派预案摘要")["stage"], "unverified")
 
@@ -206,7 +337,7 @@ class AnnouncementHttp(unittest.TestCase):
                                     "secCode": "600000",
                                     "orgId": "gssh0600000",
                                     "announcementId": "a",
-                                    "announcementTitle": "权益分派实施公告",
+                                    "announcementTitle": "关于变更公司证券简称及证券代码的实施公告",
                                     "announcementTime": 1717200000000,
                                     "adjunctUrl": "finalpage/2024-06-01/a.PDF",
                                 }
@@ -256,12 +387,12 @@ class AnnouncementHttp(unittest.TestCase):
                             "start": "2024-01-01",
                             "end": "2024-12-31",
                         },
-                        lambda *a, **kw: emitted.append((a, kw)),
+                        lambda *a, emitted=emitted, **kw: emitted.append((a, kw)),
                     )
                 document = next(
                     kw["evidence"]["documents"][0] for a, kw in emitted if a[0] == "action_shard"
                 )
-                self.assertEqual(document["parser_version"], "cninfo-candidates-v5")
+                self.assertEqual(document["parser_version"], "cninfo-candidates-v10")
                 self.assertEqual(document["pypdf_version"], "6.20.1")
                 self.assertTrue(document["candidates"]["requires_review"])
                 self.assertEqual((root / "raw" / document["text"]).read_text(), "")

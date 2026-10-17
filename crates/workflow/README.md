@@ -82,7 +82,7 @@ flowchart LR
   P --> S[预测缓存]
   F --> S
   S --> E[连续账户执行]
-  E --> R[结果19 + 曾见/未见贡献]
+  E --> R[结果20 + 曾见/未见贡献]
 ```
 
 训练计划格式1没有测试区间。支持 `single {window}`、`manual {windows}`、
@@ -154,7 +154,7 @@ python3 crates/workflow/checks/architecture.py
 不猜测转换。尚未完成的维护 journal 阻止服务启动；恢复前重新校验清单中的文件。
 归档不会自动删除。命令实现和中断/重复执行验收见 `src/maintenance.rs`。
 
-## 组合数据检查（协议27）
+## 组合数据检查（协议29）
 
 `input_check::{InputCheckPlan,InputCheckReport,CheckRequest,run}` 提供依赖、输入、
 实际因子计算、样本四阶段检查；只有四阶段完成且现有 `AdmissionReport` 允许时才就绪。
@@ -186,3 +186,11 @@ App 的后台文件元数据探针仅提示报告过期，正式任务仍验证�
 共享证据维护使用 `WorkflowRequest::Evidence` / `action_evidence::EvidenceRequest`，提供选定文档捕获、终态采集恢复/重试、缺口与修订预览。工作区证据树、来源任务记录及原始行动版本冻结后再执行；正式发布与研究准入不由草稿状态替代。接口详见 [CLI 补证流程](../cli/src/README.md#公司行动证据维护agent-与-gui-共用)。
 
 当前证据驱动的任务准入、历史失败追溯与验证命令见本组件 src 下的 README；公司行动状态按任务实际范围计算，采集失败记录不再等同于当前任务阻断。
+
+## Corporate event research execution
+
+Independent backtest plans now use schema **2**, with required `execution.corporate_event_policy`: `evidence_only` or explicit `research_transitions`. Generate a new plan with current CLI/App; old plans are rejected rather than silently migrated. Training catalogue schema 5, weights and feature contracts are unchanged. Result schema is **20**, local service protocol **29**, execution dependencies schema **2**, and shared rights/company-event accounting is `rust-filled-trade-ledger-events-v3`.
+
+The shared adapter projects reviewed terminal/successor events, follows successor dependencies, and keeps earlier coverage requirements. Preflight freezes input checks and dependency hashes; execution verifies market/action bytes and these receipts without rebuilding coverage for every security. CLI task evidence status recomputes the same projection against its selected action version and frozen market/pool context. A migrated code does not splice normalized quotes; merger consideration never transfers model predictions or membership. Unsupported locked-successor events remain blocking.
+
+`corporate_event_report.json` records candidate and actually exposed events, floor loss at conversion, synthetic liquidation notional/fees and phase audit. Synthetic amounts remain separate from exchange fills and fees. Pending assets enter NAV, never available buying power.

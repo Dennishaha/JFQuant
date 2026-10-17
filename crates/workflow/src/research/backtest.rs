@@ -4,6 +4,7 @@ mod account;
 mod adjustment;
 mod akquant;
 mod artifacts;
+mod corporate;
 mod data;
 pub(crate) mod execution;
 /// Fit-only models and independent cross-pool prediction/account tasks.
@@ -56,7 +57,7 @@ pub(crate) const SUPPORTED_RESEARCH_INPUTS: [&str; 15] = [
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// Current strict integer-share research result format.
-pub const RESEARCH_SCHEMA_VERSION: u32 = 19;
+pub const RESEARCH_SCHEMA_VERSION: u32 = 20;
 
 /// A result cannot be interpreted using the current research contract.
 #[derive(Debug, thiserror::Error)]
@@ -212,7 +213,7 @@ pub fn validate_result(
         let skipped = value["skipped_events"]
             .as_array()
             .ok_or("missing skipped events")?;
-        if value["unsupported_event_policy"] != "warn_and_skip"
+        if value["unsupported_event_policy"] != "block_unprojected_events"
             || value["event_simulation_complete"] != warnings.is_empty()
             || value["skipped_event_count"] != skipped.len()
             || skipped
@@ -225,7 +226,7 @@ pub fn validate_result(
             return Err("invalid unsupported event disclosure".into());
         }
         let execution = &value["execution"];
-        if execution["unsupported_event_policy"] != "warn_and_skip"
+        if execution["unsupported_event_policy"] != "block_unprojected_events"
             || execution["engine"] != "akquant"
             || execution["engine_version"] != "0.3.66"
             || execution["corporate_action_policy"] != "ex_date"
@@ -474,8 +475,8 @@ pub fn validate_result(
             .as_array()
             .ok_or("missing sample mask manifests")?;
         let independent = execution["independent"]["contract"] == "independent-v1";
-        if independent && value["schema_version"] != 19 {
-            return Err("independent execution requires schema 19".into());
+        if independent && value["schema_version"] != RESEARCH_SCHEMA_VERSION {
+            return Err("independent execution requires current result schema".into());
         }
         let expected: usize = frozen
             .iter()
@@ -637,6 +638,9 @@ pub struct ResearchRequest {
     /// Explicit rights experiment; None preserves the historical skip contract.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rights_policy: Option<analytics_core::rights::Policy>,
+    /// Explicit account-only research transition assumptions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corporate_event_policy: Option<analytics_core::corporate_account::Policy>,
     /// Frozen feature family.
     pub factor_set: analytics_core::research_quality::FactorSet,
     /// Explicit training source trust policy.
@@ -685,6 +689,8 @@ pub struct ResearchRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResearchExecution {
+    /// Explicit corporate event assumptions, independent of fitting.
+    pub corporate_event_policy: analytics_core::corporate_account::Policy,
     /// Initial account cash in CNY.
     pub initial_cash_cny: f64,
     /// Supported broker and exchange fee settings.
@@ -715,6 +721,7 @@ impl ResearchRequest {
         Self {
             reuse_predictions: None,
             rights_policy: None,
+            corporate_event_policy: None,
             quality_policy: ResearchQualityPolicy::default(),
             factor_set: Default::default(),
             price_basis: Default::default(),
@@ -1148,8 +1155,13 @@ fn finish(
         .lines()
         .map(serde_json::from_str::<serde_json::Value>)
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    let diagnostics = serde_json::json!({"valid_signals":reports.iter().map(|r|r.test_rows).sum::<usize>(),"filled_events":events.iter().filter(|e|e["status"]=="filled").count(),"rejected_events":events.iter().filter(|e|e["status"]=="rejected").count(),"submitted_orders":null,"reason":if has_trades{"filled"}else if events.iter().any(|e|e["status"]=="rejected"){"orders_rejected"}else if reports.iter().all(|r|r.test_rows==0){"no_valid_signals"}else{"no_fills"}});
+    let mut diagnostics = serde_json::json!({"valid_signals":reports.iter().map(|r|r.test_rows).sum::<usize>(),"filled_events":events.iter().filter(|e|e["status"]=="filled").count(),"rejected_events":events.iter().filter(|e|e["status"]=="rejected").count(),"submitted_orders":null,"reason":if has_trades{"filled"}else if events.iter().any(|e|e["status"]=="rejected"){"orders_rejected"}else if reports.iter().all(|r|r.test_rows==0){"no_valid_signals"}else{"no_fills"}});
 
+    if request.output.join("corporate_event_report.json").is_file() {
+        diagnostics["corporate_events"] = serde_json::from_slice(&fs::read(
+            request.output.join("corporate_event_report.json"),
+        )?)?;
+    }
     let mut warnings: Vec<serde_json::Value> =
         if request.output.join("execution_warnings.json").exists() {
             serde_json::from_slice(&fs::read(request.output.join("execution_warnings.json"))?)?
@@ -1185,7 +1197,7 @@ fn finish(
     let cross_pool =
         independent::scope_report(&request.output, &audit["execution"]["independent"])?;
     let summary = serde_json::json!({
-        "cross_pool":cross_pool,"unsupported_event_policy":"warn_and_skip","event_simulation_complete":warnings.is_empty(),"skipped_event_count":skipped.len(),"skipped_events":skipped,"schema_version":RESEARCH_SCHEMA_VERSION,"stages":{"training":"completed","prediction":"completed","backtest":"completed"},"execution_diagnostics":diagnostics,"backtest_status":if has_trades{"completed"}else{"no_valid_trades"},"execution_warnings":warnings,"input_kind":if audit["source"]["synthetic_fixture"]==true{"synthetic_fixture"}else{"public_market"},"method":"JFQuant Rust factors + Python LightGBM + AKQuant",
+        "cross_pool":cross_pool,"unsupported_event_policy":"block_unprojected_events","event_simulation_complete":warnings.is_empty(),"skipped_event_count":skipped.len(),"skipped_events":skipped,"schema_version":RESEARCH_SCHEMA_VERSION,"stages":{"training":"completed","prediction":"completed","backtest":"completed"},"execution_diagnostics":diagnostics,"backtest_status":if has_trades{"completed"}else{"no_valid_trades"},"execution_warnings":warnings,"input_kind":if audit["source"]["synthetic_fixture"]==true{"synthetic_fixture"}else{"public_market"},"method":"JFQuant Rust factors + Python LightGBM + AKQuant",
         "fold_reports":reports,"annual_reports":annual,"aggregate":aggregate,"source":audit["source"],
         "formula_version":audit["formula_version"],"signature":run_signature,"factor_signature":factor_signature,
         "admission":serde_json::from_slice::<serde_json::Value>(&fs::read(request.output.join("admission.json"))?)?,"sample_selection":serde_json::from_slice::<serde_json::Value>(&fs::read(request.output.join("sample_selection.json"))?)?,"research_scope":if request.quality_policy.strictness==analytics_core::research_quality::ResearchStrictness::QualifiedOnly{"经数据筛选的研究股票池"}else{"原股票池"},

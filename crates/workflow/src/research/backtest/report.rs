@@ -23,7 +23,10 @@ pub(super) fn render(output: &Path) -> Result<()> {
     for warning in value["execution_warnings"].as_array().into_iter().flatten() {
         writeln!(text, "- {}", warning)?;
     }
-    text.push_str("\n日终信号，下一交易日开盘成交；跨年不重置账户，不在期末虚拟平仓。分红和拆股使用 AKQuant 除权除息日口径，不区分登记、到账及红股上市日。已识别的不支持权益事件仅警告并跳过；不补偿现金或股份。普通事件资料不足仍停止回测。\n\n费用仅报告上游执行费用合计，不推断券商、经手费或税费明细。\n\n");
+    text.push_str("\n日终信号，下一交易日开盘成交；跨年不重置账户，普通持仓不在期末强制平仓。分红和拆股使用 AKQuant 除权除息日口径，不区分登记、到账及红股上市日。已识别且未投影的事件阻断执行。启用公司事件研究策略时，退市按最后交易日原始收盘价清算；这属于含事后信息的模拟结算，不属于市场成交。普通事件资料不足仍停止回测。\n\n市场成交费用保留上游合计；模拟清算金额与费用在公司事件报告单列，不推断市场成交费用明细。\n\n");
+    if let Some(events) = value["execution_diagnostics"].get("corporate_events") {
+        writeln!(text, "公司事件研究报告：{}。\n", events)?;
+    }
     if value["input_kind"] == "synthetic_fixture" {
         text.push_str("合成演示仅验证流程，不代表真实市场收益。\n\n");
     }

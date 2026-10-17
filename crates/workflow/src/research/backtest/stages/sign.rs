@@ -140,13 +140,19 @@ pub(super) fn sign(
         } else {
             "provider-quotations;events-not-training-input".into()
         };
-    let mut execution = serde_json::json!({"accounting_version":"rust-filled-trade-ledger-v1","event_validation_version":"actual-opening-exposure-v2+current-evidence-v1","reference_precision_policy":"two-decimal-per-ten-compatible-primary-terms-retained","suspension_valuation_policy":"gp29-status-days-v2+dated-current-episode-v1;retain-traded-bars;zero-volume-valuation-only-v2","unsupported_event_policy":"warn_and_skip","market_content_sha256":market_content_sha256,"runtime_signature":crate::research::worker::runtime_signature(),"dependency_signature":crate::research::worker::dependency_signature(),"engine":"akquant","engine_version":"0.3.66","target_exposure":0.98,"volume_limit_pct":0.1,"trade_unit_policy":"AKQuant lot_size uses board increment; distinct minimum quantity and price-limit rules are not modeled","corporate_action_policy":"ex_date","mode":"akquant_ex_date","factor_set":request.factor_set,"price_basis":request.price_basis,
+    let mut execution = serde_json::json!({"accounting_version":"rust-filled-trade-ledger-v1","event_validation_version":"actual-opening-exposure-v2+current-evidence-v1","reference_precision_policy":"two-decimal-per-ten-compatible-primary-terms-retained","suspension_valuation_policy":"gp29-status-days-v2+dated-current-episode-v1;retain-traded-bars;zero-volume-valuation-only-v2","unsupported_event_policy":"block_unprojected_events","market_content_sha256":market_content_sha256,"runtime_signature":crate::research::worker::runtime_signature(),"dependency_signature":crate::research::worker::dependency_signature(),"engine":"akquant","engine_version":"0.3.66","target_exposure":0.98,"volume_limit_pct":0.1,"trade_unit_policy":"AKQuant lot_size uses board increment; distinct minimum quantity and price-limit rules are not modeled","corporate_action_policy":"ex_date","mode":"akquant_ex_date","factor_set":request.factor_set,"price_basis":request.price_basis,
         "quality_policy":request.quality_policy,"quality":quality_snapshot,"quality_sha256":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(&quality_snapshot)?))),
         "fee_application":"latest_only_for_all_dates", "market_rules":request.market_rules, "initial_cash_cny":request.initial_cash_cny,
 
         "source_map":dataset.source_map(),"source_map_signature":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(serde_json::to_vec(dataset.source_map())?))),"corporate_action_sha256":action_hash,"dividend_withholding_rate":request.dividend_withholding_rate,
         "price_inputs":price_inputs,"price_input_sha256":price_input_sha256,"pool":pool,"pool_signature":pool_signature,"benchmark":request.benchmark,"pool_exit_policy":request.pool_exit_policy,
         "research_config":request.config,"schedule":request.schedule,"action_policy":request.action_policy,"event_check_policy":request.event_check_policy,"resolved_folds":folds,"dividend_tax_convention":"gross dividend at ex-date; no withholding model"});
+    if !request.train_only {
+        execution["execution_checks_sha256"] =
+            file_hash(&request.output.join("execution_checks.json"))?.into();
+        execution["execution_dependencies_sha256"] =
+            file_hash(&request.output.join("execution-dependencies.json"))?.into();
+    }
     if let Some(source) = &request.reuse_training {
         let artifact: serde_json::Value =
             serde_json::from_slice(&fs::read(source.join("training.json"))?)?;
@@ -167,18 +173,12 @@ pub(super) fn sign(
         execution["independent"] =
             serde_json::json!({"catalogue":c,"segments":m.segments,"contract":"independent-v1"});
     }
-    if let Some(policy) = &request.rights_policy {
-        execution["rights_policy"] = serde_json::to_value(policy)?;
-        let projection = rights::input(
-            request,
-            action_book.as_ref().ok_or("rights snapshot missing")?,
-            &dataset.calendar,
-            &DateRange {
-                start: folds.first().unwrap().actual.test.start,
-                end: folds.last().unwrap().actual.test.end,
-            },
-        )?
-        .ok_or("rights projection missing")?;
+    if request.rights_policy.is_some() || corporate::enabled(request) {
+        let projection: analytics_core::rights_account::Ledger =
+            serde_json::from_slice(&fs::read(request.output.join("rights_input.json"))?)?;
+        projection.validate()?;
+        execution["rights_policy"] = serde_json::to_value(&projection.policy)?;
+        execution["corporate_event_policy"] = serde_json::to_value(projection.corporate.policy)?;
         save(request.output.join("rights_input.json"), &projection)?;
         execution["rights_input_sha256"] =
             file_hash(&request.output.join("rights_input.json"))?.into();
@@ -189,7 +189,7 @@ pub(super) fn sign(
             )))
         )
         .into();
-        execution["accounting_version"] = "rust-filled-trade-ledger-rights-v2".into();
+        execution["accounting_version"] = "rust-filled-trade-ledger-events-v3".into();
         execution["rights_valuation_policy"] =
             "cost-before-ex-or-allocation;parent-raw-after-ex-and-allocation;nontradable".into();
     }

@@ -230,6 +230,9 @@ pub enum EventTerms {
     },
     /// Mandatory conversion/cash consideration affecting existing shares.
     Conversion {
+        /// Independently verified final predecessor trading date.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        last_trade_date: Option<Date>,
         /// Event classification.
         category: ConversionKind,
         /// Optional dated value of an undelivered successor claim, per old share.
@@ -256,6 +259,9 @@ pub enum EventTerms {
     },
     /// Quoted shares become nontradeable claims until a verified cash settlement.
     Delisting {
+        /// Independently verified final exchange trading date, for explicit research liquidation.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        last_trade_date: Option<Date>,
         /// Dated valuation evidence covering the claim period.
         valuations: Vec<Valuation>,
         /// Actual final cash per old share, if already known.
@@ -354,6 +360,7 @@ impl EventTerms {
                 decimal(fee_per_share)?;
             }
             Self::Conversion {
+                last_trade_date,
                 successor,
                 ratio,
                 cash,
@@ -365,6 +372,9 @@ impl EventTerms {
                 claim_valuation,
                 ..
             } => {
+                if last_trade_date.is_some_and(|d| d >= ex) {
+                    return Err("last predecessor trade must precede conversion".into());
+                }
                 if let Some(v) = claim_valuation {
                     decimal(&v.per_old_share)?;
                     if v.date > ex || v.valid_until < v.date || v.evidence.is_empty() {
@@ -399,13 +409,15 @@ impl EventTerms {
                 }
             }
             Self::Delisting {
+                last_trade_date,
                 valuations,
                 settlement_cash,
                 settlement_date,
                 ..
             } => {
-                if valuations.is_empty()
-                    || valuations[0].date > ex
+                if last_trade_date.is_some_and(|d| d >= ex)
+                    || (valuations.is_empty() && last_trade_date.is_none())
+                    || valuations.first().is_some_and(|v| v.date > ex)
                     || valuations.windows(2).any(|w| w[0].date >= w[1].date)
                 {
                     return Err("missing/unordered delisting valuations".into());

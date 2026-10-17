@@ -75,11 +75,9 @@ impl CaptureRequest {
 const EXTRACT: &str = r#"
 import json,sys
 from importlib.metadata import version
-from pypdf import PdfReader
-r=PdfReader(sys.argv[1],strict=True)
-if r.is_encrypted or len(r.pages)>500: raise ValueError('encrypted/oversized PDF')
-t='\n'.join(p.extract_text() or '' for p in r.pages)
-if len(t.encode())>8*1024*1024: raise ValueError('text too large')
+from pathlib import Path
+from jfquant_collectors.announcements import extract_pdf_text
+t=extract_pdf_text(Path(sys.argv[1]).read_bytes())
 print(json.dumps({'text':t,'pypdf_version':version('pypdf')},ensure_ascii=False))
 "#;
 /// Capture public PDFs with bounded transport and bundled text extraction.
@@ -105,7 +103,7 @@ fn download(spec: &DocumentSpec, path: &Path) -> io::Result<(u16, Option<i32>)> 
                 "--max-time",
                 "40",
                 "--max-filesize",
-                "20971520",
+                "67108864",
                 "--output",
             ])
             .arg(path)
@@ -159,7 +157,7 @@ fn capture_with(
             if exit_code != Some(0)
                 || status != 200
                 || !bytes.starts_with(b"%PDF-")
-                || bytes.len() > 20 * 1024 * 1024
+                || bytes.len() > 64 * 1024 * 1024
             {
                 return Err(invalid(format!(
                     "document_transport_or_pdf_invalid:status={status};curl={:?}",

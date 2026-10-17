@@ -187,6 +187,7 @@ pub fn research_panel(
                 match ids { Ok(evidence_tasks) => submit(state,worker,cancel_slot,WorkflowRequest::ReconcileActions { actions:state.platform.actions.clone(), evidence_tasks, market:(!state.platform.market.is_empty()).then(||state.platform.market.clone()) }),Err(e)=>state.platform.error=Some(e.to_string()) }
             }
             ui.label("从运行结果查看原值、候选字段及公告。修订JSON必须包含原事件哈希、逐字段原文引用及理由。");
+            super::evidence::event_terms_editor(ui, &mut state.platform.action_review_editor);
             ui.add(egui::TextEdit::multiline(&mut state.platform.action_review_editor).desired_rows(8).desired_width(f32::INFINITY));
             if ui.button("提交证据修订为新版本").clicked(){match serde_json::from_str(&state.platform.action_review_editor){Ok(request)=>submit(state,worker,cancel_slot,WorkflowRequest::ReviseActions{actions:state.platform.actions.clone(),request}),Err(e)=>state.platform.error=Some(e.to_string())}}
         });
@@ -535,7 +536,7 @@ fn independent_panel(
             if ui.add_enabled(enabled,egui::Button::new("查询已训练模型")).clicked() {match state.platform.training_job.parse() {Ok(training)=>submit(state,worker,cancel_slot,WorkflowRequest::Independent {request:Box::new(Job::Models {training})}),Err(_)=>state.platform.error=Some("训练任务ID无效".into())}}
         });
         ui.horizontal(|ui| {
-            if ui.button("生成独立回测计划").clicked() {let result=(|| -> Result<BacktestPlan,String> {Ok(BacktestPlan {schema_version:1,training:state.platform.training_job.parse().map_err(|_|"请先填写训练任务ID")?,models:ModelSelection::Rolling,pool_version:state.platform.template.pool_version.clone(),range:analytics_core::DateRange {start:state.platform.start.parse().map_err(|_|"开始日期无效")?,end:state.platform.end.parse().map_err(|_|"结束日期无效")?},market:state.platform.market.clone(),actions:state.platform.actions.clone(),benchmark:state.platform.template.benchmark.clone(),quality_policy:state.platform.template.quality_policy.clone(),execution:state.platform.template.execution_settings(),event_check_policy:state.platform.template.event_check_policy})})();match result {Ok(p)=>state.platform.independent_backtest_editor=serde_json::to_string_pretty(&p).unwrap(),Err(e)=>state.platform.error=Some(e)}}
+            if ui.button("生成独立回测计划").clicked() {let result=(|| -> Result<BacktestPlan,String> {Ok(BacktestPlan {schema_version:2,training:state.platform.training_job.parse().map_err(|_|"请先填写训练任务ID")?,models:ModelSelection::Rolling,pool_version:state.platform.template.pool_version.clone(),range:analytics_core::DateRange {start:state.platform.start.parse().map_err(|_|"开始日期无效")?,end:state.platform.end.parse().map_err(|_|"结束日期无效")?},market:state.platform.market.clone(),actions:state.platform.actions.clone(),benchmark:state.platform.template.benchmark.clone(),quality_policy:state.platform.template.quality_policy.clone(),execution:state.platform.template.execution_settings(),event_check_policy:state.platform.template.event_check_policy})})();match result {Ok(p)=>state.platform.independent_backtest_editor=serde_json::to_string_pretty(&p).unwrap(),Err(e)=>state.platform.error=Some(e)}}
             if ui.button("导出独立回测JSON").clicked() && let Some(p)=rfd::FileDialog::new().set_file_name("backtest-B.json").save_file() {match serde_json::from_str::<BacktestPlan>(&state.platform.independent_backtest_editor) {Ok(plan)=>{if let Err(e)=fs::write(p,serde_json::to_vec_pretty(&plan).unwrap()){state.platform.error=Some(e.to_string());}},Err(e)=>state.platform.error=Some(e.to_string())}}
             if ui.button("导入独立回测JSON").clicked() && let Some(p)=rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file() {match fs::read_to_string(p) {Ok(v)=>state.platform.independent_backtest_editor=v,Err(e)=>state.platform.error=Some(e.to_string())}}
         });
@@ -549,6 +550,15 @@ fn independent_panel(
                 if ui.selectable_label(matches!(p.models,ModelSelection::Rolling),"默认滚动切换").clicked() {p.models=ModelSelection::Rolling;changed=true;}
                 if state.platform.independent_models["training"]==p.training.to_string() {for model in state.platform.independent_models["catalogue"]["models"].as_array().into_iter().flatten() {let id=model["id"].as_str().unwrap_or("");if ui.selectable_label(matches!(&p.models,ModelSelection::Single {model_id} if model_id==id),format!("{} · 截止 {} · 可用 {}",id,model["fit_data_end"],model["available_from"])).clicked() {p.models=ModelSelection::Single {model_id:id.into()};changed=true;}}}
             });
+            ui.horizontal(|ui| {
+                use analytics_core::corporate_account::Policy;
+                ui.label("公司事件模拟");
+                changed |= ui.selectable_value(&mut p.execution.corporate_event_policy, Policy::EvidenceOnly, "仅证据执行").changed();
+                changed |= ui.selectable_value(&mut p.execution.corporate_event_policy, Policy::ResearchTransitions, "退市收盘清算／换股迁码承接").changed();
+            });
+            if p.execution.corporate_event_policy == analytics_core::corporate_account::Policy::ResearchTransitions {
+                ui.small("研究假设：最后实际交易日收盘清算，次日可用现金；换股舍零无补偿；待上市权益计净值、不计购买力。退市清算含事后信息。");
+            }
             if changed {state.platform.independent_backtest_editor=serde_json::to_string_pretty(&p).unwrap();}
         }
         ui.collapsing("独立回测计划JSON",|ui| {ui.add(egui::TextEdit::multiline(&mut state.platform.independent_backtest_editor).id_salt("independent_backtest_plan").desired_rows(9).desired_width(f32::INFINITY));});

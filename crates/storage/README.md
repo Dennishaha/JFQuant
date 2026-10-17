@@ -182,3 +182,11 @@ checked_fields 和 checked_days 供签名阶段复用已冻结的真实字段及
 选定公告留存、部分批次恢复与事件修订草稿由 `corporate_actions::evidence` 提供。沿用现有 schema-2 公告与 review 校验，包内 pypdf 提取不依赖源码或用户 Python；失败 HTTP 也保留凭证，选定文档不宣称完整历史。接口与验收见 [公司行动组件](src/corporate_actions/README.md)。
 
 当前证据驱动的任务准入、历史失败追溯与验证命令见本组件 src 下的 README；公司行动状态按任务实际范围计算，采集失败记录不再等同于当前任务阻断。
+
+## Terminal and successor evidence
+
+Reviewed Conversion and Delisting terms can carry `last_trade_date`. Delisting may omit later claim valuations only when that final trading date is explicit; this does not make evidence-only execution ready. Task policy determines whether research liquidation is allowed. Existing revision publication still verifies document bytes, identity, quotes and field evidence. Conversion settlement dates may be proved by later implementation results; this does not backdate the original entitlement announcement. No acquisition failure or coverage claim is deleted by these terms.
+
+Acceptance: `DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-storage corporate_actions`.
+
+Announcement PDF extraction is shared between complete CNINFO searches and selected-document capture:64 MiB/PDF,4096 pages,8 MiB extracted text; encrypted or oversized inputs remain failures. Collector progress reports each document and every32 completed pages, preserving the native idle watchdog and cancellation. See `collectors/README.md` and `src/corporate_actions/README.md` for audit/replay contracts.

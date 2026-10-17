@@ -159,10 +159,16 @@ impl CorporateAction {
         }
         if self.id.is_empty()
             || self.source.is_empty()
-            || self
-                .announced
-                .zip(self.record_date)
-                .is_some_and(|(a, r)| a > r)
+            || self.announced.zip(self.record_date).is_some_and(|(a, r)| {
+                a > r
+                    && !matches!(
+                        self.terms,
+                        crate::actions::EventTerms::Conversion {
+                            category: crate::actions::ConversionKind::CodeChange,
+                            ..
+                        }
+                    )
+            })
             || self.announced.is_some_and(|d| d > self.ex_date)
             || self.record_date.is_some_and(|d| d >= self.ex_date)
             || !self.cash().is_finite()
@@ -217,4 +223,20 @@ fn entitlement_shares(shares: u64, ratio: f64) -> Result<u64> {
         ));
     }
     Ok(value.round() as u64)
+}
+
+#[cfg(test)]
+mod migration_chronology_tests {
+    use super::*;
+    #[test]
+    fn mandatory_migration_may_be_disclosed_after_record_but_before_effective_open() {
+        let mut action: CorporateAction = serde_json::from_value(serde_json::json!({"id":"SZ300114:2025-02-17","instrument":"SZ300114","announced":"2025-02-15","record_date":"2025-02-14","ex_date":"2025-02-17","pay_date":null,"listing_date":null,"cash_per_share":"0","shares_per_share":"0","source":"verified migration implementation","terms":{"kind":"conversion","category":"code_change","last_trade_date":"2025-02-14","successor":"SZ302132","ratio":"1","ordinary_holder":true,"retain_original":false,"cash":"0","pay_date":null,"listing_date":"2025-02-17","reference":{"kind":"unchanged","evidence":"verified"},"allocation":{"kind":"exact"}}})).unwrap();
+        action.validate_adjustment_terms().unwrap();
+        action.announced = Some("2025-02-18".parse().unwrap());
+        assert!(action.validate_adjustment_terms().is_err());
+        action.announced = Some("2025-02-15".parse().unwrap());
+        action.cash_per_share = "0.1".into();
+        action.terms = Default::default();
+        assert!(action.validate_adjustment_terms().is_err());
+    }
 }

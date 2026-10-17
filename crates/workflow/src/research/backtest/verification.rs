@@ -93,11 +93,11 @@ pub fn report(workspace: &Workspace, task_id: Uuid) -> Result<Value> {
     }
     if !matches!(
         summary["execution"]["accounting_version"].as_str(),
-        Some("rust-filled-trade-ledger-v1" | "rust-filled-trade-ledger-rights-v2")
+        Some("rust-filled-trade-ledger-v1" | "rust-filled-trade-ledger-events-v3")
     ) {
         return Err("verification_requires_rust_closing_ledger: rerun backtest; historical files are unchanged".into());
     }
-    if summary["execution"]["accounting_version"] == "rust-filled-trade-ledger-rights-v2" {
+    if summary["execution"]["accounting_version"] == "rust-filled-trade-ledger-events-v3" {
         if summary["execution"]["rights_input_sha256"]
             != super::file_hash(&root.join("rights_input.json"))?
         {
@@ -106,6 +106,11 @@ pub fn report(workspace: &Workspace, task_id: Uuid) -> Result<Value> {
         let input: analytics_core::rights_account::Ledger =
             serde_json::from_slice(&fs::read(root.join("rights_input.json"))?)?;
         input.validate()?;
+        if serde_json::to_value(input.corporate.policy)?
+            != summary["execution"]["corporate_event_policy"]
+        {
+            return Err("corporate_policy_mismatch".into());
+        }
         if serde_json::to_value(&input.policy)? != summary["execution"]["rights_policy"] {
             return Err("rights_policy_mismatch".into());
         }
@@ -160,7 +165,7 @@ pub fn report(workspace: &Workspace, task_id: Uuid) -> Result<Value> {
     )?;
     let mut report = artifacts(&root, &summary)?;
     report["engine_curve_difference_days"] = json!(replay.differences.len());
-    let names = [
+    let mut names = vec![
         "run.json",
         "outcome.json",
         "summary.json",
@@ -176,6 +181,14 @@ pub fn report(workspace: &Workspace, task_id: Uuid) -> Result<Value> {
         "execution_actions.json",
         "engine_curve_differences.json",
     ];
+    if summary["execution"]["accounting_version"] == "rust-filled-trade-ledger-events-v3" {
+        names.extend([
+            "rights_input.json",
+            "rights_state.json",
+            "corporate_event_report.json",
+        ]);
+    }
+    names.extend(["execution_checks.json", "execution-dependencies.json"]);
     let hashes = names
         .into_iter()
         .map(|name| {
@@ -194,6 +207,17 @@ pub fn report(workspace: &Workspace, task_id: Uuid) -> Result<Value> {
 }
 
 fn artifacts(root: &Path, summary: &Value) -> Result<Value> {
+    for (name, field) in [
+        ("execution_checks.json", "execution_checks_sha256"),
+        (
+            "execution-dependencies.json",
+            "execution_dependencies_sha256",
+        ),
+    ] {
+        if summary["execution"][field] != super::file_hash(&root.join(name))? {
+            return Err("execution_dependency_receipt_mismatch".into());
+        }
+    }
     if read(root, "execution.json")? != summary["execution"] {
         return Err("verification_execution_mismatch".into());
     }
@@ -205,7 +229,7 @@ fn artifacts(root: &Path, summary: &Value) -> Result<Value> {
         .iter()
         .map(|d| d.date.parse::<Date>())
         .collect::<std::result::Result<BTreeSet<_>, _>>()?;
-    if summary["execution"]["accounting_version"] == "rust-filled-trade-ledger-rights-v2" {
+    if summary["execution"]["accounting_version"] == "rust-filled-trade-ledger-events-v3" {
         if summary["execution"]["rights_input_sha256"]
             != super::file_hash(&root.join("rights_input.json"))?
         {
@@ -214,6 +238,19 @@ fn artifacts(root: &Path, summary: &Value) -> Result<Value> {
         let input: analytics_core::rights_account::Ledger =
             serde_json::from_slice(&fs::read(root.join("rights_input.json"))?)?;
         input.validate()?;
+        let native: analytics_core::rights_account::Ledger =
+            serde_json::from_value(read(root, "rights_state.json")?)?;
+        let report = super::corporate::report(&input.corporate, &native.corporate)?;
+        json_equal(&report, &read(root, "corporate_event_report.json")?)?;
+        json_equal(
+            &report,
+            &summary["execution_diagnostics"]["corporate_events"],
+        )?;
+        if serde_json::to_value(input.corporate.policy)?
+            != summary["execution"]["corporate_event_policy"]
+        {
+            return Err("corporate_policy_mismatch".into());
+        }
         if serde_json::to_value(&input.policy)? != summary["execution"]["rights_policy"] {
             return Err("rights_policy_mismatch".into());
         }
@@ -387,7 +424,19 @@ mod tests {
         let parsed: Vec<portfolio::DayResult> = serde_json::from_value(days.clone()).unwrap();
         let aggregate = serde_json::to_value(portfolio::performance(&parsed)).unwrap();
         let reports = json!([{"performance":aggregate}]);
-        let summary = json!({"execution":{"initial_cash_cny":100.,"event_check_policy":"provider"},"aggregate":aggregate,"annual_reports":reports,"fold_reports":reports,"skipped_events":[{"held_across_event":true}],"skipped_event_count":1,"event_simulation_complete":false});
+        let mut summary = json!({"execution":{"initial_cash_cny":100.,"event_check_policy":"provider"},"aggregate":aggregate,"annual_reports":reports,"fold_reports":reports,"skipped_events":[],"skipped_event_count":0,"event_simulation_complete":false});
+        for (name, field) in [
+            ("execution_checks.json", "execution_checks_sha256"),
+            (
+                "execution-dependencies.json",
+                "execution_dependencies_sha256",
+            ),
+        ] {
+            write(root.path(), name, &json!([]));
+            summary["execution"][field] = super::super::file_hash(&root.path().join(name))
+                .unwrap()
+                .into();
+        }
         for (name, value) in [
             ("daily.json", days),
             ("execution.json", summary["execution"].clone()),
@@ -421,7 +470,7 @@ mod tests {
         assert_eq!(report["status"], "consistent");
         assert_eq!(report["held_valuation_mark_rows"], 1);
         assert_eq!(report["event_simulation_complete"], false);
-        assert_eq!(report["skipped_events_with_exposure"], 1);
+        assert_eq!(report["skipped_events_with_exposure"], 0);
         assert_eq!(report["research_ready"], Value::Null);
         for (name, field) in [
             ("daily.json", "net_return"),

@@ -18,10 +18,11 @@ def backtest(request, cancelled, emit):
     for date in request.get("signal_dates", []):
         by_date.setdefault(str(date), {})
     pool = request.get("pool", {}).get("intervals", {})
+    transitions = (request.get("rights") or {}).get("corporate", {}).get("events", [])
+    retirement = {e["instrument"]: (e["date"], e["terms"]["kind"] == "liquidation") for e in transitions}
     actions = request["actions"]
     initial = request["initial_cash"]
     events = []
-    terminal = {}
     trades_by_day = {}
 
     # Register native actions before engine.run through the public analyzer lifecycle.
@@ -53,6 +54,7 @@ def backtest(request, cancelled, emit):
                 raise InterruptedError("backtest cancelled")
             date = str(trading_date)
             members = {s for s, ranges in pool.items() if any(r["start"] <= date <= r["end"] for r in ranges)} if pool else set(request["lot_sizes"])
+            members = {s for s in members if s not in retirement or date < retirement[s][0] or (date == retirement[s][0] and retirement[s][1])}
             if request.get("pool_exit_policy") == "next_tradable_day":
                 for symbol, quantity in self.positions.items():
                     if quantity > 0 and symbol not in members:
@@ -87,8 +89,6 @@ def backtest(request, cancelled, emit):
             # The callback can precede final deferred fills or be dispatched lazily
             # on the next session. It is not an authoritative closing snapshot.
 
-        def on_stop(self):
-            terminal.update({"positions":dict(self.positions),"cash":float(self.cash),"equity":float(self.equity)})
 
     configs = [aq.InstrumentConfig(symbol=symbol, lot_size=int(lot), sellable_after_days=1, tick_size=0.01) for symbol, lot in request["lot_sizes"].items()]
     config = aq.BacktestConfig(strategy_config=aq.StrategyConfig(initial_cash=initial, commission_rate=request["commission_rate"], min_commission=request["minimum_commission"], stamp_tax_rate=request["stamp_tax"], transfer_fee_rate=request["transfer_fee"], exit_on_last_bar=False, enable_fractional_shares=False, volume_limit_pct=0.1), instruments_config=configs, show_progress=False, timezone="Asia/Shanghai", bootstrap_samples=0)
@@ -103,6 +103,7 @@ def backtest(request, cancelled, emit):
         raise ValueError("AKQuant corporate-action input hook failed")
     if cancelled.is_set():
         raise InterruptedError("backtest cancelled")
+    terminal = json.loads(action_input.engine.jfquant_account_snapshot())
     output = Path(request["output"])
     (output / "backtest_timing.json").write_text(json.dumps({"engine_seconds": time.perf_counter() - engine_started, "peak_rss_bytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}))
     if request.get("rights") is not None:

@@ -15,6 +15,33 @@ from pypdf import PdfReader
 from .providers import identity, request_call
 
 SEARCH = "https://www.cninfo.com.cn/new/hisAnnouncement/query"
+MAX_PDF_BYTES = 64 * 1024 * 1024
+MAX_PDF_PAGES = 4096
+MAX_TEXT_BYTES = 8 * 1024 * 1024
+
+
+def extract_pdf_text(content, progress=None):
+    """Bounded extraction shared by history queries and selected-document capture."""
+    if len(content) > MAX_PDF_BYTES:
+        raise ValueError("announcement PDF exceeds 64 MiB")
+    if not content.startswith(b"%PDF-"):
+        raise ValueError("invalid announcement PDF header")
+    document = PdfReader(io.BytesIO(content), strict=True)
+    if document.is_encrypted:
+        raise ValueError("encrypted announcement PDF")
+    if len(document.pages) > MAX_PDF_PAGES:
+        raise ValueError("announcement PDF exceeds 4096 pages")
+    pages, size = [], 0
+    total = len(document.pages)
+    for index, page in enumerate(document.pages, 1):
+        text = page.extract_text() or ""
+        size += len(text.encode()) + (1 if pages else 0)
+        if size > MAX_TEXT_BYTES:
+            raise ValueError("announcement text exceeds 8 MiB")
+        pages.append(text)
+        if progress is not None and (index % 32 == 0 or index == total):
+            progress(index, total)
+    return "\n".join(pages)
 
 
 @lru_cache(maxsize=1)
@@ -80,7 +107,10 @@ def attachment_url(path):
 def extract_candidates(text, title):
     stage = (
         "implementation"
-        if re.search(r"实施|清算|交割结果|换股结果|终止上市|摘牌|证券代码.*变更|配股发行公告|配股发行结果公告|配股股份变动及获配股票上市公告书", title)
+        if re.search(
+            r"实施|清算|交割结果|换股结果|终止上市|摘牌|证券代码.*变更|变更.*证券代码|配股发行公告|配股发行结果公告|配股股份变动及获配股票上市公告书",
+            title,
+        )
         else "unverified"
     )
     if re.search(r"预案|草案|摘要|提示性|风险提示|可能|拟|股东大会|董事会", title):
@@ -170,9 +200,13 @@ def collect(request, report):
     for symbol in request["instruments"]:
         code = identity(symbol)
         org = security_identity(symbol)
-        documents, seen, expected = [], set(), None
+        documents, seen, expected = [], {}, None
         all_announcements = []
-        for page in range(1, 2001):
+        # Equal timestamps can move an identical row across page boundaries.
+        # Re-read at most three passes; completeness still requires total unique IDs.
+        for query_index in range(6000):
+            page_count = max(1, (expected + 29) // 30) if expected is not None else 1
+            page = query_index % page_count + 1
             report("progress", message=f"实施公告 {symbol} 第{page}页")
             payload = {
                 "pageNum": page,
@@ -197,6 +231,8 @@ def collect(request, report):
             body = response.json()
             total = body.get("totalAnnouncement")
             rows = body.get("announcements")
+            if total == 0 and rows is None:
+                rows = []
             if type(total) is not int or total < 0 or total > 60000 or not isinstance(rows, list):
                 raise ValueError("invalid announcement pagination")
             if expected is None:
@@ -211,43 +247,41 @@ def collect(request, report):
                 ):
                     raise ValueError("announcement security conflict")
                 key = str(row["announcementId"])
-                if not re.fullmatch(r"[A-Za-z0-9_-]+", key) or key in seen:
-                    raise ValueError("invalid/duplicate announcement identity")
-                seen.add(key)
+                if not re.fullmatch(r"[A-Za-z0-9_-]+", key):
+                    raise ValueError("invalid announcement identity")
                 title = re.sub(r"<[^>]*>", "", row["announcementTitle"])
-                all_announcements.append(
-                    {
-                        "id": key,
-                        "title": title,
-                        "institution_id": org,
-                        "announcement_time": row["announcementTime"],
-                        "attachment": row.get("adjunctUrl"),
-                    }
-                )
+                metadata = {
+                    "id": key,
+                    "title": title,
+                    "institution_id": org,
+                    "announcement_time": row["announcementTime"],
+                    "attachment": row.get("adjunctUrl"),
+                }
+                if key in seen:
+                    if seen[key] != metadata:
+                        raise ValueError("conflicting announcement identity")
+                    continue
+                seen[key] = metadata
+                all_announcements.append(metadata)
                 if not re.search(
-                    r"权益分派|利润分配|转增|送股|派息|股利|分红|配股|缩股|重整|股权分置|换股|合并|终止上市|摘牌|清偿|清算|交割|证券代码.*变更|现金选择权",
+                    r"权益分派|利润分配|转增|送股|派息|股利|分红|配股|缩股|重整|股权分置|换股|合并|终止上市|摘牌|清偿|清算|交割|证券代码.*变更|变更.*证券代码|现金选择权",
                     title,
                 ):
                     continue
                 url = attachment_url(row["adjunctUrl"])
+                report("progress", message=f"实施公告 {symbol} 文档{key}")
                 pdf = request_call(
                     lambda url=url: requests.get(url, timeout=30, allow_redirects=False)
                 )
                 pdf.raise_for_status()
-                if (
-                    pdf.status_code != 200
-                    or urlsplit(pdf.url).hostname != "static.cninfo.com.cn"
-                    or len(pdf.content) > 20 * 1024 * 1024
-                    or not pdf.content.startswith(b"%PDF-")
-                ):
-                    raise ValueError("invalid announcement PDF/status")
-                document = PdfReader(io.BytesIO(pdf.content), strict=True)
-                if document.is_encrypted or len(document.pages) > 500:
-                    raise ValueError("unsupported encrypted/oversized announcement")
-                pages = [p.extract_text() or "" for p in document.pages]
-                text = "\n".join(pages)
-                if len(text.encode()) > 8 * 1024 * 1024:
-                    raise ValueError("announcement text too large")
+                if pdf.status_code != 200 or urlsplit(pdf.url).hostname != "static.cninfo.com.cn":
+                    raise ValueError("invalid announcement HTTP status/host")
+                text = extract_pdf_text(
+                    pdf.content,
+                    lambda done, total, symbol=symbol, key=key: report(
+                        "progress", message=f"实施公告 {symbol} 文档{key} 解析{done}/{total}页"
+                    ),
+                )
                 name = symbol + "-" + key
                 (root / (name + ".pdf")).write_bytes(pdf.content)
                 (root / (name + ".txt")).write_text(text, encoding="utf-8")
@@ -272,15 +306,22 @@ def collect(request, report):
                         "pdf_sha256": "sha256:" + hashlib.sha256(pdf.content).hexdigest(),
                         "text": name + ".txt",
                         "text_sha256": "sha256:" + hashlib.sha256(text.encode()).hexdigest(),
-                        "parser_version": "cninfo-candidates-v5",
+                        "parser_version": "cninfo-candidates-v10",
                         "pypdf_version": version("pypdf"),
                         "candidates": extract_candidates(text, title),
                     }
                 )
             if len(seen) == expected:
                 break
-            if len(rows) != 30 or len(seen) > expected:
+            page_count = max(1, (expected + 29) // 30)
+            if (
+                (not rows and expected > 0)
+                or (len(rows) != 30 and page < page_count)
+                or len(seen) > expected
+            ):
                 raise ValueError("truncated announcement pagination")
+            if query_index + 1 >= 3 * page_count:
+                raise ValueError("incomplete unique announcement pagination after three passes")
         else:
             raise ValueError("announcement pagination limit")
         report(

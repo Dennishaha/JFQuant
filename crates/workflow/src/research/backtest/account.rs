@@ -81,23 +81,11 @@ pub(super) fn reconcile(
         .transpose()?
         .map(|v| serde_json::from_slice(&v))
         .transpose()?;
-    let mut previous_date = None;
     for (index, date) in calendar
         .iter()
         .enumerate()
         .filter(|(_, d)| range.contains(**d))
     {
-        if let Some(ledger) = rights.as_mut().filter(|l| !l.events.is_empty())
-            && let Some(previous_date) = previous_date
-        {
-            ledger.close(
-                previous_date,
-                &positions
-                    .iter()
-                    .map(|(k, v)| Ok((k.clone(), v.to_string().parse()?)))
-                    .collect::<Result<_>>()?,
-            )?;
-        }
         for action in actions.iter().filter(|a| a["date"] == date.to_string()) {
             let id = action["symbol"]
                 .as_str()
@@ -110,7 +98,7 @@ pub(super) fn reconcile(
                 _ => return Err("execution_action_projection_unsupported".into()),
             }
         }
-        if let Some(ledger) = rights.as_mut().filter(|l| !l.events.is_empty()) {
+        if let Some(ledger) = rights.as_mut().filter(|l| l.active()) {
             super::rights::advance(
                 ledger,
                 native_rights.as_ref().unwrap(),
@@ -151,6 +139,21 @@ pub(super) fn reconcile(
             if *position < -1e-8 {
                 return Err("execution_long_account_negative_position".into());
             }
+        }
+        if let Some(ledger) = rights.as_mut().filter(|l| l.active()) {
+            use rust_decimal::{Decimal, prelude::ToPrimitive};
+            let mut balance: Decimal = cash.to_string().parse()?;
+            let mut p = positions
+                .iter()
+                .map(|(k, v)| Ok((k.clone(), v.to_string().parse::<Decimal>()?)))
+                .collect::<Result<BTreeMap<_, _>>>()?;
+            let mut available = p.clone();
+            ledger.close_account(*date, &mut balance, &mut p, &mut available)?;
+            cash = balance.to_f64().ok_or("corporate_cash_invalid")?;
+            positions = p
+                .into_iter()
+                .map(|(k, v)| Ok((k, v.to_f64().ok_or("corporate_quantity_invalid")?)))
+                .collect::<Result<_>>()?;
         }
         positions.retain(|_, q| q.abs() > 1e-8);
         let mut equity = cash;
@@ -213,6 +216,9 @@ pub(super) fn reconcile(
         if let Some(ledger) = &rights {
             let snapshot = snapshots.get_mut(date).unwrap();
             snapshot["rights"] = serde_json::to_value(&ledger.states)?;
+            snapshot["corporate_events"] = serde_json::to_value(&ledger.corporate.states)?;
+            snapshot["corporate_pending_values"] =
+                serde_json::to_value(ledger.corporate.pending_values()?)?;
             snapshot["pending_rights_value"] = pending.into();
         }
         results.push(portfolio::DayResult {
@@ -226,7 +232,6 @@ pub(super) fn reconcile(
             blocked_orders: *rejected.get(date).unwrap_or(&0),
         });
         previous = equity;
-        previous_date = Some(*date);
     }
     let terminal: BTreeMap<String, f64> =
         serde_json::from_value(native["terminal"]["positions"].clone())?;
@@ -367,5 +372,44 @@ mod tests {
             )
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod corporate_tests {
+    use super::*;
+    #[test]
+    #[ignore = "export native fixtures with JFQUANT_CORPORATE_FIXTURE_DIR; see research README"]
+    fn native_corporate_fixtures_replay_exact_account() {
+        let base = PathBuf::from(
+            std::env::var_os("JFQUANT_CORPORATE_FIXTURE_DIR").expect("fixture directory required"),
+        );
+        for kind in ["liquidation", "migration", "merger"] {
+            let root = base.join(kind);
+            let fixture: Value =
+                serde_json::from_slice(&fs::read(root.join("fixture.json")).unwrap()).unwrap();
+            let calendar: Vec<Date> = serde_json::from_value(fixture["calendar"].clone()).unwrap();
+            let closes = serde_json::from_value(fixture["closes"].clone()).unwrap();
+            let range = DateRange {
+                start: calendar[0],
+                end: *calendar.last().unwrap(),
+            };
+            let replay = reconcile(
+                &root,
+                &calendar,
+                &range,
+                fixture["initial"].as_f64().unwrap(),
+                &closes,
+                &[],
+                &BTreeMap::new(),
+            )
+            .unwrap();
+            assert_eq!(replay.days.len(), calendar.len());
+            let terminal = &replay.snapshots[&range.end];
+            assert!(terminal["positions"].get("SH600000").is_none());
+            if kind != "liquidation" {
+                assert!(terminal["positions"]["SZ000001"].as_f64().unwrap() > 0.);
+            }
+        }
     }
 }

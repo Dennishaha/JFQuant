@@ -1252,7 +1252,7 @@ fn cancellation_after_prediction_publication_preserves_models_and_retry_reuses_p
 }
 
 #[test]
-fn identified_special_event_warns_and_trades_while_ordinary_conflict_stays_blocked() {
+fn identified_unprojected_event_and_exposed_ordinary_conflict_stay_blocked() {
     let tmp = tempfile::tempdir().unwrap();
     let w = Workspace::open(tmp.path()).unwrap();
     let (m, a, t) = demo::create(&w).unwrap();
@@ -1283,14 +1283,8 @@ fn identified_special_event_warns_and_trades_while_ordinary_conflict_stays_block
             audit_only: false,
         },
     );
-    let result = result.unwrap().details;
-    assert_eq!(result["backtest_status"], "completed");
-    assert_eq!(result["unsupported_event_policy"], "warn_and_skip");
-    assert_eq!(result["event_simulation_complete"], false);
-    assert_eq!(result["skipped_event_count"], 1);
-    assert!(result["skipped_events"][0]["held_across_event"].is_boolean());
-    let report = fs::read_to_string(w.resolve(run.output).join("report.md")).unwrap();
-    assert!(report.contains("回测完成，含未模拟事件"));
+    assert!(result.unwrap_err().to_string().contains("data_not_ready"));
+    assert!(!w.resolve(run.output).join("summary.json").exists());
     book.execution_issues[0].code = "source_event_conflict".into();
     book.execution_issues[0].event_category = "distribution".into();
     atomic_json(&path, &book).unwrap();

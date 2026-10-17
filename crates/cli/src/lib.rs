@@ -598,11 +598,15 @@ pub enum ResearchCommand {
     ModelBacktest {
         #[arg(long)]
         plan: PathBuf,
+        #[arg(long, value_parser = ["evidence_only", "research_transitions"])]
+        corporate_events: Option<String>,
     },
     /// Preview model switches and B data requirements, or acquire action evidence.
     BacktestInputs {
         #[arg(long)]
         plan: PathBuf,
+        #[arg(long, value_parser = ["evidence_only", "research_transitions"])]
+        corporate_events: Option<String>,
         #[arg(long)]
         prepare: bool,
         #[arg(long)]
@@ -1241,8 +1245,16 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
             ResearchCommand::Fit {plan,market,actions} => workflow(WorkflowRequest::Independent {request:Box::new(analytics_workflow::research::backtest::independent::Job::Train {plan:Box::new(read(&client.root,&plan)?),market,actions})}),
             ResearchCommand::FitInputs {plan,market,actions,prepare,announcements} => workflow(WorkflowRequest::Independent {request:Box::new(analytics_workflow::research::backtest::independent::Job::TrainingInputs {plan:Box::new(read(&client.root,&plan)?),market,actions,prepare,announcements})}),
             ResearchCommand::Models {training} => workflow(WorkflowRequest::Independent {request:Box::new(analytics_workflow::research::backtest::independent::Job::Models {training})}),
-            ResearchCommand::ModelBacktest {plan} => workflow(WorkflowRequest::Independent {request:Box::new(analytics_workflow::research::backtest::independent::Job::Backtest {plan:Box::new(read(&client.root,&plan)?)})}),
-            ResearchCommand::BacktestInputs {plan,prepare,announcements} => workflow(WorkflowRequest::Independent {request:Box::new(analytics_workflow::research::backtest::independent::Job::BacktestInputs {plan:Box::new(read(&client.root,&plan)?),prepare,announcements})}),
+            ResearchCommand::ModelBacktest {plan,corporate_events} => {
+                let mut plan: analytics_workflow::research::backtest::independent::BacktestPlan = read(&client.root,&plan)?;
+                if let Some(policy) = corporate_events {plan.execution.corporate_event_policy=serde_json::from_value(serde_json::Value::String(policy)).map_err(invalid)?;}
+                workflow(WorkflowRequest::Independent {request:Box::new(analytics_workflow::research::backtest::independent::Job::Backtest {plan:Box::new(plan)})})
+            },
+            ResearchCommand::BacktestInputs {plan,prepare,announcements,corporate_events} => {
+                let mut plan: analytics_workflow::research::backtest::independent::BacktestPlan = read(&client.root,&plan)?;
+                if let Some(policy) = corporate_events {plan.execution.corporate_event_policy=serde_json::from_value(serde_json::Value::String(policy)).map_err(invalid)?;}
+                workflow(WorkflowRequest::Independent {request:Box::new(analytics_workflow::research::backtest::independent::Job::BacktestInputs {plan:Box::new(plan),prepare,announcements})})
+            },
             ResearchCommand::Verify { task } => {
                 return client.call(Rpc::VerifyResearch { id: task });
             }
@@ -1385,7 +1397,7 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
                 },
                 TemplateCommand::ModelBacktest {template,training,market,actions,start,end,output}=> {
                     let t=ResearchTemplate::read(&resolve(&client.root,&template)).map_err(invalid)?;
-                    let plan=analytics_workflow::research::backtest::independent::BacktestPlan {schema_version:1,training,models:Default::default(),pool_version:t.pool_version.clone(),range:analytics_core::DateRange {start,end},market,actions,benchmark:t.benchmark.clone(),quality_policy:t.quality_policy.clone(),execution:t.execution_settings(),event_check_policy:t.event_check_policy};
+                    let plan=analytics_workflow::research::backtest::independent::BacktestPlan {schema_version:2,training,models:Default::default(),pool_version:t.pool_version.clone(),range:analytics_core::DateRange {start,end},market,actions,benchmark:t.benchmark.clone(),quality_policy:t.quality_policy.clone(),execution:t.execution_settings(),event_check_policy:t.event_check_policy};
                     plan.validate().map_err(invalid)?;
                     fs::write(resolve(&client.root,&output),serde_json::to_vec_pretty(&plan).map_err(invalid)?).map_err(invalid)?;
                     Ok(json!({"output":output,"plan":plan}))

@@ -1338,7 +1338,18 @@ fn unsupported_history_shows_error_without_nav_or_resumption_and_other_records_r
         .unwrap();
     h.app.state.platform.runs = w.runs().unwrap();
     h.app.state.platform.selected_run = Some(old.id);
-    let text = rendered_text(&h.frame(vec![]));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let text = loop {
+        let text = rendered_text(&h.frame(vec![]));
+        if text.contains("unsupported_result_format") {
+            break text;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "history read timed out: {text}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
     assert!(text.contains("unsupported_result_format"));
     assert!(!text.contains("净值 ·"));
     assert!(!text.contains("年化"));

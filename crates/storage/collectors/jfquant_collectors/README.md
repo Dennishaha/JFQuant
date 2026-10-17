@@ -19,3 +19,9 @@ uvx ruff check crates/storage/collectors
 ```
 
 TDX行动分片增加独立GP41/GP43原文请求及获取时间，字段解释、每十股比例、总量单位和跨事件关联由Rust facts模块执行；不在Python自动生成交收条款。单字段失败不会覆盖普通事件或GP29。巨潮qsgn机构ID按目录身份接受，仍校验证券市场。验收：包内Python运行 `-m unittest discover -s crates/storage/collectors/tests`。
+
+巨潮候选解析 v7：代码变更标题支持双向语序；全量分页最多三轮收齐总数对应的唯一ID，相同ID元数据冲突或总数变化仍拒绝。不会以去重后的较低条数替代接口总数。验收：`PYTHONPATH=crates/storage/collectors target/collector-build/python/bin/python3 -B -m unittest discover -s crates/storage/collectors/tests -p test_announcements.py`。
+
+公告全文查询与选定文档捕获共用 `extract_pdf_text`：PDF 上限64 MiB、4096页，拒绝加密PDF，逐页累计文本上限8 MiB。此上限覆盖大型合并报告，超限仍失败，不跳过候选或宣告覆盖完整。错误区分HTTP状态/主机、PDF头、字节、页数、加密及文本限制。历史查询解析器版本为 `cninfo-candidates-v10`。
+
+Large-document progress: report before each candidate download and after each32 extracted pages (including the final page). Progress reflects completed work; the native no-progress watchdog and cancellation remain enabled. The shared extractor accepts an optional progress callback; selected-document capture keeps its single JSON extraction response.

@@ -131,7 +131,7 @@ fn separate_fit_and_cross_pool_execution_without_training_market() {
     fs::rename(&training_root, training_root.with_extension("unavailable")).unwrap();
     assert!(!training_root.exists());
     let b = BacktestPlan {
-        schema_version: 1,
+        schema_version: 2,
         training: train_run.id,
         models: Default::default(),
         pool_version: save_pool("B", vec![&symbols[1]]),
@@ -510,7 +510,7 @@ fn rolling_models_switch_inside_one_account_and_dynamic_b_pool() {
         },
     );
     let plan = BacktestPlan {
-        schema_version: 1,
+        schema_version: 2,
         training: training.id,
         models: Default::default(),
         pool_version: b.id,

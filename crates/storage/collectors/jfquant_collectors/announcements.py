@@ -56,6 +56,10 @@ def security_identity(symbol):
     # encode a trading venue. The canonical code/venue was validated above.
     if re.fullmatch(r"qsgn[0-9]{7}", org):
         return org
+    # CNINFO also assigns DR keys (e.g. 603056 -> DR0000021). Like qsgn,
+    # these are directory-issued opaque IDs; query rows must still match them.
+    if re.fullmatch(r"DR[0-9]{7}", org):
+        return org
     if (symbol.startswith("SH") and not org.startswith("gssh")) or (
         symbol.startswith("SZ") and not org.startswith("gssz")
     ):

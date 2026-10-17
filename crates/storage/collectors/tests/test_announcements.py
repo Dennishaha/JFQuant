@@ -7,6 +7,22 @@ from jfquant_collectors.announcements import attachment_url, collect, extract_ca
 
 
 class AnnouncementTests(unittest.TestCase):
+    def test_dr_directory_identity_keeps_security_and_exchange_checks(self):
+        from jfquant_collectors.announcements import security_identity
+
+        row = {"code": "603056", "category": "A股", "orgId": "DR0000021"}
+        with patch("jfquant_collectors.announcements.security_directory", return_value=[row]):
+            self.assertEqual(security_identity("SH603056"), "DR0000021")
+            for symbol in ("SZ603056", "SH603057"):
+                with self.assertRaises(ValueError):
+                    security_identity(symbol)
+        for org in ("DR21", "DR0000021-extra", "DR/0000021", "dr0000021"):
+            with patch(
+                "jfquant_collectors.announcements.security_directory",
+                return_value=[{**row, "orgId": org}],
+            ), self.assertRaises(ValueError):
+                security_identity("SH603056")
+
     def test_final_rights_documents_are_field_evidence_but_proposals_and_reminders_are_not(self):
         for title in ("A股配股发行公告", "配股发行结果公告", "配股股份变动及获配股票上市公告书"):
             self.assertEqual(extract_candidates("", title)["stage"], "implementation")

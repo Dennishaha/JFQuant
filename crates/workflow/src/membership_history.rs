@@ -86,13 +86,6 @@ pub enum Operation {
         /// Selected operation.
         action: crate::history_material::MaterialAction,
     },
-    /// Explicit one-time v1 draft conversion; preserves the original file.
-    Migrate {
-        /// Workspace-relative v1 request/artifact file (not a runtime fallback).
-        path: PathBuf,
-        /// Explicitly choose a frozen artifact instead of a standalone request.
-        artifact: bool,
-    },
     /// Capture explicitly chosen source bytes; this is the only network operation.
     Capture {
         /// Original HTTPS URL.
@@ -226,12 +219,6 @@ pub(crate) fn freeze(w: &Workspace, op: &Operation) -> Result<Value> {
         }
         Operation::Material { request, action } => {
             crate::history_material::freeze(w, request, action)
-        }
-        Operation::Migrate { path, .. } => {
-            let bytes = fs::read(storage::document_path(&w.root, path)?)?;
-            Ok(
-                json!({"source_hash":storage::bytes_hash(&bytes),"source":serde_json::from_slice::<Value>(&bytes)?}),
-            )
         }
         Operation::Capture { .. } => Ok(json!({"rules_version":RULES_VERSION})),
     }
@@ -383,20 +370,6 @@ pub(crate) fn execute(
         }
         Operation::Material { request, action } => {
             crate::history_material::execute(w, request, action, run, context)
-        }
-        Operation::Migrate { path, artifact } => {
-            let request = if *artifact {
-                crate::history_migration::artifact_request(w, path, &frozen["source"])?
-            } else {
-                analytics_storage::membership_history_migration::migrate_v1(
-                    frozen["source"].clone(),
-                )?
-            };
-            let output = run.output.join("history-request-v2.json");
-            atomic_json(&w.resolve(&output), &request)?;
-            Ok(
-                json!({"schema_version":2,"history_request":request,"output":output,"source_hash":frozen["source_hash"],"ready":false,"pending":"per-security associations, image positions, review bindings and missing facts must be supplied; published artifacts require fresh preview/publication"}),
-            )
         }
         Operation::Capture { url, format } => {
             let path = run.output.join(format!(
@@ -618,6 +591,50 @@ mod tests {
         };
         let run = w.begin(ctx.id, "history test", crate::snapshot(w, &request)?)?;
         Ok(crate::execute(w, &request, &run, &ctx)?.details)
+    }
+    #[test]
+    fn history_retired_operation_and_versions_are_rejected() {
+        assert!(
+            serde_json::from_value::<Operation>(json!({
+                "operation":"migrate", "path":"history.json", "artifact":false
+            }))
+            .is_err()
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let w = Workspace::open(temp.path()).unwrap();
+        let (market, request) = fixture(&w);
+        for outer in [false, true] {
+            let mut old = request.clone();
+            if outer {
+                old.schema_version = 1;
+            } else {
+                old.history.schema_version = 1;
+            }
+            assert!(
+                task(
+                    &w,
+                    Operation::Preview {
+                        index: "builtin:csi300".into(),
+                        market: market.clone(),
+                        request: Box::new(old)
+                    }
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            task(
+                &w,
+                Operation::Preview {
+                    index: "builtin:csi300".into(),
+                    market,
+                    request: Box::new(request)
+                }
+            )
+            .unwrap()["task_ready"]
+                .as_bool()
+                .unwrap()
+        );
     }
     #[test]
     fn history_publish_copy_export_import_pool_and_tamper() {

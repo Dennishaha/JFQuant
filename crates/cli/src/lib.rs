@@ -177,14 +177,6 @@ pub enum IndexHistoryCommand {
         #[arg(long)]
         action: PathBuf,
     },
-    /// Explicit one-time draft migration; writes a new job output, preserving the source.
-    Migrate {
-        #[arg(long)]
-        request: PathBuf,
-        /// Explicitly migrate a frozen v1 artifact, verifying its signature and originals.
-        #[arg(long)]
-        artifact: bool,
-    },
     Capture {
         #[arg(long)]
         url: String,

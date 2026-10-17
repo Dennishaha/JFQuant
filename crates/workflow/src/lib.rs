@@ -14,7 +14,6 @@ pub mod factor_evaluation;
 pub mod factor_groups;
 pub mod history_diagnostics;
 pub mod history_material;
-mod history_migration;
 /// Runtime index configuration and resolution.
 pub mod indices;
 pub mod input_check;

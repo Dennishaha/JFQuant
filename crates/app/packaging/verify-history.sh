@@ -25,29 +25,18 @@ import json,hashlib,pathlib,sys
 r=pathlib.Path(sys.argv[1])
 text='SYNTHETIC CSI300 000300 full roster 600000; 2007-01-03 before open remove 600000 add 600001; complete event delivery 2007-01-02 to 2007-01-04 review interim code_change merger spinoff.'
 (r/'original.txt').write_text(text)
-cite=[{'document':'source','excerpt':text}]
-facts={'schema_version':1,'official_code':'000300','index_name':'CSI300','identity':cite,'requested':{'start':'2007-01-02','end':'2007-01-04'},
-'anchors':[{'id':'roster','at':{'date':'2007-01-02','boundary':'before_open'},'known_at':'2007-01-01T00:00:00Z','members':['SH600000'],'citations':cite}],
-'events':[{'id':'change','revision':1,'supersedes':None,'at':{'date':'2007-01-03','boundary':'before_open'},'known_at':'2007-01-01T00:00:00Z','category':'review','add':['SH600001'],'remove':['SH600000'],'citations':cite}],
-'reviews':[{'id':'review','range':{'start':'2007-01-02','end':'2007-01-04'},'categories':['review','interim','code_change','merger','spinoff'],'reviewer':'synthetic package acceptance','basis':'explicit complete synthetic delivery reconciled with generated fixture','citations':cite}]}
-request={'schema_version':1,'history':facts,'documents':[{'id':'source','path':'original.txt','sha256':'sha256:'+hashlib.sha256(text.encode()).hexdigest(),'source_url':'https://example.com/synthetic-history-fixture','format':'text','coverage_source':True}]}
-(r/'history-v1.json').write_text(json.dumps(request))
-PY
-run_cli indices history migrate --request history-v1.json > "$check_root/submission.json"
-wait_task "$check_root/migrated.json"
-"$python" -I -B - "$check_root/migrated.json" "$check_root/workspace" <<'PY'
-import json,pathlib,sys
-result=json.load(open(sys.argv[1]))['results']['details']
-r=pathlib.Path(sys.argv[2])
-request=result['history_request']
-assert request['schema_version']==2 and not request['transcriptions']
-assert not request['history']['anchors'][0]['securities']
-cite=request['history']['identity']
+cite=[{'document':'source','excerpt':text,'transcription':None}]
 def proof(instrument):
     return dict(instrument=instrument,name=instrument[2:],membership=cite,identity=cite)
-request['history']['anchors'][0]['securities']=[proof('SH600000')]
-request['history']['events'][0]['securities']=[proof('SH600000'),proof('SH600001')]
+facts={'schema_version':2,'official_code':'000300','index_name':'CSI300','identity':cite,'requested':{'start':'2007-01-02','end':'2007-01-04'},
+'anchors':[{'id':'roster','revision':1,'supersedes':None,'correction':[],'securities':[proof('SH600000')],'at':{'date':'2007-01-02','boundary':'before_open'},'known_at':'2007-01-01T00:00:00Z','members':['SH600000'],'citations':cite}],
+'events':[{'id':'change','correction':[],'securities':[proof('SH600000'),proof('SH600001')],'revision':1,'supersedes':None,'at':{'date':'2007-01-03','boundary':'before_open'},'known_at':'2007-01-01T00:00:00Z','category':'review','add':['SH600001'],'remove':['SH600000'],'citations':cite}],
+'reviews':[{'id':'review','outcome':{'outcome':'coverage'},'range':{'start':'2007-01-02','end':'2007-01-04'},'categories':['review','interim','code_change','merger','spinoff'],'reviewer':'synthetic package acceptance','basis':'explicit complete synthetic delivery reconciled with generated fixture','citations':cite}]}
+request={'schema_version':2,'history':facts,'transcriptions':[],'documents':[{'id':'source','path':'original.txt','sha256':'sha256:'+hashlib.sha256(text.encode()).hexdigest(),'source_url':'https://example.com/synthetic-history-fixture','format':'text','coverage_source':True,'derived_from':None}]}
 (r/'history.json').write_text(json.dumps(request))
+# A fully populated old version is still rejected; no fallback or migration command.
+old=json.loads(json.dumps(request)); old['schema_version']=1; old['history']['schema_version']=1
+(r/'old-history.json').write_text(json.dumps(old))
 from PIL import Image,ImageDraw
 import textwrap
 image=Image.new('RGB',(640,100),'white')
@@ -58,6 +47,16 @@ image.save(r/'image.pdf')
 (r/'extract-action.json').write_text(json.dumps(dict(action='extract',document='pdf',page=1,image=0,format='jpeg')))
 
 PY
+if run_cli indices history migrate --request old-history.json > "$check_root/removed-command.json" 2>&1; then
+  echo "removed migration command was accepted" >&2; exit 1
+fi
+run_cli indices history preview --index builtin:csi300 --market "$market" --request old-history.json > "$check_root/old-submission.json"
+old_job="$(plutil -extract task_id raw -o - "$check_root/old-submission.json")"
+if run_cli jobs wait "$old_job" --timeout 60 > "$check_root/old-rejected.json" 2> "$check_root/old-rejected.stderr"; then
+  echo "old history request version was accepted" >&2; exit 1
+fi
+[ "$(plutil -extract error.code raw -o - "$check_root/old-rejected.json")" = task_failed ]
+[ "$(plutil -extract error.message raw -o - "$check_root/old-rejected.json")" = "unsupported membership request format" ]
 run_cli indices history preview --index builtin:csi300 --market "$market" --request history.json > "$check_root/submission.json"
 wait_task "$check_root/preview.json"
 [ "$(plutil -extract results.details.task_ready raw -o - "$check_root/preview.json")" = true ]

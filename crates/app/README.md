@@ -1,4 +1,4 @@
-当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议37、采集协议15、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
+当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议38、采集协议15、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
 
 # analytics-desktop
 
@@ -48,7 +48,7 @@ DUCKDB_DOWNLOAD_LIB=1 cargo nextest run -p analytics-desktop
 当前结果对未模拟特殊事件显示“回测完成，含未模拟事件”，并保留未解决普通问题的阻断状态。
 核对规则、格式6与复现命令见storage/workflow组件README。验收包含公共任务、结果警告与旧格式隔离。
 
-原生刷新现在以3个证券工作线程获取行情和公司行动，沿用监督进程、检查点、取消及完整发布校验。后端`RefreshRequest`允许1—8线程及显式跨任务分片复用；公共`RefreshCoverage`只读RPC可读取进度、历史成员覆盖及候选可用池，报告不自动授权训练或改变股票池。CLI命令及完整验收见[工作流README](../workflow/README.md)。服务协议37。
+原生刷新现在以3个证券工作线程获取行情和公司行动，沿用监督进程、检查点、取消及完整发布校验。后端`RefreshRequest`允许1—8线程及显式跨任务分片复用；公共`RefreshCoverage`只读RPC可读取进度、历史成员覆盖及候选可用池，报告不自动授权训练或改变股票池。CLI命令及完整验收见[工作流README](../workflow/README.md)。服务协议38。
 
 “更新行动”按钮使用同一Rust动作分片流程，保持当前登记行情，重新获取事件；不读废弃动作版本作为补采输入。
 
@@ -65,7 +65,7 @@ Packaged CLI acceptance also invokes `research verify --task <UUID>` after the t
 
 因子页提供只读Alpha158/GTJA191组，以及复制、改名、编辑说明、筛选、保存、删除自定义组；
 “应用到研究配置”只替换因子选择，保留日期和股票池。修改内置组必须先复制。
-“因子有效性测试”独立发送服务协议37的EvaluateFactors任务，支持进度和取消；默认5日、5分层、
+“因子有效性测试”独立发送服务协议38的EvaluateFactors任务，支持进度和取消；默认5日、5分层、
 30个日内有效样本。报告展示覆盖率、配对率、有效天数、IC、RankIC、RankIC IR、正RankIC比例、
 高减低收益，展开查看每日统计与分层收益，可导出JSON及逐项加入自定义选择后保存。
 结果使用冻结参数，即使表单后来改变也不会改写报告；模型训练仍保留原入口。
@@ -99,7 +99,7 @@ Packaged CLI acceptance also invokes `research verify --task <UUID>` after the t
 
 A/B可重叠，横截面计算互相隔离；B不参与验证或早停。首日没有合法模型则拒绝回测。
 账户跨模型连续运行；报告显示曾见/未见标的及同一账户贡献，预测可独立重放。
-旧“年度研究/仅训练/已有模型回测”入口保持原配置语义。服务协议37，结果20仅读取当前格式。
+旧“年度研究/仅训练/已有模型回测”入口保持原配置语义。服务协议38，结果20仅读取当前格式。
 
 ```bash
 DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-desktop independent_training_and_backtest_editors
@@ -185,8 +185,8 @@ build/distribution commands remain the packaging commands above.
 
 ### 历史成员图片与修订维护
 
-指数维护页使用共享历史服务协议37：可编辑名单/事件修订号、替代关系、更正引用、已核验发布时间、逐证券名称与代码关联，以及该次审议有变化/无变化/未核实。图片由worker核验并返回缩略图，拖选区域按原图像素记录；录入文字后显式填写审核人并确认生成绑定收据。引用编辑器的图片核对ID区分人工录入与原文，修改后发布重新核验。
+指数维护页使用共享历史服务协议38：可编辑名单/事件修订号、替代关系、更正引用、已核验发布时间、逐证券名称与代码关联，以及该次审议有变化/无变化/未核实。图片由worker核验并返回缩略图，拖选区域按原图像素记录；录入文字后显式填写审核人并确认生成绑定收据。引用编辑器的图片核对ID区分人工录入与原文，修改后发布重新核验。
 
-资料操作提供与CLI相同的结构化Register/Extract/Inspect/Review接口；不在UI读取PDF、联网或持有数据库。页面分别显示当前诊断、历史追溯、未证明交易日和连续区间；支持同上下文预览任务对比及显式旧草稿迁移。高级JSON保留完整可维护字段，任务返回新草稿，需载入后继续编辑。
+资料操作提供与CLI相同的结构化Register/Extract/Inspect/Review接口；不在UI读取PDF、联网或持有数据库。页面分别显示当前诊断、历史追溯、未证明交易日和连续区间；支持同上下文预览任务对比；不提供旧格式转换入口。高级JSON保留完整可维护字段，任务返回新草稿，需载入后继续编辑。
 
-构建与安装包验收：`crates/app/packaging/package-macos.sh`，包含PNG、包内PDF内嵌图片提取、人工核对、显式迁移及离线发布/股票池冒烟测试，不依赖源码或JFQlib。
+构建与安装包验收：`crates/app/packaging/package-macos.sh`，包含PNG、包内PDF内嵌图片提取、人工核对及离线发布/股票池冒烟测试，不依赖源码或JFQlib。

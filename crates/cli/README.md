@@ -1,4 +1,4 @@
-当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议37、采集协议15、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
+当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议38、采集协议15、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
 
 # analytics-cli / jfquant
 
@@ -105,7 +105,7 @@ DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli
 
 ## 单因子有效性批量测试
 
-`jfquant --workspace /path/to/workspace factors evaluate --request evaluation.json` 提交服务协议37
+`jfquant --workspace /path/to/workspace factors evaluate --request evaluation.json` 提交服务协议38
 的独立测试任务，后续沿用jobs查询、取消和结果读取。请求示例（路径相对工作区）：
 
 ```json
@@ -322,14 +322,13 @@ target/debug/jfquant --workspace WORKSPACE indices history capture --url https:/
 所有操作使用共享worker；结构化文件均为工作区相对路径。以下命令返回后台任务ID，使用`jobs wait ID --timeout 60`读取持久化结果：
 
 ```sh
-jfquant --workspace /research indices history migrate --request history-v1.json
 jfquant --workspace /research indices history material --request history-v2.json --action material-action.json
 jfquant --workspace /research indices history capture --url https://example.com/roster.png --document-format png
 jfquant --workspace /research indices history preview --index INDEX --market MARKET --request history-v2.json
 jfquant --workspace /research indices history compare --before PREVIEW_TASK --after PREVIEW_TASK
 ```
 
-`migrate`明确仅接收格式1，输出新`history-request-v2.json`并保留旧文件；缺少的逐证券证明、定位和审核不会自动生成。正常命令仅接收格式2。新产物重新发布，旧任务保留。迁移冻结产物时显式增加`--artifact --request .jfquant/histories/OLD_ID/artifact.json`，先核对旧签名和证据哈希，再生成待补的新请求；不能信任旧报告放行。
+仅接收格式2，不提供`migrate`命令、旧格式转换或运行时回退。历史原件与任务保留归档；当前请求缺少的逐证券证明、定位、审核和时间仍需补证，不能依据旧报告放行。
 
 `material-action.json`可分别使用：
 

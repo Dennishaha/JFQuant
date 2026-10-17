@@ -107,10 +107,6 @@ pub(super) fn prepare(client: &Client, command: IndexCommand) -> Result<Action, 
                     request: Box::new(read(&client.root, &request)?),
                     action: read(&client.root, &action)?,
                 },
-                IndexHistoryCommand::Migrate { request, artifact } => H::Migrate {
-                    path: request,
-                    artifact,
-                },
                 IndexHistoryCommand::Capture {
                     url,
                     document_format,
@@ -180,6 +176,17 @@ mod tests {
     use super::*;
     #[test]
     fn history_cli_requires_explicit_inputs_and_publish_range() {
+        assert!(
+            Cli::try_parse_from([
+                "jfquant",
+                "indices",
+                "history",
+                "migrate",
+                "--request",
+                "history.json"
+            ])
+            .is_err()
+        );
         assert!(
             Cli::try_parse_from([
                 "jfquant",

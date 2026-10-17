@@ -69,4 +69,4 @@ Company-event execution extends the existing private native patch. Build inputs 
 打包脚本自动调用；仅使用包内 CLI 和运行时，验证完整名单、原子增删、完整性审核、发布、股票池解析、原始下载删除后的冻结副本读取、导入导出及篡改拒绝。测试不证明任何真实指数的连续覆盖；正式材料采集须显式使用 `indices history capture --url ... --document-format pdf`，再审核引用与适用边界。
 
 
-历史成员补证离线验收：`verify-history.sh`只使用包内CLI和Python。覆盖显式v1迁移、逐证券关联、PDF内嵌图片提取、人工区域核对、冻结发布、组合池解析、导出导入及篡改拒绝；采集锁新增`pypdf[image]`的Pillow依赖，`verify-bundle.sh`核对包内导入。新历史请求/报告/产物2、服务37，不增加运行时旧格式回退。
+历史成员补证离线验收：`verify-history.sh`只使用包内CLI和Python。覆盖旧格式与已移除命令拒绝、逐证券关联、PDF内嵌图片提取、人工区域核对、冻结发布、组合池解析、导出导入及篡改拒绝；采集锁新增`pypdf[image]`的Pillow依赖，`verify-bundle.sh`核对包内导入。新历史请求/报告/产物2、服务38，不增加运行时旧格式回退。

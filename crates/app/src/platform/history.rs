@@ -20,7 +20,6 @@ pub(crate) struct Tools {
     preview_context: String,
     material_action: String,
     material_error: String,
-    migrate_artifact: bool,
     selected_document: String,
     transcription_id: String,
     reviewer: String,
@@ -677,16 +676,6 @@ pub(super) fn maintenance(
                 ui.label("导入 history.json / 导出新目录");
                 ui.text_edit_singleline(&mut t.path);
             });
-            ui.checkbox(
-                &mut t.migrate_artifact,
-                "显式迁移旧冻结产物（重新核验签名与原文）",
-            );
-            if ui.button("显式迁移v1草稿（保留原文件）").clicked() {
-                op = Some(Operation::Migrate {
-                    path: t.path.clone().into(),
-                    artifact: t.migrate_artifact,
-                });
-            }
             if ui.button("导入并重新校验").clicked() {
                 op = Some(Operation::Import {
                     index: state.index_version.clone(),

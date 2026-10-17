@@ -325,7 +325,7 @@ fn missing_later_source_alias_does_not_erase_earlier_qualified_history() {
         end: "2010-01-12".parse().unwrap(),
     };
     let directory = SourceMap {
-        schema_version: 1,
+        schema_version: 2,
         exceptions: std::collections::BTreeMap::from([(
             id.clone(),
             SourceException {

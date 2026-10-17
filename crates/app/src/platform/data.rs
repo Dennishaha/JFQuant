@@ -10,6 +10,7 @@ pub fn data_panel(
         return;
     }
     ui.heading("数据更新与版本");
+    super::indices::catalogue(ui, &mut state.platform);
     if let Some(rx) = &state.platform.credential_save {
         match rx.try_recv() {
             Ok(result) => {
@@ -33,7 +34,7 @@ pub fn data_panel(
         "更新保存新快照，已有研究继续使用原版本。全部数据默认通达信优先，不支持的字段按来源顺序补充。",
     );
     let enabled = !state.busy() && state.worker_error.is_none();
-    let mut request = None;
+    let mut request = super::indices::maintenance(ui, &mut state.platform, enabled);
     ui.horizontal(|ui| {
         if ui
             .add_enabled(enabled, egui::Button::new("创建合成演示数据"))
@@ -184,9 +185,14 @@ pub fn data_panel(
             ui.text_edit_singleline(&mut state.platform.collection_symbols);
             ui.label("其中的指数证券（不按股票接口采集）");
             ui.text_edit_singleline(&mut state.platform.collection_benchmarks);
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut state.platform.collection_csi300, "登记当前沪深300成分");
-                ui.checkbox(&mut state.platform.collection_csi500, "登记当前中证500成分");
+            ui.collapsing("登记指数当前成分", |ui| {
+                for index in analytics_core::indices::all().iter().filter(|i| i.symbol.is_some()) {
+                    let mut selected = state.platform.collection_universes.contains(&index.id);
+                    let supported = analytics_storage::collector::builtin_members(&index.id,state.platform.collection_provider);
+                    if ui.add_enabled(supported || selected, egui::Checkbox::new(&mut selected, &index.name)).on_hover_text(if supported {"仅保存响应对应日期；不回填历史成员"} else {"此供应商尚未接入该指数当前成分接口"}).changed() {
+                        if selected {state.platform.collection_universes.insert(index.id.clone());} else {state.platform.collection_universes.remove(&index.id);}
+                    }
+                }
             });
             ui.label("当前成分仅保存明确日期，不能回填历史；采集日期应包含训练、验证和因子预热。");
             ui.horizontal(|ui| {
@@ -212,10 +218,11 @@ pub fn data_panel(
                     let ids = |v: &str| {
                         v.split([',', '，', ' ', '\n'])
                             .filter(|s| !s.trim().is_empty())
-                            .map(|s| s.trim().to_ascii_uppercase())
+                            .map(|s| if s.trim().starts_with("IDX_") {s.trim().to_owned()} else {s.trim().to_ascii_uppercase()})
                             .collect()
                     };
-                    let r = CollectionRequest {
+                    let mut r = CollectionRequest {
+                        index_inputs: Default::default(),
                         source_bindings: Default::default(),
                         provider: state.platform.collection_provider,
                         adjustment_source: state.platform.adjustment_source,
@@ -223,15 +230,14 @@ pub fn data_panel(
                         end: state.platform.end.parse().map_err(|_| "结束日期无效")?,
                         instruments: ids(&state.platform.collection_symbols),
                         benchmarks: ids(&state.platform.collection_benchmarks),
-                        universes: [
-                            (state.platform.collection_csi300, "csi300"),
-                            (state.platform.collection_csi500, "csi500"),
-                        ]
-                        .into_iter()
-                        .filter(|(yes, _)| *yes)
-                        .map(|(_, id)| id.to_string())
-                        .collect(),
+                        universes: state.platform.collection_universes.clone(),
                     };
+                    for (key,config) in &state.platform.collection_index_inputs {
+                        if r.benchmarks.contains(key) {
+                            let code=config.mappings.get(r.provider.name()).ok_or("所选指数缺少当前供应商映射")?;
+                            r.source_bindings.insert(key.clone(),code.clone());r.index_inputs.insert(key.clone(),config.clone());
+                        }
+                    }
                     r.validate().map_err(|e| e.to_string())?;
                     Ok(r)
                 };
@@ -263,7 +269,7 @@ pub fn data_panel(
                     let ids = |v: &str| {
                         v.split([',', '，', ' ', '\n'])
                             .filter(|s| !s.trim().is_empty())
-                            .map(|s| s.trim().to_ascii_uppercase())
+                            .map(|s| if s.trim().starts_with("IDX_") {s.trim().to_owned()} else {s.trim().to_ascii_uppercase()})
                             .collect::<std::collections::BTreeSet<_>>()
                     };
                     let instruments = ids(&state.platform.collection_symbols)
@@ -271,6 +277,7 @@ pub fn data_panel(
                         .cloned()
                         .collect();
                     let r = CollectionRequest {
+                        index_inputs: Default::default(),
                         source_bindings: Default::default(),
                         provider: if announcements { Provider::Cninfo } else { state.platform.collection_provider },
                         adjustment_source: if announcements { analytics_storage::adjustment::AdjustmentSource::None } else { state.platform.adjustment_source },

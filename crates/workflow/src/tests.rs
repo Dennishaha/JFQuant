@@ -1335,3 +1335,45 @@ fn legacy_action_version_hashes_original_numeric_format_without_mutating_files()
     .unwrap();
     assert_eq!(fs::read(&path).unwrap(), bytes);
 }
+
+#[test]
+fn index_recipes_share_factor_order_and_require_actual_historical_membership() {
+    let baseline = ResearchTemplate::builtin().unwrap();
+    for index in analytics_core::indices::all()
+        .iter()
+        .filter(|i| i.symbol.is_some())
+    {
+        let t = ResearchTemplate::builtin_index(&index.id).unwrap();
+        t.validate().unwrap();
+        assert_eq!(t.benchmark, *index.symbol.as_ref().unwrap());
+        assert_eq!(t.pool_version, format!("builtin:{}", index.id));
+        assert_eq!(t.config.factor_ids, baseline.config.factor_ids);
+        assert_eq!(t.formula_version, baseline.formula_version);
+    }
+    assert_eq!(
+        signature(&ResearchTemplate::builtin_index("csi500").unwrap()).unwrap(),
+        signature(&baseline).unwrap()
+    );
+    assert!(
+        ResearchTemplate::builtin_index("msci_a50")
+            .unwrap_err()
+            .to_string()
+            .contains("index_route_unavailable")
+    );
+    assert!(ResearchTemplate::builtin_index("typo").is_err());
+    let tmp = tempfile::tempdir().unwrap();
+    let w = Workspace::open(tmp.path()).unwrap();
+    let (market, _, _) = demo::create(&w).unwrap();
+    let root = w.resolve(&market.path);
+    fs::copy(
+        root.join("instruments/csi500.txt"),
+        root.join("instruments/csi1000.txt"),
+    )
+    .unwrap();
+    let market = w.register(&root).unwrap();
+    let (pool, frozen) = w.resolve_pool("builtin:csi1000", &market.id).unwrap();
+    assert_eq!(frozen["pool_version"], "builtin:csi1000");
+    assert!(!pool.intervals.is_empty());
+    assert!(w.resolve_pool("builtin:star50", &market.id).is_err());
+    assert!(w.resolve_pool("builtin:msci_a50", &market.id).is_err());
+}

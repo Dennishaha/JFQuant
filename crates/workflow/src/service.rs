@@ -26,7 +26,7 @@ use std::{
 };
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 31;
+pub const PROTOCOL_VERSION: u32 = 33;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TaskRequest {
@@ -254,6 +254,13 @@ pub enum Rpc {
     Versions,
     ImportRun {
         path: PathBuf,
+    },
+    Indices,
+    IndexTemplate {
+        id: String,
+    },
+    Index {
+        id: String,
     },
     Pools,
     SavePool {
@@ -505,6 +512,16 @@ impl Server {
             | Rpc::ArchiveFactor { .. }
             | Rpc::SaveFactorGroup { .. }
             | Rpc::ArchiveFactorGroup { .. }) => factor_library_call(&self.workspace, r),
+            Rpc::IndexTemplate { id } => {
+                serde_json::to_value(self.workspace.index_template(&id).map_err(failure)?)
+                    .map_err(failure)
+            }
+            Rpc::Indices => {
+                serde_json::to_value(self.workspace.indices().map_err(failure)?).map_err(failure)
+            }
+            Rpc::Index { id } => {
+                serde_json::to_value(self.workspace.index(&id).map_err(failure)?).map_err(failure)
+            }
             Rpc::Pools => {
                 serde_json::to_value(self.workspace.pools().map_err(failure)?).map_err(failure)
             }

@@ -215,6 +215,7 @@ pub fn catalog(w: &Workspace) -> Result<Value> {
 }
 fn collection(provider: Provider, id: &str, r: &DateRange, benchmark: &str) -> CollectionRequest {
     CollectionRequest {
+        index_inputs: Default::default(),
         provider,
         adjustment_source: match provider {
             Provider::Tdxaidata => AdjustmentSource::TdxForward,

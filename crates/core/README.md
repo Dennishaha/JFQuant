@@ -1,4 +1,4 @@
-当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务版本见 workflow::service::PROTOCOL_VERSION、采集协议13、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
+当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务版本见 workflow::service::PROTOCOL_VERSION、采集协议15、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
 
 # analytics-core
 
@@ -83,3 +83,30 @@ Run `cargo test -p analytics-core`; acceptance includes final-close settlement, 
 登记机构尾数排序／同尾随机分配由 `Allocation::RankedRemainder` 保留事实引用；单账户无法从全体排序推导非整数获配，实际分配接口返回错误。`corporate_account::Policy::ResearchTransitions` 的舍零仍独立执行并披露，不改写登记机构事实。
 
 `Reference::Terminal` 表示原证券终止后不适用后续交易所参考价，仅适用于终止原证券的合并和退市。价格计算显式报错，不伪造不变价格；等待期账户估值继续由公司事件策略处理。
+
+## Common index identities
+
+`indices::{all,find,by_symbol}` exposes catalogue1, verified against linked publishers on
+2026-10-17. `src/indices.json` is the shared metadata source:19 representative indices,
+15 reviewed domestic SH/SZ price-index locators and4 reference entries awaiting a source
+mapping (CSI A50/2000, MSCI A50 Connect RMB and FTSE A50). Official identifiers are kept
+separate from exchange symbols, currencies and return variants. MSCI746059 is the CNY
+variant; neither ETFs nor other A50 families are aliases. `None` never creates a locator.
+
+Storage uses the same identities for index-only acquisition and identity adjustment;
+App and CLI display the same entries offline. Catalogue membership proves no market
+coverage, licensing entitlement or historical constituent availability. Current-member
+routes are declared per provider; responses still require normal validation.
+
+Acceptance: `cargo test -p analytics-core catalogue_preserves`.
+
+## 运行时指数定义
+
+`indices::IndexConfig` 格式1分开表达编制方身份、稳定 `data_key` 与供应商映射。
+自定义数据键使用 `IDX_` 前缀；供应商代码不进入股票代码校验和订单规则。
+Core 仅校验结构和内置身份约束，不读文件、不联网；具体接口能力由 Storage 声明。
+`calculation_contract()` 排除名称、说明和参考链接，保留身份、币种、收益口径与映射。
+SourceMap 明确读取格式1（既有交易所身份）及格式2（指数没有股票执行身份），无格式猜测。
+验收：`cargo test -p analytics-core indices`，工作区版本与冻结验收见 workflow。
+
+本次指数接入格式已收敛：AdjustmentRecord 仅接受格式4（`index_input` 必填，普通证券及内置目录指数显式为 null，自定义指数冻结完整合同）；SourceMap 仅接受格式2，指数无可下单证券身份；CollectionRequest 必须显式包含 `index_inputs`（可为空对象）。正常读取不升级旧版本、不猜测缺失字段。旧快照只作历史留存，显式离线转换后必须以新内容哈希重新登记，原始响应及采集器身份不得改写成当前版本。服务协议33、采集协议15拒绝旧检查点；格式更新不等于来源准入通过。

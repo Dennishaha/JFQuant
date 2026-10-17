@@ -56,6 +56,10 @@ fn select_workspace(state: &mut AppState, path: &Path) -> analytics_workflow::Re
         .unwrap_or_default();
     state.platform.selected_run = None;
     state.platform.details = Value::Null;
+    state.platform.index_versions.clear();
+    state.platform.index_version.clear();
+    state.platform.index_editor.clear();
+    state.platform.collection_index_inputs.clear();
     state.platform.error = None;
     Ok(())
 }

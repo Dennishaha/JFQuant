@@ -86,8 +86,14 @@ impl Workspace {
     ) -> Result<(PoolMembership, serde_json::Value)> {
         let m = version(self, market, "market")?;
         let dataset = DailyDataset::open(self.resolve(&m.path))?;
+        if let Some(universe) = id.strip_prefix("index:") {
+            let config = dataset.index_config(universe)?;
+            let membership = dataset.pool(universe)?;
+            let frozen = serde_json::json!({"pool_version":id,"market_version":market,"market_signature":m.signature,"index_contract":config.calculation_contract(),"membership":membership});
+            return Ok((membership, frozen));
+        }
         if let Some(universe) = id.strip_prefix("builtin:") {
-            if !matches!(universe, "csi300" | "csi500") {
+            if !analytics_core::indices::find(universe).is_some_and(|i| i.symbol.is_some()) {
                 return Err("unknown builtin pool".into());
             }
             let membership = dataset.pool(universe)?;

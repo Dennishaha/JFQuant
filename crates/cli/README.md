@@ -1,4 +1,4 @@
-当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议29、采集协议13、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
+当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议33、采集协议15、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
 
 # analytics-cli / jfquant
 
@@ -75,7 +75,7 @@ jfquant data refresh --template workflow.json --market MARKET_ID --workers 3 --r
 DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli
 ```
 
-服务协议31；升级时先等待或取消旧版本任务，再停止旧服务。旧协议客户端不能连接新协议服务。采集协议13，当前公司行动发布格式10／修订5；特征顺序和公式版本未改变。
+服务协议31；升级时先等待或取消旧版本任务，再停止旧服务。旧协议客户端不能连接新协议服务。采集协议15，当前公司行动发布格式10／修订5；特征顺序和公式版本未改变。
 
 分区位于不同本地工作区时，可用`--sources-manifest sources.json`汇总覆盖，或`--reuse-shards-manifest sources.json`复用；JSON数组元素为当前工作区任务UUID字符串，或`{"workspace":"/absolute/workspace","task_id":"UUID"}`。只读验证原生任务、同一不可变基础数据/窗口/基准及证券子集；不修改来源工作区。尚有分区待检查的证券不被误列为缺失。复用仍由采集器重新验证全部身份及哈希。
 
@@ -94,7 +94,7 @@ DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli
 
 ## 单因子有效性批量测试
 
-`jfquant --workspace /path/to/workspace factors evaluate --request evaluation.json` 提交服务协议29
+`jfquant --workspace /path/to/workspace factors evaluate --request evaluation.json` 提交服务协议33
 的独立测试任务，后续沿用jobs查询、取消和结果读取。请求示例（路径相对工作区）：
 
 ```json
@@ -240,3 +240,49 @@ Use `evidence_only` to avoid research transition assumptions. Old plans are reje
 候选缺口见 execution_quote_diagnostics.json；实际账户缺价见 execution_valuation_gaps.json。前者不代表实际持仓，后者只汇总独立可确定的问题，后续依赖状态明确等待核验。未认证时不发布收益。
 
 人工审核 distribution_conflict 不要求多个来源一致：在修订5事件中使用现金型 Differential，并分别提供 `cash_per_share` 与 `terms.reference.cash` 的字段引用，单位分别为 `gross_CNY_per_CDR`／`reference_CNY_per_CDR`（普通股使用 old_share）。登记日、支付日和问题哈希必须完整匹配，使用现有 draft / revise-actions；不存在跳过证据的强制通过参数。
+
+## Common indices
+
+`jfquant indices` lists catalogue1 without opening a workspace, service or network.
+Entries include official code, optional domestic symbol, currency/return basis, publisher
+URL, configured quote route and each provider's current-member route. A configured route
+is not a successful acquisition or verified historical pool. MSCI China A50 Connect RMB
+(746059), CSI A50, CSI2000 and FTSE A50 are visible reference entries with no executable
+mapping yet; no ETF or other index is silently substituted.
+
+```sh
+jfquant indices
+jfquant templates default --universe csi1000 --output csi1000.json
+jfquant templates default --universe csia500 --output csia500.json
+jfquant templates default --universe star50 --output star50.json
+```
+
+Native collection continues through `data collect --benchmarks SYMBOL`; put index quotes
+in both instruments and benchmarks. `--universe` uses the exact catalogue ID, and real
+training requires that pool's dated membership in the selected market. Unknown or
+unmapped IDs return errors. Acceptance:
+`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli index_catalogue`.
+
+## 不改 Rust 接入指数
+
+`indices` 单独运行离线显示内置目录，不创建工作区；以下维护命令共用 App 后端：
+
+```bash
+jfquant --workspace /path/to/research indices list
+jfquant --workspace /path/to/research indices validate index.json
+jfquant --workspace /path/to/research indices import index.json
+jfquant --workspace /path/to/research indices show index-<hash>
+jfquant --workspace /path/to/research indices export index-<hash> exported-index.json
+jfquant --workspace /path/to/research indices verify index-<hash> --provider hithink --start 2026-10-12 --end 2026-10-16 --current-members
+jfquant --workspace /path/to/research jobs wait <task-id>
+jfquant --workspace /path/to/research jobs results <task-id>
+jfquant --workspace /path/to/research templates default --index-version index-<hash> --output workflow.json
+jfquant --workspace /path/to/research data collect --kind market --provider hithink --start 2026-10-12 --end 2026-10-16 --instruments IDX_my_index,SH600000 --benchmarks IDX_my_index --index-config exported-index.json
+```
+
+验证返回正常后台任务 ID，可用 `jobs logs/cancel`；保存配置不代表数据就绪。
+`validate` 不连接服务。导出目的地必须是不存在的工作区相对文件，不覆盖现有文件或托管状态。
+JSON 使用 `IndexConfig` 格式1（App 可生成示例）；禁止附加脚本、密钥或本机运行路径。
+目前适配器支持 CNY 价格指数；TDX 使用 SH/SZ/BJ 代码，HiThink 可指定其确切指数代码。
+行情、当前成分、历史成员是独立能力，无法通过配置添加新的供应商接口。
+验收：`cargo test -p analytics-cli runtime_indices`。

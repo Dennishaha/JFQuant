@@ -1697,3 +1697,89 @@ fn evidence_commands_share_status_and_persist_nonpublishing_scaffolds() {
         );
     }
 }
+
+#[test]
+fn index_catalogue_is_offline_and_exposes_missing_routes_without_opening_a_workspace() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("must-not-be-created");
+    let output = Command::new(env!("CARGO_BIN_EXE_jfquant"))
+        .arg("--workspace")
+        .arg(&root)
+        .arg("indices")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let catalogue: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(catalogue["schema_version"], 1);
+    let rows = catalogue["indices"].as_array().unwrap();
+    assert!(
+        rows.iter()
+            .any(|i| i["id"] == "csi1000" && i["symbol"] == "SH000852")
+    );
+    let msci = rows.iter().find(|i| i["id"] == "msci_a50").unwrap();
+    assert_eq!(msci["official_code"], "746059");
+    assert_eq!(msci["quote_route"], "unavailable");
+    assert!(msci["symbol"].is_null());
+    assert!(!root.exists());
+}
+
+#[test]
+fn runtime_indices_roundtrip_without_compilation_and_queries_do_not_create_tasks() {
+    let s = Sandbox::new();
+    let mut config = analytics_core::indices::builtin_config("csi1000").unwrap();
+    config.definition.id = "cli_index".into();
+    config.definition.symbol = None;
+    config.definition.official_code = "CLI001".into();
+    config.data_key = "IDX_cli_index".into();
+    config.mappings = std::collections::BTreeMap::from([("hithink".into(), "CLI001.CSI".into())]);
+    std::fs::write(
+        s.client.root.join("input.json"),
+        serde_json::to_vec(&config).unwrap(),
+    )
+    .unwrap();
+    let valid = s.json(&["indices", "validate", "input.json"]);
+    assert_eq!(valid["valid"], true);
+    assert_eq!(valid["data_ready"], false);
+    let imported = s.json(&["indices", "import", "input.json"]);
+    let task = imported["submission"]["task_id"].as_str().unwrap();
+    let result = s.json(&["jobs", "results", task]);
+    let version = result["details"]["index_version"]["id"].as_str().unwrap();
+    let w = Workspace::open(&s.client.root).unwrap();
+    let before = w.runs().unwrap().len();
+    let listed = s.json(&["indices", "list"]);
+    assert!(
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["id"] == version)
+    );
+    assert_eq!(
+        s.json(&["indices", "show", version])["config"]["data_key"],
+        config.data_key
+    );
+    assert_eq!(w.runs().unwrap().len(), before);
+    s.json(&["indices", "export", version, "output.json"]);
+    let exported: analytics_core::indices::IndexConfig =
+        serde_json::from_slice(&std::fs::read(s.client.root.join("output.json")).unwrap()).unwrap();
+    assert_eq!(exported, config);
+    let template = s.json(&["templates", "default", "--index-version", version]);
+    assert_eq!(template["benchmark"], "IDX_cli_index");
+    assert_eq!(template["pool_version"], "index:cli_index");
+    let mut portable: Value = serde_json::to_value(&config).unwrap();
+    portable["script"] = "not accepted".into();
+    std::fs::write(
+        s.client.root.join("invalid.json"),
+        serde_json::to_vec(&portable).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !s.cli(&["indices", "validate", "invalid.json"])
+            .status
+            .success()
+    );
+}

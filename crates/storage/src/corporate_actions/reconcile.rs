@@ -392,6 +392,7 @@ pub fn apply(
         return Err(invalid("no supported primary evidence to reconcile"));
     }
     let request = CollectionRequest {
+        index_inputs: Default::default(),
         provider: Provider::Hithink,
         adjustment_source: crate::adjustment::AdjustmentSource::HithinkForward,
         start: first.unwrap(),
@@ -725,10 +726,10 @@ mod tests {
         let output = tmp.path().join("out");
         fs::create_dir_all(root.join("raw")).unwrap();
         fs::create_dir_all(output.join("raw")).unwrap();
-        let owner = json!({"operation":"actions","collector_protocol":13,"collector_signature":crate::collector::collector_signature(),"normalization":crate::adjustment::NORMALIZATION,
+        let owner = json!({"operation":"actions","collector_protocol":crate::collector::COLLECTOR_PROTOCOL,"collector_signature":crate::collector::collector_signature(),"normalization":crate::adjustment::NORMALIZATION,
             "dependencies_sha256":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(include_bytes!("../../collectors/requirements.lock")))),
             "python_runtime_sha256":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(include_bytes!("../../collectors/python-runtime.lock.json")))),
-            "request":{"provider":"tdxaidata","adjustment_source":"tdx_forward","start":"2024-01-01","end":"2024-12-31","instruments":["SH600188"],"source_bindings":{},"benchmarks":[],"universes":[]}});
+            "request":{"index_inputs":{},"provider":"tdxaidata","adjustment_source":"tdx_forward","start":"2024-01-01","end":"2024-12-31","instruments":["SH600188"],"source_bindings":{},"benchmarks":[],"universes":[]}});
         fs::write(root.join("owner.json"), serde_json::to_vec(&owner).unwrap()).unwrap();
         let bytes = br#"{"Date":[20240604],"Type":["1"],"Value":[[43,0,5,0]]}"#;
         fs::write(root.join("raw/sdk-body.body"), bytes).unwrap();

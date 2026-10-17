@@ -26,6 +26,17 @@ def symbol(code):
     return code[2:] + "." + code[:2]
 
 
+def request_symbol(request, code):
+    return symbol(request.get("source_bindings", {}).get(code, code))
+
+
+def member_code(request, name):
+    code = request.get("index_member_codes", {}).get(name)
+    if code is None:
+        raise ValueError("unresolved_index_member_route")
+    return symbol(code)
+
+
 def number(value, positive=False):
     if value in (None, "", "--"):
         return None
@@ -300,20 +311,18 @@ def collect(request, report):
             raise ValueError("tdx_calendar_invalid")
         universes = {}
         for name in request.get("universes", []):
-            if name not in ("csi300", "csi500"):
-                raise ValueError("unsupported_universe")
-            values = tqs.get_zzgz_stocklist("000300.SH" if name == "csi300" else "000905.SH", 0)
+            values = tqs.get_zzgz_stocklist(member_code(request, name), 0)
             universes[name] = constituents(values, now.date().isoformat())
         for code in request["instruments"]:
             output, points, window_proofs = [], [], []
             if request["operation"] == "actions":
-                tqs.get_divid_factors(symbol(code), start, end)
+                tqs.get_divid_factors(request_symbol(request, code), start, end)
                 candidates = action_references(responses[-1], start, end)
                 rights_fields = {}
                 for field in ("GP41", "GP43"):
                     before = len(responses)
                     try:
-                        tqs.get_gpjy_value([symbol(code)], [field], start, end)
+                        tqs.get_gpjy_value([request_symbol(request, code)], [field], start, end)
                         rights_fields[field] = "captured" if len(responses) > before else "unavailable"
                     except (ValueError, TypeError, OSError, RuntimeError, AttributeError, KeyError, IndexError, ctypes.ArgumentError):
                         rights_fields[field] = "failed"
@@ -323,14 +332,14 @@ def collect(request, report):
                 try:
                     calendar_start = (dt.date.fromisoformat(start) - dt.timedelta(days=3660)).isoformat()
                     tqs.get_trading_dates("SH", calendar_start, end, count=-1)
-                    tqs.get_gpjy_value([symbol(code)], ["GP29"], start, end)
+                    tqs.get_gpjy_value([request_symbol(request, code)], ["GP29"], start, end)
                     status = {"status": "captured", "rule": "tdxaidata.gp29-resumption-v1", "calendar_start": calendar_start}
                 except (ValueError, TypeError, OSError, RuntimeError, AttributeError, KeyError, IndexError, ctypes.ArgumentError):
                     status = {"status": "unavailable"}
                 # A dated current suspension can prove only the latest ongoing
                 # episode retrospectively, including episodes without a resume.
                 try:
-                    tqs.get_more_info(symbol(code), field_list=["TPFlag", "HqDate", "StopJYDate_Recent"])
+                    tqs.get_more_info(request_symbol(request, code), field_list=["TPFlag", "HqDate", "StopJYDate_Recent"])
                     status["current_snapshot"] = "captured"
                 except (ValueError, TypeError, OSError, RuntimeError, AttributeError, KeyError, IndexError, ctypes.ArgumentError):
                     status["current_snapshot"] = "unavailable"
@@ -356,7 +365,7 @@ def collect(request, report):
                 )
                 receipts.clear()
                 continue
-            tqs.get_stock_info(symbol(code), field_list=["J_start", "HSStockKind"])
+            tqs.get_stock_info(request_symbol(request, code), field_list=["J_start", "HSStockKind"])
             info = payload(responses[-1])
             price_index = code in request.get("benchmarks", [])
             if price_index and str(info.get("HSStockKind")) != "0":
@@ -381,7 +390,7 @@ def collect(request, report):
                 report("progress", message=f"通达信日线 {code} {year}")
                 before = len(responses)
                 tqs.get_market_data(
-                    stock_list=[symbol(code)],
+                    stock_list=[request_symbol(request, code)],
                     period="1d",
                     start_time=lo,
                     end_time=hi,
@@ -405,7 +414,7 @@ def collect(request, report):
                 raise ValueError("tdx_empty_history")
             event_proofs = []
             if not price_index and request["operation"] != "quotes":
-                tqs.get_divid_factors(symbol(code), start, end)
+                tqs.get_divid_factors(request_symbol(request, code), start, end)
                 events = action_references(responses[-1], start, end)
                 event_proofs = verify_events(output, points, events)
             basis = (
@@ -419,12 +428,14 @@ def collect(request, report):
                     "points": points,
                 }
             )
-            if request["operation"] == "quotes":
+            if request["operation"] == "quotes" and not price_index:
                 basis = {"kind": "unavailable", "reason": "independent coefficients not collected"}
+            config = request["index_inputs"].get(code)
             adjustment = {
-                "schema_version": 3,
+                "schema_version": 4,
+                "index_input": config,
                 "instrument_id": code,
-                "source_symbol": code,
+                "source_symbol": request.get("source_bindings", {}).get(code, code),
                 "basis": basis,
             }
             evidence = {
@@ -533,11 +544,7 @@ def reference(request, report):
             else:
                 observed = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).date().isoformat()
                 for name in request["universes"]:
-                    if name not in ("csi300", "csi500"):
-                        raise ValueError("unsupported_universe")
-                    values = tqs.get_zzgz_stocklist(
-                        "000300.SH" if name == "csi300" else "000905.SH", 0
-                    )
+                    values = tqs.get_zzgz_stocklist(member_code(request, name), 0)
                     universes[name] = constituents(values, observed)
             receipts = native_receipts[:]
     else:

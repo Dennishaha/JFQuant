@@ -16,6 +16,8 @@ use std::{
     sync::mpsc,
     time::{Duration, Instant},
 };
+/// Version of the packaged acquisition request/response contract.
+pub const COLLECTOR_PROTOCOL: u32 = 15;
 /// Explicit user-selected upstream; failed requests never switch automatically.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -42,6 +44,8 @@ impl Provider {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CollectionRequest {
+    /// Frozen runtime index definitions, keyed by snapshot data key.
+    pub index_inputs: BTreeMap<String, analytics_core::indices::IndexConfig>,
     /// Opaque security ID to explicitly chosen dated provider locator. Empty means source candidates only.
     pub source_bindings: BTreeMap<String, String>,
     /// Chosen upstream.
@@ -75,15 +79,12 @@ impl CollectionRequest {
                 | (Provider::Hithink, AdjustmentSource::HithinkForward)
                 | (Provider::Cninfo, AdjustmentSource::None)
         ) || self.benchmarks.iter().any(|id| {
-            !matches!(
-                self.source_bindings.get(id).unwrap_or(id).as_str(),
-                "SH000300" | "SH000905"
-            )
+            !self.index_inputs.contains_key(id)
+                && analytics_core::indices::by_symbol(self.source_bindings.get(id).unwrap_or(id))
+                    .is_none()
         }) || self.instruments.iter().any(|id| {
-            matches!(
-                self.source_bindings.get(id).unwrap_or(id).as_str(),
-                "SH000300" | "SH000905"
-            ) && !self.benchmarks.contains(id)
+            analytics_core::indices::by_symbol(self.source_bindings.get(id).unwrap_or(id)).is_some()
+                && !self.benchmarks.contains(id)
         }) {
             return Err(invalid(
                 "invalid provider/adjustment source or unverified price-index identity",
@@ -93,10 +94,32 @@ impl CollectionRequest {
         for id in &self.instruments {
             validate_instrument(id).map_err(invalid)?;
             let source = self.source_bindings.get(id).unwrap_or(id);
-            analytics_core::pool::validate_exchange_symbol(source).map_err(invalid)?;
-            if !used.insert(source) {
+            if let Some(config) = self.index_inputs.get(id) {
+                validate_index(config, self.provider)?;
+                if &config.data_key != id
+                    || config.mappings.get(self.provider.name()) != Some(source)
+                    || !self.benchmarks.contains(id)
+                {
+                    return Err(invalid("frozen index binding mismatch"));
+                }
+            } else {
+                analytics_core::pool::validate_exchange_symbol(source).map_err(invalid)?;
+            }
+            let locator = if self.provider == Provider::Hithink && self.benchmarks.contains(id) {
+                crate::hithink::index_code(source)?
+            } else {
+                source.clone()
+            };
+            if !used.insert(locator) {
                 return Err(invalid("duplicate provider locator"));
             }
+        }
+        if self
+            .index_inputs
+            .keys()
+            .any(|id| !self.benchmarks.contains(id))
+        {
+            return Err(invalid("unused index definition"));
         }
         if self
             .source_bindings
@@ -105,15 +128,81 @@ impl CollectionRequest {
         {
             return Err(invalid("unexpected source binding"));
         }
-        if self
-            .universes
-            .iter()
-            .any(|u| !matches!(u.as_str(), "csi300" | "csi500"))
-        {
+        if self.universes.iter().any(|u| {
+            !self.index_inputs.values().any(|i| &i.definition.id == u)
+                && !builtin_members(u, self.provider)
+        }) {
             return Err(invalid("unsupported constituent source"));
         }
         Ok(())
     }
+}
+/// Capabilities of fixed packaged index operations, independent of configuration or coverage.
+#[derive(Debug, Clone, Serialize)]
+pub struct IndexCapabilities {
+    /// Price history operation exists; dates and identity must still be checked.
+    pub quotes: bool,
+    /// Observation-date constituent operation exists.
+    pub current_members: bool,
+    /// Neither current adapter provides dated historical constituents.
+    pub historical_members: bool,
+    /// Accepted mapping representation.
+    pub locator_format: &'static str,
+}
+/// Capability declaration, never proof that a particular symbol or date is available.
+pub fn index_capabilities(provider: Provider) -> IndexCapabilities {
+    IndexCapabilities {
+        quotes: provider != Provider::Cninfo,
+        current_members: provider != Provider::Cninfo,
+        historical_members: false,
+        locator_format: match provider {
+            Provider::Hithink => "exact vendor code or SH/SZ exchange code",
+            Provider::Tdxaidata => "SH/SZ/BJ exchange code",
+            Provider::Cninfo => "unsupported",
+        },
+    }
+}
+/// Cached implementation hash for report freshness and frozen acquisition contexts.
+pub fn index_adapter_signature(provider: Provider) -> &'static str {
+    use std::sync::OnceLock;
+    static HITHINK: OnceLock<String> = OnceLock::new();
+    static TDX: OnceLock<String> = OnceLock::new();
+    match provider {
+        Provider::Hithink => HITHINK.get_or_init(crate::hithink::producer_signature),
+        Provider::Tdxaidata => TDX.get_or_init(collector_signature),
+        Provider::Cninfo => "unsupported_index_adapter",
+    }
+}
+/// Whether an immutable builtin seed has a route for the observation-date member operation.
+pub fn builtin_members(id: &str, provider: Provider) -> bool {
+    index_capabilities(provider).current_members
+        && analytics_core::indices::find(id).is_some_and(|i| i.symbol.is_some())
+}
+/// Validate the capabilities of an existing fixed adapter; never infer currency conversion.
+pub fn validate_index(
+    config: &analytics_core::indices::IndexConfig,
+    provider: Provider,
+) -> io::Result<()> {
+    config.validate().map_err(invalid)?;
+    if config.definition.currency != "CNY" || config.definition.return_basis != "price" {
+        return Err(invalid(
+            "index_price_contract_unsupported: existing adapters require CNY price indices",
+        ));
+    }
+    let code = config
+        .mappings
+        .get(provider.name())
+        .ok_or_else(|| invalid("index_provider_mapping_missing"))?;
+    match provider {
+        Provider::Hithink => {
+            crate::hithink::index_code(code)?;
+        }
+        Provider::Tdxaidata => {
+            analytics_core::pool::validate_exchange_symbol(code).map_err(invalid)?;
+        }
+        Provider::Cninfo => return Err(invalid("index_quotes_unsupported")),
+    }
+    Ok(())
 }
 /// Hash of every bundled collector implementation file, frozen into acquired source packages.
 pub fn collector_signature() -> String {
@@ -290,7 +379,7 @@ fn verify_collector_identity(message: &Value) -> io::Result<()> {
 }
 /// Current evidence owner only; obsolete provider checkpoints must be reacquired.
 pub(crate) fn reviewed_collection_owner(owner: &Value) -> bool {
-    owner["collector_protocol"] == 13
+    owner["collector_protocol"] == COLLECTOR_PROTOCOL
         && owner["collector_signature"] == collector_signature()
         && owner["dependencies_sha256"] == dependencies_signature()
         && owner["python_runtime_sha256"]
@@ -305,7 +394,7 @@ pub(crate) fn reviewed_collection_owner(owner: &Value) -> bool {
 /// Verify the exact current producer; stored evidence uses the same identity check as live data.
 pub(crate) fn verify_coefficient_producer(message: &Value, _provider: Provider) -> io::Result<u32> {
     verify_collector_identity(message)?;
-    Ok(13)
+    Ok(COLLECTOR_PROTOCOL)
 }
 /// Resolve the package runtime first; development builds may use the documented local build.
 pub fn runtime() -> io::Result<PathBuf> {
@@ -513,6 +602,24 @@ pub fn collect_announcements(
 mod tests {
     use super::*;
     #[test]
+    fn index_inputs_is_required_even_when_empty() {
+        let request = CollectionRequest {
+            index_inputs: Default::default(),
+            source_bindings: Default::default(),
+            provider: Provider::Tdxaidata,
+            adjustment_source: AdjustmentSource::TdxForward,
+            instruments: BTreeSet::from(["SH600000".into()]),
+            benchmarks: Default::default(),
+            universes: Default::default(),
+            start: "2020-01-02".parse().unwrap(),
+            end: "2020-01-03".parse().unwrap(),
+        };
+        let mut value = serde_json::to_value(request).unwrap();
+        assert_eq!(value["index_inputs"], serde_json::json!({}));
+        value.as_object_mut().unwrap().remove("index_inputs");
+        assert!(serde_json::from_value::<CollectionRequest>(value).is_err());
+    }
+    #[test]
     fn python_provider_contracts_run_in_the_distribution_runtime() {
         let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("collectors/tests");
         let output = Command::new(runtime().expect("build the collector runtime before nextest"))
@@ -527,9 +634,39 @@ mod tests {
         );
     }
     #[test]
+    fn index_routes_require_explicit_index_type_and_provider_member_capability() {
+        let mut request = CollectionRequest {
+            index_inputs: Default::default(),
+            source_bindings: Default::default(),
+            provider: Provider::Hithink,
+            adjustment_source: AdjustmentSource::HithinkForward,
+            start: "2026-10-12".parse().unwrap(),
+            end: "2026-10-12".parse().unwrap(),
+            instruments: BTreeSet::from(["SH000852".into(), "SZ000001".into()]),
+            benchmarks: BTreeSet::from(["SH000852".into()]),
+            universes: BTreeSet::from(["csi1000".into()]),
+        };
+        request.validate().unwrap();
+        request.benchmarks.clear();
+        assert!(request.validate().is_err());
+        request.benchmarks.insert("SH000852".into());
+        request.benchmarks.insert("SZ000001".into());
+        assert!(request.validate().is_err());
+        request.benchmarks.remove("SZ000001");
+        request.universes = BTreeSet::from(["msci_a50".into()]);
+        assert!(request.validate().is_err());
+        request.universes = BTreeSet::from(["csi1000".into()]);
+        request.provider = Provider::Tdxaidata;
+        request.adjustment_source = AdjustmentSource::TdxForward;
+        request.validate().unwrap();
+        request.universes.clear();
+        request.validate().unwrap();
+    }
+    #[test]
     fn invalid_request_does_not_start_a_process_or_modify_checkpoints() {
         let dir = tempfile::tempdir().unwrap();
         let request = CollectionRequest {
+            index_inputs: Default::default(),
             source_bindings: Default::default(),
             provider: Provider::Hithink,
             adjustment_source: AdjustmentSource::HithinkForward,
@@ -556,6 +693,7 @@ mod supervisor_tests {
     use super::*;
     fn request() -> CollectionRequest {
         CollectionRequest {
+            index_inputs: Default::default(),
             source_bindings: Default::default(),
             provider: Provider::Tdxaidata,
             adjustment_source: AdjustmentSource::TdxForward,
@@ -574,8 +712,8 @@ r=json.loads(sys.stdin.readline());mode=sys.argv[1]
 open('collector.pid','w').write(str(os.getpid()))
 versions={'tdxaidata':'1.2.2','python':'3.12.15'}
 identity=r['expected_collector_signature'] if mode!='bad_identity' else 'wrong code'
-if mode!='missing_identity': print(json.dumps({'version':13,'event':'ready','collector_signature':identity,'versions':versions}),flush=True)
-print(json.dumps({'version':13,'event':'progress','message':'ready'}),flush=True)
+if mode!='missing_identity': print(json.dumps({'version':15,'event':'ready','collector_signature':identity,'versions':versions}),flush=True)
+print(json.dumps({'version':15,'event':'progress','message':'ready'}),flush=True)
 if mode=='timeout': time.sleep(30)
 if mode=='crash': sys.exit(1)
 if mode=='bad_protocol': print(json.dumps({'version':0,'event':'complete'}),flush=True);sys.exit(0)
@@ -585,15 +723,15 @@ if 'SH600000' in r['instruments']:
  open('raw/sdk-fixture.body','wb').write(body)
  evidence={'provider':'tdxaidata','sdk_version':'1.2.2','sdk_receipts':[{'kind':'sdk_native_response','sdk':'tdxaidata','version':'1.2.2','function':'GetHISDATsInStr','filename':'sdk-fixture.body','sha256':'sha256:'+hashlib.sha256(body).hexdigest()}],'kind':'structured_library_response','http_receipts':[{'filename':'http-fixture.body','sha256':'sha256:'+hashlib.sha256(body).hexdigest(),'url':'https://example.test/history'}]}
  if r['operation']=='actions':
-  print(json.dumps({'version':13,'event':'action_shard','instrument':'SH600000','history_verified':True,'records':[],'evidence':evidence}),flush=True)
+  print(json.dumps({'version':15,'event':'action_shard','instrument':'SH600000','history_verified':True,'records':[],'evidence':evidence}),flush=True)
  b={'instrument_id':'SH600000','trade_date':'2020-01-02','open':10.,'high':11.,'low':9.,'close':10.,'adj_open':10.,'adj_high':11.,'adj_low':9.,'adj_close':10.,'volume':1000.,'amount':10000.}
- adjustment={'schema_version':3,'instrument_id':'SH600000','source_symbol':'SH600000','basis':{'kind':'explicit','source':'tdx_forward','source_url':'tdxaidata:get_market_data:none:ForwardFactor','verified_through':r['end'],'points':[{'effective_date':'1900-01-01','factor':'2'}]}}
+ adjustment={'schema_version':4,'index_input':None,'instrument_id':'SH600000','source_symbol':'SH600000','basis':{'kind':'explicit','source':'tdx_forward','source_url':'tdxaidata:get_market_data:none:ForwardFactor','verified_through':r['end'],'points':[{'effective_date':'1900-01-01','factor':'2'}]}}
  if r['operation']=='coefficients': adjustment['basis']['points'].append({'effective_date':'2020-01-03','factor':'4'})
- if r['operation']=='coefficients': print(json.dumps({'version':13,'event':'adjustment_shard','instrument':'SH600000','adjustment':adjustment,'evidence':evidence}),flush=True)
- if r['operation']=='market': print(json.dumps({'version':13,'event':'shard','instrument':'SH600000','bars':[b],'adjustment':adjustment,'evidence':evidence}),flush=True)
+ if r['operation']=='coefficients': print(json.dumps({'version':15,'event':'adjustment_shard','instrument':'SH600000','adjustment':adjustment,'evidence':evidence}),flush=True)
+ if r['operation']=='market': print(json.dumps({'version':15,'event':'shard','instrument':'SH600000','bars':[b],'adjustment':adjustment,'evidence':evidence}),flush=True)
 if mode=='partial': sys.exit(1)
-print(json.dumps({'version':13,'event':'complete','collector_signature':r['expected_collector_signature'],'calendar':['2020-01-02','2020-01-03'],'universes':{},'versions':versions}),flush=True)
-if mode=='after_complete': print(json.dumps({'version':13,'event':'progress','message':'late'}),flush=True)
+print(json.dumps({'version':15,'event':'complete','collector_signature':r['expected_collector_signature'],'calendar':['2020-01-02','2020-01-03'],'universes':{},'versions':versions}),flush=True)
+if mode=='after_complete': print(json.dumps({'version':15,'event':'progress','message':'late'}),flush=True)
 "#).unwrap();
         let mut c = Command::new(runtime().unwrap());
         c.args(["-I", "-B", "-u"]).arg(script).arg(mode);

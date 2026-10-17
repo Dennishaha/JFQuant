@@ -50,6 +50,14 @@ pub fn thscode(symbol: &str) -> io::Result<String> {
     analytics_core::pool::validate_exchange_symbol(symbol).map_err(invalid)?;
     Ok(format!("{}.{}", &symbol[2..], &symbol[..2]))
 }
+/// Exact index locator for the existing index endpoint; stock grammar remains unchanged.
+pub fn index_code(code: &str) -> io::Result<String> {
+    if analytics_core::pool::validate_exchange_symbol(code).is_ok() {
+        return thscode(code);
+    }
+    analytics_core::indices::validate_locator(code).map_err(invalid)?;
+    Ok(code.to_owned())
+}
 fn local_symbol(code: &str) -> io::Result<String> {
     let (ticker, exchange) = code
         .split_once('.')
@@ -106,7 +114,9 @@ fn items(data: &Value) -> io::Result<&Vec<Value>> {
 
 fn check_identity(data: &Value, code: &str) -> io::Result<()> {
     if data.get("thscode").is_some_and(|s| s != code)
-        || data.get("ticker").is_some_and(|s| s != &code[..6])
+        || data
+            .get("ticker")
+            .is_some_and(|s| s != code.split('.').next().unwrap_or(code))
     {
         return Err(invalid("hithink_security_mismatch"));
     }
@@ -301,16 +311,23 @@ impl Client<'_> {
     ) -> io::Result<BTreeMap<String, analytics_core::pool::PoolMembership>> {
         let mut result = BTreeMap::new();
         for name in &request.universes {
-            let code = if name == "csi300" {
-                "000300.SH"
+            let code = if let Some(config) = request
+                .index_inputs
+                .values()
+                .find(|i| &i.definition.id == name)
+            {
+                index_code(&config.mappings["hithink"])?
             } else {
-                "000905.SH"
+                let index = analytics_core::indices::find(name)
+                    .filter(|i| crate::collector::builtin_members(&i.id, Provider::Hithink))
+                    .ok_or_else(|| invalid("unsupported_constituent_index"))?;
+                thscode(index.symbol.as_deref().unwrap())?
             };
             let data = self.get(
                 "/api/a-share-index/constituents/ths-stock-list",
-                &[("thscode", code.into())],
+                &[("thscode", code.clone())],
             )?;
-            check_identity(&data, code)?;
+            check_identity(&data, &code)?;
             let observed = chrono::DateTime::from_timestamp_millis(
                 data["timestamp"]
                     .as_i64()
@@ -354,7 +371,11 @@ impl Client<'_> {
         index: bool,
         adjust: &str,
     ) -> io::Result<Vec<DailyBar>> {
-        let code = thscode(symbol)?;
+        let code = if index {
+            index_code(symbol)?
+        } else {
+            thscode(symbol)?
+        };
         if index
             && range.start
                 < now()
@@ -393,7 +414,7 @@ impl Client<'_> {
             {
                 return Err(invalid("hithink_adjustment_mismatch"));
             }
-            let rows = parse_bars(symbol, &data, &DateRange { start, end })?;
+            let rows = parse_bars_code(symbol, &code, &data, &DateRange { start, end })?;
             merge_window(&mut output, &rows)?;
             if end == range.end {
                 break;
@@ -411,10 +432,27 @@ impl Client<'_> {
         Ok(output.into_values().collect())
     }
 }
+#[cfg(test)]
 fn parse_bars(symbol: &str, data: &Value, range: &DateRange) -> io::Result<Vec<DailyBar>> {
+    parse_bars_code(symbol, &thscode(symbol)?, data, range)
+}
+fn parse_bars_code(
+    symbol: &str,
+    code: &str,
+    data: &Value,
+    range: &DateRange,
+) -> io::Result<Vec<DailyBar>> {
+    check_identity(data, code)?;
     let mut rows = vec![];
     for row in items(data)? {
-        check_identity(row, &thscode(symbol)?)?;
+        if row.get("thscode").is_none()
+            && row.get("ticker").is_none()
+            && data.get("thscode").is_none()
+            && data.get("ticker").is_none()
+        {
+            return Err(invalid("hithink_index_or_stock_row_identity_missing"));
+        }
+        check_identity(row, code)?;
         let date = day(&row["date_ms"])?;
         if !range.contains(date) || rows.last().is_some_and(|r: &DailyBar| r.trade_date >= date) {
             return Err(invalid("hithink_duplicate_or_out_of_range_date"));
@@ -551,7 +589,7 @@ pub fn collect_with_calendar(
     if request.start > effective_end {
         return Err(invalid("hithink_no_completed_trading_date"));
     }
-    let identity = json!({"schema_version":1,"operation":operation,"request":request,"collector_protocol":13,"collector_signature":producer_signature(),"calendar":calendar,"effective_end":effective_end,"normalization":HITHINK_NORMALIZATION});
+    let identity = json!({"schema_version":1,"operation":operation,"request":request,"collector_protocol":crate::collector::COLLECTOR_PROTOCOL,"collector_signature":producer_signature(),"calendar":calendar,"effective_end":effective_end,"normalization":HITHINK_NORMALIZATION});
     let owner = root.join("owner.json");
     if owner.exists() {
         if serde_json::from_slice::<Value>(&fs::read(&owner)?).map_err(invalid)? != identity {
@@ -650,7 +688,8 @@ pub fn collect_with_calendar(
                     }
                 };
                 let adjustment = AdjustmentRecord {
-                    schema_version: 3,
+                    index_input: request.index_inputs.get(id).cloned().map(Box::new),
+                    schema_version: 4,
                     instrument_id: id.clone(),
                     source_symbol: symbol.clone(),
                     basis,
@@ -707,11 +746,15 @@ pub fn collect_with_calendar(
     save(&root.join("market/daily_manifest.json"), &manifest)?;
     let mut mapping = analytics_core::source_map::SourceMap::default();
     for (id, symbol) in &request.source_bindings {
-        if id != symbol {
+        if id != symbol || request.index_inputs.contains_key(id) {
             mapping.exceptions.insert(
                 id.clone(),
                 analytics_core::source_map::SourceException {
-                    exchange_symbol: symbol.clone(),
+                    exchange_symbol: if request.benchmarks.contains(id) {
+                        String::new()
+                    } else {
+                        symbol.clone()
+                    },
                     kind: if request.benchmarks.contains(id) {
                         "price_index"
                     } else {
@@ -924,7 +967,7 @@ fn actions(client: &mut Client<'_>, request: &CollectionRequest) -> io::Result<P
             bundle.failures.insert(id.clone(), failure);
         }
     }
-    let complete = json!({"collector_signature":producer_signature(),"provider":"hithink","collector_protocol":13});
+    let complete = json!({"collector_signature":producer_signature(),"provider":"hithink","collector_protocol":crate::collector::COLLECTOR_PROTOCOL});
     save(
         &client.root.join("raw/complete-sources-structured.json"),
         &complete,
@@ -1185,7 +1228,8 @@ mod tests {
         pair_rows(&mut raw, &adjusted).unwrap();
         write_bars(&root.join("bars/SH600000.parquet"), &raw).unwrap();
         let record = AdjustmentRecord {
-            schema_version: 3,
+            index_input: None,
+            schema_version: 4,
             instrument_id: "SH600000".into(),
             source_symbol: "SH600000".into(),
             basis: AdjustmentBasis::SupplierForward {
@@ -1257,6 +1301,131 @@ mod tests {
         assert!(ordinary.is_empty());
         assert_eq!(issues.len(), 1);
         assert!(!issues[0].skipped_by_engine());
+    }
+    #[test]
+    fn runtime_index_uses_exact_provider_code_and_frozen_contract_without_stock_aliases() {
+        let mut c = analytics_core::indices::builtin_config("csi1000").unwrap();
+        c.definition.id = "runtime_index".into();
+        c.definition.symbol = None;
+        c.definition.official_code = "TEST001".into();
+        c.data_key = "IDX_runtime_index".into();
+        c.mappings = BTreeMap::from([("hithink".into(), "TEST001.CSI".into())]);
+        let request = CollectionRequest {
+            index_inputs: BTreeMap::from([(c.data_key.clone(), c.clone())]),
+            source_bindings: BTreeMap::from([(c.data_key.clone(), "TEST001.CSI".into())]),
+            provider: Provider::Hithink,
+            adjustment_source: crate::adjustment::AdjustmentSource::HithinkForward,
+            start: now().date_naive().pred_opt().unwrap(),
+            end: now().date_naive().pred_opt().unwrap(),
+            instruments: [c.data_key.clone()].into(),
+            benchmarks: [c.data_key.clone()].into(),
+            universes: Default::default(),
+        };
+        request.validate().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir(temp.path().join("raw")).unwrap();
+        let row = json!({"thscode":"TEST001.CSI","date_ms":millis(request.start),"open_price":10.,"high_price":11.,"low_price":9.,"close_price":10.,"volume":1.,"turnover":10.});
+        let (base, server) = server(vec![(
+            200,
+            json!({"code":0,"data":{"thscode":"TEST001.CSI","item":[row]}}),
+        )]);
+        let context = TaskContext::default();
+        let mut client = Client {
+            test_base: Some(base),
+            key: "test".into(),
+            root: temp.path(),
+            context: &context,
+            receipts: vec![],
+        };
+        let rows = client
+            .history(
+                "TEST001.CSI",
+                &DateRange {
+                    start: request.start,
+                    end: request.end,
+                },
+                true,
+                "none",
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(server.join().unwrap()[0].contains("TEST001.CSI"));
+        let record = AdjustmentRecord {
+            schema_version: 4,
+            index_input: Some(Box::new(c.clone())),
+            instrument_id: c.data_key.clone(),
+            source_symbol: "TEST001.CSI".into(),
+            basis: AdjustmentBasis::PriceIndex {
+                source: "hithink.a-share-index.prices.historical".into(),
+            },
+        };
+        record.validate().unwrap();
+        // Read the same frozen definition and quotes through the production dataset path.
+        let market = temp.path().join("market");
+        fs::create_dir_all(market.join("bars")).unwrap();
+        fs::create_dir_all(market.join("adjustments")).unwrap();
+        let mut canonical = rows.clone();
+        for row in &mut canonical {
+            row.instrument_id = c.data_key.clone();
+        }
+        write_bars(
+            &market.join(format!("bars/{}.parquet", c.data_key)),
+            &canonical,
+        )
+        .unwrap();
+        save(
+            &market.join(format!("adjustments/{}.json", c.data_key)),
+            &record,
+        )
+        .unwrap();
+        let manifest = DailyManifest {
+            schema_version: 6,
+            calendar: vec![request.start],
+            universes: Default::default(),
+            instruments: [c.data_key.clone()].into(),
+            price_basis: "unadjusted".into(),
+            normalization: HITHINK_NORMALIZATION.into(),
+            adjustment_anchors: BTreeMap::from([(
+                c.data_key.clone(),
+                record.anchor(request.start).unwrap(),
+            )]),
+        };
+        save(&market.join("daily_manifest.json"), &manifest).unwrap();
+        let dataset = crate::daily::DailyDataset::open(&market).unwrap();
+        assert_eq!(dataset.index_config("runtime_index").unwrap(), c);
+        assert!(dataset.is_price_index(&c.data_key).unwrap());
+        assert_eq!(
+            dataset.last_valid_close_date(&c.data_key).unwrap(),
+            Some(request.start)
+        );
+        assert!(dataset.pool("runtime_index").is_err());
+        let mut bad = record.clone();
+        bad.source_symbol = "ANOTHER.CSI".into();
+        assert!(bad.validate().is_err());
+        let mut stock = request;
+        stock.benchmarks.clear();
+        assert!(stock.validate().is_err());
+        assert!(thscode("TEST001.CSI").is_err());
+        let mut mapping = analytics_core::source_map::SourceMap {
+            schema_version: 2,
+            ..Default::default()
+        };
+        mapping.exceptions.insert(
+            c.data_key.clone(),
+            analytics_core::source_map::SourceException {
+                exchange_symbol: String::new(),
+                kind: "price_index".into(),
+                coverage: range(),
+                locators: vec![analytics_core::source_map::SourceLocator {
+                    provider: "hithink".into(),
+                    symbol: "TEST001.CSI".into(),
+                    coverage: range(),
+                    evidence: vec![],
+                }],
+            },
+        );
+        mapping.validate().unwrap();
+        assert!(mapping.exchange_symbol(&c.data_key, range().start).is_err());
     }
     fn server(replies: Vec<(u16, Value)>) -> (String, std::thread::JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1367,6 +1536,7 @@ mod tests {
         let context = TaskContext::default();
         let data = |code: &str| json!({"code":0,"data":{"thscode":code,"ticker":&code[..6],"item":[{"ticker":&code[..6],"ex_date_ms":millis(range().start),"dividend_per_share":0.42,"per_share_bonus":0}]}});
         let request = CollectionRequest {
+            index_inputs: Default::default(),
             provider: Provider::Hithink,
             adjustment_source: crate::adjustment::AdjustmentSource::HithinkForward,
             source_bindings: BTreeMap::new(),
@@ -1453,6 +1623,7 @@ mod tests {
                 test_base: Some(base),
             };
             let request = CollectionRequest {
+                index_inputs: Default::default(),
                 provider: Provider::Hithink,
                 adjustment_source: crate::adjustment::AdjustmentSource::HithinkForward,
                 source_bindings: BTreeMap::new(),

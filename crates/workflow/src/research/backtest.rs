@@ -146,7 +146,8 @@ fn validate_price_source(
         _ => return Err("missing/unsupported coefficient metadata".into()),
     };
     AdjustmentRecord {
-        schema_version: 3,
+        index_input: None,
+        schema_version: 4,
         instrument_id: id.into(),
         source_symbol: input["source_symbol"].as_str().unwrap_or(id).into(),
         basis: adjustment,

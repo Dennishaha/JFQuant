@@ -308,7 +308,8 @@ mod tests {
             .collect::<Vec<_>>();
         write_bars(&src.join("bars/SH600000.parquet"), &bars).unwrap();
         let record = AdjustmentRecord {
-            schema_version: 3,
+            index_input: None,
+            schema_version: 4,
             instrument_id: "SH600000".into(),
             source_symbol: "SH600000".into(),
             basis: AdjustmentBasis::Explicit {

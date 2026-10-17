@@ -1,0 +1,211 @@
+[
+  {
+    "id": "csi300",
+    "name": "沪深300",
+    "official_code": "000300",
+    "symbol": "SH000300",
+    "category": "大盘",
+    "description": "沪深市场大盘核心样本",
+    "source_url": "https://www.csindex.com.cn/",
+    "currency": "CNY",
+    "return_basis": "price"
+  },
+  {
+    "id": "csi500",
+    "name": "中证500",
+    "official_code": "000905",
+    "symbol": "SH000905",
+    "category": "中盘",
+    "description": "沪深市场中盘样本",
+    "source_url": "https://www.csindex.com.cn/",
+    "currency": "CNY",
+    "return_basis": "price"
+  },
+  {
+    "id": "csi1000",
+    "name": "中证1000",
+    "official_code": "000852",
+    "symbol": "SH000852",
+    "category": "小盘",
+    "description": "沪深市场小盘样本",
+    "source_url": "https://www.csindex.com.cn/",
+    "currency": "CNY",
+    "return_basis": "price"
+  },
+  {
+    "id": "csi800",
+    "name": "中证800",
+    "official_code": "000906",
+    "symbol": "SH000906",
+    "category": "宽基",
+    "description": "沪深300与中证500覆盖的大中盘市场",
+    "source_url": "https://www.csindex.com.cn/",
+    "currency": "CNY",
+    "return_basis": "price"
+  },
+  {
+    "id": "csia500",
+    "name": "中证A500",
+    "official_code": "000510",
+    "symbol": "SH000510",
+    "category": "宽基",
+    "description": "兼顾行业代表性的500只样本",
+    "source_url": "https://oss-ch.csindex.com.cn/static/html/csindex/public/uploads/indices/detail/files/zh_CN/000510_Index_Methodology_cn.pdf",
+    "currency": "CNY",
+    "return_basis": "price"
+  },
+  {
+    "id": "csi_all_share",
+    "name": "中证全指",
+    "official_code": "000985",
+    "symbol": "SH000985",
+    "category": "宽基",
+    "description": "跨市场整体表现",
+    "source_url": "https://www.csindex.com.cn/",
+    "currency": "CNY",
+    "return_basis": "price"
+  },
+  {
+    "id": "sse_composite",
+    "name": "上证指数",
+    "official_code": "000001",
+    "symbol": "SH000001",
+    "category": "市场",
+    "description": "上海市场综合表现",
+    "source_url": "https://www.sse.com.cn/market/sseindex/indexlist/index.shtml?classid=010202",
+    "currency": "CNY",
+    "return_basis": "price"
+  },
+  {
+    "id": "sse50",
+    "name": "上证50",
+    "official_code": "000016",
+    "symbol": "SH000016",
+    "category": "大盘",
+    "description": "上海市场代表性大盘样本",
+    "source_url": "https://www.sse.com.cn/market/sseindex/indexlist/index.shtml?classid=010202",
+    "currency": "CNY",
+    "return_basis": "price"
+  },
+  {
+    "id": "sse180",
+    "name": "上证180",
+    "official_code": "000010",
+    "symbol": "SH000010",
+    "category": "大盘",
+    "description": "上海市场代表性样本",
+    "source_url": "https://www.sse.com.cn/market/sseindex/indexlist/index.shtml?classid=010202",
+    "currency": "CNY",
+    "return_basis": "price"
+  },
+  {
+    "id": "star50",
+    "name": "科创50",
+    "official_code": "000688",
+    "symbol": "SH000688",
+    "category": "成长",
+    "description": "科创板代表性样本",
+    "source_url": "https://www.sse.com.cn/market/sseindex/indexlist/index.shtml?classid=010202",
+    "currency": "CNY",
+    "return_basis": "price"
+  },
+  {
+    "id": "szse_component",
+    "name": "深证成指",
+    "official_code": "399001",
+    "symbol": "SZ399001",
+    "category": "市场",
+    "description": "深圳市场代表性样本",
+    "source_url": "https://www.szse.cn/market/exponent/pandect/index.html",
+    "currency": "CNY",
+    "return_basis": "price"
+  },
+  {
+    "id": "szse100",
+    "name": "深证100",
+    "official_code": "399330",
+    "symbol": "SZ399330",
+    "category": "大盘",
+    "description": "深圳市场核心样本",
+    "source_url": "https://www.szse.cn/market/exponent/pandect/index.html",
+    "currency": "CNY",
+    "return_basis": "price"
+  },
+  {
+    "id": "chinext",
+    "name": "创业板指",
+    "official_code": "399006",
+    "symbol": "SZ399006",
+    "category": "成长",
+    "description": "创业板代表性样本",
+    "source_url": "https://www.szse.cn/market/exponent/pandect/index.html",
+    "currency": "CNY",
+    "return_basis": "price"
+  },
+  {
+    "id": "chinext50",
+    "name": "创业板50",
+    "official_code": "399673",
+    "symbol": "SZ399673",
+    "category": "成长",
+    "description": "创业板高流动性代表样本",
+    "source_url": "https://www.szse.cn/www/disclosure/notice/general/t20140617_501247.html",
+    "currency": "CNY",
+    "return_basis": "price"
+  },
+  {
+    "id": "csi_dividend",
+    "name": "中证红利",
+    "official_code": "000922",
+    "symbol": "SH000922",
+    "category": "红利",
+    "description": "跨市场高股息风格",
+    "source_url": "https://www.csindex.com.cn/",
+    "currency": "CNY",
+    "return_basis": "price"
+  },
+  {
+    "id": "csia50",
+    "name": "中证A50",
+    "official_code": "930050",
+    "symbol": null,
+    "category": "大盘",
+    "description": "行业代表性龙头；供应商代码映射尚未核验",
+    "source_url": "https://oss-ch.csindex.com.cn/static/html/csindex/public/uploads/indices/detail/files/zh_CN/930050_Index_Methodology_cn.pdf",
+    "currency": "CNY",
+    "return_basis": "待核验具体数据版本"
+  },
+  {
+    "id": "csi2000",
+    "name": "中证2000",
+    "official_code": "932000",
+    "symbol": null,
+    "category": "小微盘",
+    "description": "小微盘市场代表；供应商代码映射尚未核验",
+    "source_url": "https://www.csindex.com.cn/",
+    "currency": "CNY",
+    "return_basis": "待核验具体数据版本"
+  },
+  {
+    "id": "msci_a50",
+    "name": "MSCI中国A50互联互通人民币指数",
+    "official_code": "746059",
+    "symbol": null,
+    "category": "国际视角",
+    "description": "人民币版本；与中证A50、富时A50及MSCI美元版本分别维护，供应商接口尚未接入",
+    "source_url": "https://www.msci.com/msci%E6%8C%87%E6%95%B0%E4%BF%A1%E6%81%AF",
+    "currency": "CNY",
+    "return_basis": "待核验具体数据版本"
+  },
+  {
+    "id": "ftse_a50",
+    "name": "富时中国A50",
+    "official_code": "XIN9",
+    "symbol": null,
+    "category": "国际视角",
+    "description": "大盘A股国际视角；币种和价格/收益版本需绑定，供应商接口尚未接入",
+    "source_url": "https://www.lseg.com/en/ftse-russell/indices/china",
+    "currency": "按具体版本绑定",
+    "return_basis": "待核验具体数据版本"
+  }
+]

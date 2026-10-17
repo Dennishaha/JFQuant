@@ -629,6 +629,20 @@ pub fn apply_event(state: &mut AppState, event: &WorkerEvent) {
             state.platform.datasets = datasets.clone();
             state.platform.runs = runs.clone();
             state.platform.details = outcome.details.clone();
+            if let Some(versions) = outcome.details.get("index_versions") {
+                match serde_json::from_value(versions.clone()) {
+                    Ok(v) => state.platform.index_versions = v,
+                    Err(e) => state.platform.error = Some(format!("invalid index catalogue: {e}")),
+                }
+            }
+            if let Some(version) = outcome
+                .details
+                .get("index_version")
+                .and_then(|v| v["id"].as_str())
+            {
+                state.platform.index_version = version.to_owned();
+            }
+
             if outcome.details["catalogue"]["models"].is_array() {
                 state.platform.independent_models = serde_json::json!({"training":outcome.details.get("training").cloned().unwrap_or_else(||serde_json::json!(record.id)),"catalogue":outcome.details["catalogue"]});
             }

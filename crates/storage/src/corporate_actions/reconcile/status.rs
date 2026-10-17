@@ -94,7 +94,7 @@ mod tests {
         let output = tmp.path().join("output");
         fs::create_dir_all(root.join("raw")).unwrap();
         fs::create_dir_all(output.join("raw")).unwrap();
-        let request = json!({"provider":"tdxaidata","adjustment_source":"none","start":"2021-01-01","end":"2021-03-01","instruments":["SH600340"],"source_bindings":{},"benchmarks":[],"universes":[]});
+        let request = json!({"index_inputs":{},"provider":"tdxaidata","adjustment_source":"none","start":"2021-01-01","end":"2021-03-01","instruments":["SH600340"],"source_bindings":{},"benchmarks":[],"universes":[]});
         fs::write(
             root.join("owner.json"),
             serde_json::to_vec(&json!({"request":request})).unwrap(),

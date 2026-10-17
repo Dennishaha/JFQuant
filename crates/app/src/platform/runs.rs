@@ -161,7 +161,12 @@ pub fn runs_panel(
                     Ok(v) => {
                         crate::quality_ui::reasons(ui, v);
                         show_results(ui, v);
-                        show_nav(ui, &view.nav, v["input_kind"] == "synthetic_fixture");
+                        show_nav(
+                            ui,
+                            &view.nav,
+                            v["input_kind"] == "synthetic_fixture",
+                            v["execution"]["benchmark"].as_str().unwrap_or("所选基准"),
+                        );
                     }
                     Err(e) => {
                         ui.colored_label(
@@ -365,7 +370,7 @@ pub(super) fn show_results(ui: &mut egui::Ui, value: &Value) {
     });
 }
 
-fn show_nav(ui: &mut egui::Ui, rows: &[(String, f64, f64)], synthetic: bool) {
+fn show_nav(ui: &mut egui::Ui, rows: &[(String, f64, f64)], synthetic: bool, benchmark: &str) {
     if rows.len() < 2 {
         return;
     }
@@ -376,7 +381,9 @@ fn show_nav(ui: &mut egui::Ui, rows: &[(String, f64, f64)], synthetic: bool) {
         if synthetic {
             "合成基准"
         } else {
-            "中证500价格指数"
+            analytics_core::indices::by_symbol(benchmark)
+                .map(|i| i.name.as_str())
+                .unwrap_or(benchmark)
         }
     ));
     let lo = rows

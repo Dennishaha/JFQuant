@@ -2,6 +2,7 @@
 use super::*;
 pub(super) fn reference_route(
     p: &RefreshPlan,
+    base: &DailyDataset,
     request: &RefreshRequest,
     staging: &Path,
     context: &TaskContext,
@@ -24,15 +25,43 @@ pub(super) fn reference_route(
             &p.history,
             &request.template.benchmark,
         );
+        if let Some(config) = base.index_input(&request.template.benchmark)? {
+            r = crate::indices::collection(
+                config,
+                provider,
+                p.history.start,
+                p.history.end,
+                false,
+            )?;
+        }
         if role == DataRole::Members {
-            r.universes.insert(
-                if request.template.benchmark == "SH000300" {
-                    "csi300"
-                } else {
-                    "csi500"
+            if let Some(name) = request.template.pool_version.strip_prefix("index:") {
+                let config = base.index_config(name)?;
+                match crate::indices::collection(
+                    config,
+                    provider,
+                    p.history.start,
+                    p.history.end,
+                    true,
+                ) {
+                    Ok(value) => r = value,
+                    Err(e) => {
+                        attempts.push(json!({"provider":provider,"status":"not_run","code":"current_member_route_unavailable_for_pool","reason":e.to_string()}));
+                        continue;
+                    }
                 }
-                .into(),
-            );
+            } else if let Some(index) = request
+                .template
+                .pool_version
+                .strip_prefix("builtin:")
+                .and_then(analytics_core::indices::find)
+                .filter(|i| collector::builtin_members(&i.id, provider))
+            {
+                r.universes.insert(index.id.clone());
+            } else {
+                attempts.push(json!({"provider":provider,"status":"not_run","code":"current_member_route_unavailable_for_pool"}));
+                continue;
+            }
         }
         let root = staging
             .join(format!("reference-{kind}"))

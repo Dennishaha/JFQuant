@@ -131,6 +131,7 @@ pub(crate) fn prepare(
             analytics_core::pool::validate_exchange_symbol(&code)?;
             if announcements {
                 let request = analytics_storage::collector::CollectionRequest {
+                    index_inputs: Default::default(),
                     source_bindings: Default::default(),
                     provider: analytics_storage::collector::Provider::Cninfo,
                     adjustment_source: analytics_storage::adjustment::AdjustmentSource::None,
@@ -146,6 +147,7 @@ pub(crate) fn prepare(
                 )
             } else {
                 let request = analytics_storage::collector::CollectionRequest {
+                    index_inputs: Default::default(),
                     source_bindings: Default::default(),
                     provider: analytics_storage::collector::Provider::Hithink,
                     adjustment_source:

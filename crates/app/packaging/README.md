@@ -60,3 +60,7 @@ into the runtime as `research-requirements.lock`. Build and verify scripts consu
 these component-owned resources; no lock is owned by the desktop frontend.
 
 Company-event execution extends the existing private native patch. Build inputs now include `core/src/corporate_account.rs`; it is copied alongside the rights modules, never reimplemented in Python. The final native snapshot is exported after final-day transitions. Update input hashes after formatting source, rebuild runtime, then run Python fixtures and Rust replay before packaging.
+
+指数运行时配置离线验收：`crates/app/packaging/verify-indices.sh "$PWD/target/distribution/JFQuant.app" "$PWD/target/index-runtime-smoke"`。
+仅使用包内 CLI/Python，验证离线目录、自定义供应商代码、导入导出和研究模板；无真实网络或凭据需求。
+实际指数行情验证另以 `indices verify` 显式运行，记录请求与实际范围，不能用此离线测试证明供应商覆盖。

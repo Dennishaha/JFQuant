@@ -1369,7 +1369,7 @@ mod tests {
         )
         .unwrap();
         // A failed batch can still contain a complete, immutable security receipt.
-        let owner = serde_json::json!({"operation":"announcements","collector_protocol":13,"collector_signature":crate::collector::collector_signature(),"normalization":crate::adjustment::NORMALIZATION,"dependencies_sha256":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(include_bytes!("../../collectors/requirements.lock")))),"python_runtime_sha256":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(include_bytes!("../../collectors/python-runtime.lock.json")))),"request":{"provider":"cninfo","adjustment_source":"none","start":"2024-06-01","end":"2024-06-30","instruments":["SH600000"],"source_bindings":{},"benchmarks":[],"universes":[]}});
+        let owner = serde_json::json!({"operation":"announcements","collector_protocol":crate::collector::COLLECTOR_PROTOCOL,"collector_signature":crate::collector::collector_signature(),"normalization":crate::adjustment::NORMALIZATION,"dependencies_sha256":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(include_bytes!("../../collectors/requirements.lock")))),"python_runtime_sha256":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(include_bytes!("../../collectors/python-runtime.lock.json")))),"request":{"index_inputs":{},"provider":"cninfo","adjustment_source":"none","start":"2024-06-01","end":"2024-06-30","instruments":["SH600000"],"source_bindings":{},"benchmarks":[],"universes":[]}});
         fs::write(root.join("owner.json"), serde_json::to_vec(&owner).unwrap()).unwrap();
         fs::write(
             root.join("receipts.json"),

@@ -372,7 +372,8 @@ mod supplier_tests {
             intervals: [(id.into(), vec![range.clone()])].into(),
         };
         let adjustment = AdjustmentRecord {
-            schema_version: 3,
+            index_input: None,
+            schema_version: 4,
             instrument_id: id.into(),
             source_symbol: id.into(),
             basis: AdjustmentBasis::SupplierForward {

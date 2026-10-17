@@ -1982,3 +1982,58 @@ fn evidence_maintenance_submits_shared_status_and_scaffold_requests() {
         }
     }
 }
+
+#[test]
+fn index_catalogue_selection_preserves_factors_and_does_not_start_tasks() {
+    let (mut h, _tmp) = platform_harness(Panel::Dataset);
+    h.ctx.all_styles_mut(|s| s.animation_time = 0.0);
+    let factors = h.app.state.platform.template.config.factor_ids.clone();
+    h.click("常见指数目录");
+    let text = rendered_text(&h.frame(vec![]));
+    assert!(text.contains("MSCI中国A50互联互通人民币指数"));
+    assert!(text.contains("待接数据源"));
+    h.click("中证1000");
+    h.click("加入行情采集列表");
+    assert!(h.app.state.platform.collection_symbols.contains("SH000852"));
+    assert!(
+        h.app
+            .state
+            .platform
+            .collection_benchmarks
+            .contains("SH000852")
+    );
+    h.click("设为研究股票池与基准");
+    assert_eq!(
+        h.app.state.platform.template.pool_version,
+        "builtin:csi1000"
+    );
+    assert_eq!(h.app.state.platform.template.benchmark, "SH000852");
+    assert_eq!(h.app.state.platform.template.config.factor_ids, factors);
+    assert!(h.commands.try_recv().is_err());
+}
+
+#[test]
+fn runtime_index_editor_submits_shared_save_without_touching_models() {
+    let (mut h, _tmp) = platform_harness(Panel::Dataset);
+    h.ctx.all_styles_mut(|s| s.animation_time = 0.0);
+    let before = h.app.state.platform.template.config.factor_ids.clone();
+    let mut config = analytics_core::indices::builtin_config("csi1000").unwrap();
+    config.definition.id = "app_index".into();
+    config.definition.symbol = None;
+    config.definition.official_code = "APP001".into();
+    config.data_key = "IDX_app_index".into();
+    config.mappings = std::collections::BTreeMap::from([("hithink".into(), "APP001.CSI".into())]);
+    h.app.state.platform.index_editor = serde_json::to_string_pretty(&config).unwrap();
+    h.click("维护指数配置");
+    h.click("校验并保存新版本");
+    match h.commands.try_recv().unwrap() {
+        WorkerCommand::ExecuteWorkflow { request, .. } => match *request {
+            analytics_workflow::WorkflowRequest::Index {
+                request: analytics_workflow::indices::IndexOperation::Save { config: c },
+            } => assert_eq!(*c, config),
+            other => panic!("unexpected workflow {other:?}"),
+        },
+        other => panic!("unexpected command {other:?}"),
+    }
+    assert_eq!(h.app.state.platform.template.config.factor_ids, before);
+}

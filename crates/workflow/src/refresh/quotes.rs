@@ -65,15 +65,31 @@ pub(super) fn acquire_quotes(
         let same = native_provider(&plan.base_market, id) == Some(*provider)
             && base_path.join("daily_manifest.json").is_file();
         let result = (|| -> Result<_> {
-            if *provider == Provider::Hithink {
-                let req = collection(*provider, id, &plan.history, &request.template.benchmark);
-                let market = analytics_storage::hithink::collect_with_calendar(
-                    &req,
-                    &root,
-                    context,
-                    "market",
-                    Some(calendar),
-                )?;
+            let base = DailyDataset::open(base_path)?;
+            let index = base.index_input(id)?;
+            if *provider == Provider::Hithink || index.is_some() {
+                let req = if let Some(config) = index {
+                    crate::indices::collection(
+                        config,
+                        *provider,
+                        plan.history.start,
+                        plan.history.end,
+                        false,
+                    )?
+                } else {
+                    collection(*provider, id, &plan.history, &request.template.benchmark)
+                };
+                let market = if *provider == Provider::Hithink {
+                    analytics_storage::hithink::collect_with_calendar(
+                        &req,
+                        &root,
+                        context,
+                        "market",
+                        Some(calendar),
+                    )?
+                } else {
+                    collector::collect(&req, &root, context)?
+                };
                 return Ok((
                     read_bars(&market.join("bars").join(format!("{id}.parquet")))?,
                     AdjustmentRecord::read(&market, id)?,

@@ -19,7 +19,7 @@ flowchart LR
 
 `collector::{collect,collect_quotes,collect_actions,collect_reference,collect_announcements}` 使用同一 `CollectionRequest`。默认 `Provider::Hithink`；通达信 `Tdxaidata` 是备用；`Cninfo` 仅支持公告。自动 workflow 按角色尝试来源，显式任务不切源。切换行情来源重取整个证券历史，不混合不同来源的字段。
 
-`collect_coefficients` 仅支持通达信独立 ForwardFactor。HiThink `AdjustmentSource::HithinkForward` 对应 `AdjustmentBasis::SupplierForward`，不是系数序列。巨潮请求使用 `AdjustmentSource::None`。服务协议21、Python JSON Lines协议13、来源策略2；旧任务和旧来源配置需重建，不改写或删除用户旧文件。
+`collect_coefficients` 仅支持通达信独立 ForwardFactor。HiThink `AdjustmentSource::HithinkForward` 对应 `AdjustmentBasis::SupplierForward`，不是系数序列。巨潮请求使用 `AdjustmentSource::None`。服务协议33、Python JSON Lines协议15、来源策略2；旧任务和旧来源配置需重建，不改写或删除用户旧文件。
 
 ## HiThink 数据与价格口径
 

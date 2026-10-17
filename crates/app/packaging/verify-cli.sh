@@ -12,6 +12,21 @@ cli="$app/Contents/MacOS/jfquant"
 run_cli() { env -i HOME="$check_root/home" PATH=/usr/bin:/bin "$cli" --workspace "$check_root/workspace" "$@"; }
 trap 'run_cli service stop >/dev/null 2>&1 || true' EXIT
 run_cli --help > "$check_root/help.txt"
+# Catalogue metadata is compiled into the shipped binary and requires no workspace.
+env -i HOME="$check_root/home" PATH=/usr/bin:/bin "$cli" --workspace "$check_root/catalogue-must-not-exist" indices > "$check_root/indices.json"
+[ ! -e "$check_root/catalogue-must-not-exist" ]
+"$app/Contents/Resources/python/bin/python3" -I -B - "$check_root/indices.json" <<'PY_INDICES'
+import json, sys
+with open(sys.argv[1]) as handle:
+    catalogue = json.load(handle)
+assert catalogue["schema_version"] == 1
+indices = {item["id"]: item for item in catalogue["indices"]}
+assert indices["csi1000"]["symbol"] == "SH000852"
+assert indices["msci_a50"]["official_code"] == "746059"
+assert indices["msci_a50"]["symbol"] is None
+assert indices["msci_a50"]["quote_route"] == "unavailable"
+PY_INDICES
+
 # Use only a fixture Key in the generated HOME. A signed bundle must share the
 # same private-file interface without OS prompts or a development environment.
 printf '%s' 'fixture-packaged-source-key' | run_cli data sources configure --provider tdxaidata --key-stdin > "$check_root/credential.json"
@@ -20,6 +35,15 @@ printf '%s' 'fixture-packaged-source-key' | run_cli data sources configure --pro
 [ "$(stat -f '%Lp' "$check_root/home/Library/Application Support/JFQuant/credentials/tdxaidata.json")" = 600 ]
 run_cli self-check --output "$check_root/native" > "$check_root/native.json"
 run_cli workspace create "$check_root/workspace" > "$check_root/workspace.json"
+run_cli templates default --universe csi1000 --output "$check_root/csi1000.json" > "$check_root/csi1000-template.json"
+[ "$(plutil -extract benchmark raw -o - "$check_root/csi1000-template.json")" = SH000852 ]
+[ "$(plutil -extract pool_version raw -o - "$check_root/csi1000-template.json")" = builtin:csi1000 ]
+run_cli templates validate "$check_root/csi1000.json" > "$check_root/csi1000-validation.json"
+[ "$(plutil -extract valid raw -o - "$check_root/csi1000-validation.json")" = true ]
+if run_cli templates default --universe msci_a50 > "$check_root/unmapped-index.json" 2> "$check_root/unmapped-index.stderr"; then
+  echo "Unmapped index unexpectedly accepted as an executable recipe" >&2; exit 1
+fi
+
 run_cli research demo-parquet > "$check_root/submission.json"
 demo_id="$(plutil -extract task_id raw -o - "$check_root/submission.json")"
 run_cli jobs wait "$demo_id" --timeout 30 > "$check_root/demo-wait.json"

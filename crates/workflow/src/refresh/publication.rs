@@ -169,9 +169,9 @@ pub fn execute(
     let mut outcomes = BTreeMap::new();
     let mut failures = BTreeMap::new();
     let (calendar_reference, calendar_attempts) =
-        reference_route(&p, request, &staging, context, DataRole::Calendar)?;
+        reference_route(&p, &base, request, &staging, context, DataRole::Calendar)?;
     let (member_reference, member_attempts) =
-        reference_route(&p, request, &staging, context, DataRole::Members)?;
+        reference_route(&p, &base, request, &staging, context, DataRole::Members)?;
     let mut calendar: Vec<Date> = if let Some(value) = &calendar_reference {
         serde_json::from_value(value["data"]["calendar"].clone())?
     } else {
@@ -285,9 +285,9 @@ pub fn execute(
     };
     if result.failures.is_empty() {
         let mut universes = BTreeMap::new();
-        for name in ["csi300", "csi500"] {
-            if let Ok(pool) = base.pool(name) {
-                universes.insert(name.to_owned(), pool);
+        for name in base.universe_names() {
+            if let Ok(pool) = base.pool(&name) {
+                universes.insert(name, pool);
             }
         }
         if let Some(value) = &member_reference {
@@ -316,7 +316,8 @@ pub fn execute(
             adjustment_anchors: anchors,
         };
         atomic_json(&output.join("market/daily_manifest.json"), &manifest)?;
-        atomic_json(&output.join("market/source_map.json"), base.source_map())?;
+        let mapping = publication_source_map(base.source_map(), &output.join("market"), &manifest)?;
+        atomic_json(&output.join("market/source_map.json"), &mapping)?;
         for name in ["calendar", "members"] {
             let root = staging.join(format!("reference-{name}"));
             if root.exists() {
@@ -340,4 +341,120 @@ pub fn execute(
     refresh_actions(w, run, request, &p, &staging, &mut result, context)?;
     atomic_json(&w.resolve(&run.output).join("refresh-result.json"), &result)?;
     Ok(serde_json::to_value(result)?)
+}
+
+fn publication_source_map(
+    base: &analytics_core::source_map::SourceMap,
+    root: &Path,
+    manifest: &DailyManifest,
+) -> Result<analytics_core::source_map::SourceMap> {
+    let mut mapping = base.clone();
+    for id in &manifest.instruments {
+        let record = AdjustmentRecord::read(root, id)?;
+        if record.index_input.is_some() {
+            let provider = match &record.basis {
+                analytics_storage::adjustment::AdjustmentBasis::PriceIndex { source }
+                    if source.starts_with("hithink.") =>
+                {
+                    "hithink"
+                }
+                analytics_storage::adjustment::AdjustmentBasis::PriceIndex { .. } => "tdxaidata",
+                _ => return Err("runtime index price basis changed".into()),
+            };
+            let coverage = DateRange {
+                start: *manifest
+                    .calendar
+                    .first()
+                    .ok_or("empty refreshed calendar")?,
+                end: *manifest.calendar.last().ok_or("empty refreshed calendar")?,
+            };
+            mapping.exceptions.insert(
+                id.clone(),
+                analytics_core::source_map::SourceException {
+                    exchange_symbol: String::new(),
+                    kind: "price_index".into(),
+                    coverage: coverage.clone(),
+                    locators: vec![analytics_core::source_map::SourceLocator {
+                        provider: provider.into(),
+                        symbol: record.source_symbol,
+                        coverage,
+                        evidence: vec![],
+                    }],
+                },
+            );
+        }
+    }
+    mapping.validate()?;
+    Ok(mapping)
+}
+#[cfg(test)]
+mod index_tests {
+    use super::*;
+    #[test]
+    fn refreshed_index_locator_scope_follows_new_snapshot_without_editing_the_base() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("adjustments")).unwrap();
+        let mut c = analytics_core::indices::builtin_config("csi1000").unwrap();
+        c.definition.id = "refresh_index".into();
+        c.definition.official_code = "REF001".into();
+        c.definition.symbol = None;
+        c.data_key = "IDX_refresh_index".into();
+        c.mappings = BTreeMap::from([("hithink".into(), "REF001.CSI".into())]);
+        let record = AdjustmentRecord {
+            schema_version: 4,
+            index_input: Some(Box::new(c.clone())),
+            instrument_id: c.data_key.clone(),
+            source_symbol: "REF001.CSI".into(),
+            basis: analytics_storage::adjustment::AdjustmentBasis::PriceIndex {
+                source: "hithink.a-share-index.prices.historical".into(),
+            },
+        };
+        atomic_json(
+            &root.path().join(format!("adjustments/{}.json", c.data_key)),
+            &record,
+        )
+        .unwrap();
+        let old = analytics_core::DateRange {
+            start: "2026-10-12".parse().unwrap(),
+            end: "2026-10-13".parse().unwrap(),
+        };
+        let base = analytics_core::source_map::SourceMap {
+            schema_version: 2,
+            exceptions: BTreeMap::from([(
+                c.data_key.clone(),
+                analytics_core::source_map::SourceException {
+                    exchange_symbol: String::new(),
+                    kind: "price_index".into(),
+                    coverage: old.clone(),
+                    locators: vec![analytics_core::source_map::SourceLocator {
+                        provider: "tdxaidata".into(),
+                        symbol: "SH000903".into(),
+                        coverage: old.clone(),
+                        evidence: vec![],
+                    }],
+                },
+            )]),
+        };
+        let end = "2026-10-16".parse().unwrap();
+        let m = DailyManifest {
+            schema_version: 6,
+            calendar: vec![old.start, end],
+            universes: Default::default(),
+            instruments: [c.data_key.clone()].into(),
+            price_basis: "unadjusted".into(),
+            normalization: analytics_storage::adjustment::HITHINK_NORMALIZATION.into(),
+            adjustment_anchors: Default::default(),
+        };
+        let updated = publication_source_map(&base, root.path(), &m).unwrap();
+        assert_eq!(updated.exceptions[&c.data_key].coverage.end, end);
+        assert_eq!(
+            updated.exceptions[&c.data_key].locators[0].symbol,
+            "REF001.CSI"
+        );
+        assert_eq!(
+            updated.exceptions[&c.data_key].locators[0].provider,
+            "hithink"
+        );
+        assert_eq!(base.exceptions[&c.data_key].coverage.end, old.end);
+    }
 }

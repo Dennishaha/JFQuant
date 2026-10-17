@@ -21,7 +21,7 @@ pub struct ResearchTemplate {
     /// Resolved template schema, currently 10; absence is unsupported.
     #[serde(default = "missing_template_version")]
     pub schema_version: u32,
-    /// Immutable pool version, or builtin:csi300/builtin:csi500 bound to the selected market.
+    /// Immutable pool version, or `builtin:<catalogue index ID>` bound to the selected market.
     pub pool_version: String,
     /// Explicit benchmark security for factor inputs and performance.
     pub benchmark: String,
@@ -123,6 +123,27 @@ impl ResearchTemplate {
     /// Load the CSI300 builtin recipe.
     pub fn builtin_csi300() -> Result<Self> {
         Self::builtin_target(true)
+    }
+    /// Build a recipe for a routed index, keeping factor and scheduling defaults.
+    /// Historical membership and benchmark coverage remain mandatory during checking.
+    pub fn builtin_index(id: &str) -> Result<Self> {
+        let index = analytics_core::indices::find(id).ok_or("unknown index ID")?;
+        let symbol = index
+            .symbol
+            .as_deref()
+            .ok_or("index_route_unavailable: catalogue entry requires a verified data source")?;
+        if id == "csi300" {
+            return Self::builtin_csi300();
+        }
+        if id == "csi500" {
+            return Self::builtin();
+        }
+        let mut template = Self::builtin()?;
+        template.pool_version = format!("builtin:{id}");
+        template.benchmark = symbol.into();
+        template.id = format!("gtja191-{id}-annual");
+        template.name = format!("GTJA191 / {}年度研究", index.name);
+        Ok(template)
     }
     fn builtin_target(csi300: bool) -> Result<Self> {
         let d: profiles::WorkflowDocument = serde_json::from_str(if csi300 {
@@ -344,6 +365,11 @@ pub enum WorkflowRequest {
         coefficients: String,
     },
 
+    /// Workspace index configuration and explicit scoped acquisition.
+    Index {
+        /// Shared runtime index operation.
+        request: crate::indices::IndexOperation,
+    },
     /// Save an immutable composed pool through the shared backend.
     SavePool {
         /// Validated composition and dated overrides.
@@ -526,6 +552,7 @@ impl WorkflowRequest {
             Self::InspectActions { .. } => "查看公司行动原值与实施证据".into(),
             Self::ReconcileActions { .. } => "自动核对公司行动并发布新版本".into(),
             Self::ReviseActions { .. } => "实施公告对账修订".into(),
+            Self::Index { .. } => "指数配置与验证".into(),
             Self::SavePool { .. } => "保存股票池版本".into(),
             Self::PreviewPool { .. } => "预览股票池成员".into(),
             Self::CreateCanonicalDemo {} => "创建Parquet合成演示数据".into(),

@@ -1105,6 +1105,42 @@ impl DailyDataset {
             serde_json::json!({"normalization":match self.kind {DailyKind::Qlib(_)=>"qlib-first-stored-factor-v2",DailyKind::Parquet(ref m)=>m.normalization.as_str()},"securities":securities}),
         )
     }
+    /// Runtime contract for a snapshot data key, without consulting mutable workspace state.
+    pub fn index_input(
+        &self,
+        key: &str,
+    ) -> io::Result<Option<analytics_core::indices::IndexConfig>> {
+        if !matches!(self.kind, DailyKind::Parquet(_)) {
+            return Ok(None);
+        }
+        Ok(self.adjustment_record(key)?.index_input.map(|c| *c))
+    }
+    /// Actual named memberships present in a canonical snapshot.
+    pub fn universe_names(&self) -> Vec<String> {
+        match &self.kind {
+            DailyKind::Parquet(m) => m.universes.keys().cloned().collect(),
+            DailyKind::Qlib(_) => analytics_core::indices::all()
+                .iter()
+                .map(|i| i.id.clone())
+                .collect(),
+        }
+    }
+    /// Frozen runtime definition from this snapshot, independent of the workspace directory.
+    pub fn index_config(&self, name: &str) -> io::Result<analytics_core::indices::IndexConfig> {
+        if let DailyKind::Parquet(m) = &self.kind {
+            for id in &m.instruments {
+                let record = self.adjustment_record(id)?;
+                if let Some(config) = record.index_input
+                    && config.definition.id == name
+                {
+                    return Ok(*config);
+                }
+            }
+        }
+        Err(invalid(
+            "index definition absent from selected data snapshot",
+        ))
+    }
     /// Immutable historical membership and explicit coverage.
     pub fn pool(&self, universe: &str) -> io::Result<PoolMembership> {
         match &self.kind {
@@ -1702,7 +1738,8 @@ mod tests {
     }
     fn record(points: &[(&str, &str)], end: Date) -> AdjustmentRecord {
         AdjustmentRecord {
-            schema_version: 3,
+            index_input: None,
+            schema_version: 4,
             instrument_id: "SH600000".into(),
             source_symbol: "SH600000".into(),
             basis: AdjustmentBasis::Explicit {

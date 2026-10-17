@@ -1,10 +1,10 @@
-当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务版本见 workflow::service::PROTOCOL_VERSION、采集协议13、来源策略2；接口、价格口径、构建和验收见[采集组件](collectors/README.md)。
+当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务版本见 workflow::service::PROTOCOL_VERSION、采集协议15、来源策略2；接口、价格口径、构建和验收见[采集组件](collectors/README.md)。
 
 ## 当前采集契约（2026-10-15）
 
 HiThink 为默认主源，由 Rust 直接调用 REST；通达信备用，维持内置 Python `tdxaidata==1.2.2`；巨潮公告使用独立 `cninfo` 来源。旧来源依赖、配置、权限检查及历史兼容入口已移除；旧数据不迁移、不删除，重新配置来源并采集。
 
-公共来源为 `hithink|tdxaidata|cninfo`，复权选项为 `hithink-forward|tdx-forward|none`。服务版本见 workflow::service::PROTOCOL_VERSION、采集协议13、来源策略2；HiThink 行情格式6，通达信格式5与 Qlib 读取保留。HiThink 训练选择供应商口径（`price_basis=provider`），前复权 OHLC、原始股数及人民币成交额、VWAP null；回测使用原价。训练缓存与 manifest 冻结口径、来源和证据哈希，特征顺序及公式版本保持。
+公共来源为 `hithink|tdxaidata|cninfo`，复权选项为 `hithink-forward|tdx-forward|none`。服务版本见 workflow::service::PROTOCOL_VERSION、采集协议15、来源策略2；HiThink 行情格式6，通达信格式5与 Qlib 读取保留。HiThink 训练选择供应商口径（`price_basis=provider`），前复权 OHLC、原始股数及人民币成交额、VWAP null；回测使用原价。训练缓存与 manifest 冻结口径、来源和证据哈希，特征顺序及公式版本保持。
 
 接口、凭据、覆盖范围与复现命令见[采集组件](collectors/README.md)。当前成分不能回填历史，下载成功不代表研究或账户资料完整。
 
@@ -122,7 +122,7 @@ flowchart LR
 
 ## 任务、协议与旧产物
 
-服务版本见 workflow::service::PROTOCOL_VERSION、Python采集协议13、来源策略2。协议或生产者签名不匹配的检查点不能恢复；旧来源数据、凭据和任务记录保留在用户工作区，但不进入新采集或研究。废弃任务重新采集，缺失事件字段通过巨潮证据修订。
+服务版本见 workflow::service::PROTOCOL_VERSION、Python采集协议15、来源策略2。协议或生产者签名不匹配的检查点不能恢复；旧来源数据、凭据和任务记录保留在用户工作区，但不进入新采集或研究。废弃任务重新采集，缺失事件字段通过巨潮证据修订。
 
 传输经过受监管进程，取消时kill并wait；超时、业务错误、身份/覆盖不足或证据篡改不得发布完整版本。HiThink完整窗口刷新与分段重叠校验、通达信单证券恢复和巨潮分页证据分别验收，不以拼接不同来源字段补齐行情。
 
@@ -210,3 +210,36 @@ Announcement PDF extraction is shared between complete CNINFO searches and selec
 补录分别报告 execution_ready（原价事实）与 research_ready（原归一化合同）；本版面向研究和执行同时发布，研究口径未通过时保持阻断。补录成交额／成交量后，仅在相关日期按原有原价×因子合同补算缺失 VWAP，已有 VWAP 不变；供应商价格合同中明确不可用的 VWAP 继续为空。矛盾的公告停复牌边界与全天停牌日正成交量均阻断，不按来源优先级覆盖。
 
 差异化现金分红人工审核沿用修订5：一份完整、已认证的正式实施公告即可；不要求多供应商一致。distribution_conflict 仅在原问题哈希及证券／除息日匹配、现金型 Differential、实际派息与参考现金分别引用并标明相同计量单位、登记／支付日期完整时允许显式关闭。新增分派审核收据1保存原问题，读取重验；其他问题、覆盖和失败记录保留。无通用强制通过开关。验收：`cargo test -p analytics-storage single_official_document`。
+
+## Common index acquisition
+
+Index identity and admissible price-index adjustment now use the shared core catalogue,
+including CSI1000/800/A500/all-share/dividend, SSE composite/50/180/STAR50 and SZSE
+component/100/ChiNext/ChiNext50, alongside CSI300/500. SH000001 is the SSE composite;
+SZ000001 remains a stock. Index quotes must be explicitly listed in `benchmarks` and
+never use stock adjustment routes. The TDX native stock-kind check is retained.
+
+HiThink current-member requests use the selected catalogue index code, with no CSI500
+fallback. TDX current-member collection remains limited to its existing CSI300/500
+implementation; unsupported requests stop before collection. Current-member responses
+cover their observed day only and cannot backfill training history. Provider permissions
+and actual requested quote coverage still need validation; the HiThink five-year index
+history limit is unchanged. Four catalogue-only entries cannot be submitted as native
+index quotes or universes until their source identity is implemented and verified.
+
+Acceptance: `DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-storage index_routes`.
+
+## 可配置指数采集
+
+`collector::validate_index`、`index_capabilities` 与正常采集共用：当前固定接口只接入
+CNY 价格指数。HiThink 接受确切供应商代码（或转换明确的 SH/SZ 代码），TDX 保持交易所代码约束。
+这表示接口能力，不证明某个指数或日期可用；历史成分能力均为 false。
+`CollectionRequest.index_inputs` 冻结定义，`source_bindings` 冻结对应供应商代码。
+行情及成分分别验证，当前成员仅覆盖观察日；查询不补造历史成员或转换币种。
+
+新指数调整记录格式4嵌入配置，读取时核对数据键、供应商来源、价格口径和映射；
+格式3明确拒绝，须显式离线迁移；未提供指数配置不能把普通证券认定成指数。
+`DailyDataset::index_config` 从所选快照解析定义，不读取可编辑目录。
+验收：`cargo test -p analytics-storage runtime_index`；TDX fixture 见 `collectors/tests/test_tdx.py`。
+
+本次指数接入格式已收敛：AdjustmentRecord 仅接受格式4（`index_input` 必填，普通证券及内置目录指数显式为 null，自定义指数冻结完整合同）；SourceMap 仅接受格式2，指数无可下单证券身份；CollectionRequest 必须显式包含 `index_inputs`（可为空对象）。正常读取不升级旧版本、不猜测缺失字段。旧快照只作历史留存，显式离线转换后必须以新内容哈希重新登记，原始响应及采集器身份不得改写成当前版本。服务协议33、采集协议15拒绝旧检查点；格式更新不等于来源准入通过。

@@ -30,6 +30,16 @@ def table():
 
 
 class TdxContracts(unittest.TestCase):
+    def test_runtime_index_routes_use_explicit_mapping_and_do_not_guess_members(self):
+        config = {"definition": {"id": "custom_index"}, "mappings": {"tdxaidata": "SH000903"}}
+        request = {"source_bindings": {"IDX_custom_index": "SH000903"}, "index_inputs": {"IDX_custom_index": config}, "index_member_codes": {"custom_index": "SH000903"}}
+        self.assertEqual(tdx.request_symbol(request, "IDX_custom_index"), "000903.SH")
+        self.assertEqual(tdx.member_code(request, "custom_index"), "000903.SH")
+        with self.assertRaises(ValueError):
+            tdx.member_code(request, "unknown_index")
+        with self.assertRaises(ValueError):
+            symbol("IDX_custom_index")
+
     def test_empty_actions_still_query_and_capture_independent_gp29(self):
         calls, responses, emitted = [], [], []
         class SDK:

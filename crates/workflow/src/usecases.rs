@@ -190,7 +190,8 @@ fn execute_scoped(
         | WorkflowRequest::BacktestPredictions { .. }
         | WorkflowRequest::BacktestResearch { .. }
         | WorkflowRequest::Research { .. } => research_jobs::execute(w, request, run, context),
-        WorkflowRequest::SavePool { .. }
+        WorkflowRequest::Index { .. }
+        | WorkflowRequest::SavePool { .. }
         | WorkflowRequest::PreviewPool { .. }
         | WorkflowRequest::CreateCanonicalDemo { .. }
         | WorkflowRequest::CreateDemo { .. }

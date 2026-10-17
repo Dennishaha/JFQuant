@@ -101,7 +101,34 @@ pub fn snapshot(workspace: &Workspace, request: &WorkflowRequest) -> Result<Valu
         }
         _ => analytics_factor::FORMULA_VERSION,
     };
-    let mut frozen = json!({"request":request,"inputs":versions,"app_version":env!("CARGO_PKG_VERSION"),"formula_version":formula_version,"pool_definition": match request { WorkflowRequest::Research{template,..}|WorkflowRequest::TrainResearch{template,..} if !template.pool_version.starts_with("builtin:") => Some(workspace.pool(&template.pool_version)?), _ => None }});
+    let mut frozen = json!({"request":request,"inputs":versions,"app_version":env!("CARGO_PKG_VERSION"),"formula_version":formula_version,"pool_definition": match request { WorkflowRequest::Research{template,..}|WorkflowRequest::TrainResearch{template,..} if !template.pool_version.starts_with("builtin:") && !template.pool_version.starts_with("index:") => Some(workspace.pool(&template.pool_version)?), _ => None }});
+    if let WorkflowRequest::Index {
+        request: crate::indices::IndexOperation::Import { path },
+    } = request
+    {
+        let config: analytics_core::indices::IndexConfig =
+            serde_json::from_slice(&fs::read(workspace.resolve(path))?)?;
+        config.validate()?;
+        frozen["index_import"] = serde_json::to_value(config)?;
+    }
+    if let WorkflowRequest::Index {
+        request:
+            crate::indices::IndexOperation::Verify {
+                version,
+                provider,
+                start,
+                end,
+                current_members,
+            },
+    } = request
+    {
+        let v = workspace.index(version)?;
+        crate::indices::collection(v.config.clone(), *provider, *start, *end, *current_members)?;
+        frozen["index_version"] = serde_json::to_value(v)?;
+        frozen["index_adapter_signature"] = serde_json::json!(
+            analytics_storage::collector::index_adapter_signature(*provider)
+        );
+    }
     if let WorkflowRequest::BacktestPredictions { source, .. } = request {
         let root = workspace.resolve(format!(".jfquant/runs/{source}"));
         let mut hashes = serde_json::Map::new();

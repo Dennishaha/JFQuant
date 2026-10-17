@@ -218,7 +218,7 @@ pub fn create_canonical(w: &Workspace) -> Result<(DataVersion, DataVersion, Rese
         use analytics_storage::adjustment::{
             AdjustmentBasis, AdjustmentPoint, AdjustmentRecord, FactorSource,
         };
-        let basis = if matches!(id.as_str(), "SH000905" | "SH000300") {
+        let basis = if analytics_core::indices::by_symbol(id).is_some() {
             AdjustmentBasis::PriceIndex {
                 source: "JFQuant analytics-workflow synthetic-demo-v1".into(),
             }
@@ -243,7 +243,8 @@ pub fn create_canonical(w: &Workspace) -> Result<(DataVersion, DataVersion, Rese
             }
         };
         let record = AdjustmentRecord {
-            schema_version: 3,
+            index_input: None,
+            schema_version: 4,
             instrument_id: fixture_security_id(id),
             source_symbol: id.clone(),
             basis,

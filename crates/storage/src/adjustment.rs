@@ -69,18 +69,28 @@ pub enum AdjustmentBasis {
         reason: String,
     },
 }
-/// Independent per-security file under adjustments/ID.json, format 3.
+/// Independent per-security file: format 4 coefficients with an explicit index contract slot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdjustmentRecord {
-    /// Adjustment record schema, 3.
+    /// Adjustment record schema, exactly 4.
     pub schema_version: u32,
+    /// Frozen custom index contract; explicit null for ordinary securities and catalogue indices.
+    #[serde(deserialize_with = "required_index_input")]
+    pub index_input: Option<Box<analytics_core::indices::IndexConfig>>,
     /// Exact internal security identity.
     pub instrument_id: String,
     /// Exact source/exchange locator for origin checks, never an account key.
     pub source_symbol: String,
     /// Source and actual dated values.
     pub basis: AdjustmentBasis,
+}
+// A custom deserializer makes the nullable field mandatory: serde's Option default must not
+// silently accept an omitted contract slot.
+fn required_index_input<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Box<analytics_core::indices::IndexConfig>>, D::Error> {
+    Option::deserialize(deserializer)
 }
 /// Frozen first valid raw closing observation and its independent coefficient.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -111,9 +121,36 @@ impl AdjustmentRecord {
     /// Validate source, securities, positivity and chronological uniqueness.
     pub fn validate(&self) -> io::Result<()> {
         validate_instrument(&self.instrument_id).map_err(invalid)?;
-        analytics_core::pool::validate_exchange_symbol(&self.source_symbol).map_err(invalid)?;
-        if self.schema_version != 3 {
-            return Err(invalid("unsupported_data_format: adjustment record"));
+        if self.schema_version != 4 {
+            return Err(invalid(
+                "unsupported_data_format: adjustment record; migrate explicitly",
+            ));
+        }
+        if let Some(index) = &self.index_input {
+            index.validate().map_err(invalid)?;
+            let provider = match &self.basis {
+                AdjustmentBasis::PriceIndex { source }
+                    if source == "hithink.a-share-index.prices.historical" =>
+                {
+                    crate::collector::Provider::Hithink
+                }
+                AdjustmentBasis::PriceIndex { source } if source == "tdxaidata.get_market_data" => {
+                    crate::collector::Provider::Tdxaidata
+                }
+                _ => {
+                    return Err(invalid(
+                        "runtime index requires supported price-index basis",
+                    ));
+                }
+            };
+            crate::collector::validate_index(index, provider)?;
+            if index.data_key != self.instrument_id
+                || index.mappings.get(provider.name()) != Some(&self.source_symbol)
+            {
+                return Err(invalid("index contract binding mismatch"));
+            }
+        } else {
+            analytics_core::pool::validate_exchange_symbol(&self.source_symbol).map_err(invalid)?;
         }
         match &self.basis {
             AdjustmentBasis::SupplierForward { .. } => {}
@@ -123,7 +160,7 @@ impl AdjustmentRecord {
                 verified_through,
                 points,
             } => {
-                if matches!(self.source_symbol.as_str(), "SH000300" | "SH000905") {
+                if analytics_core::indices::by_symbol(&self.source_symbol).is_some() {
                     return Err(invalid("verified price index requires identity basis"));
                 }
                 let expected: String = match source {
@@ -148,7 +185,8 @@ impl AdjustmentRecord {
                 }
             }
             AdjustmentBasis::PriceIndex { source } => {
-                if !matches!(self.source_symbol.as_str(), "SH000300" | "SH000905")
+                if (self.index_input.is_none()
+                    && analytics_core::indices::by_symbol(&self.source_symbol).is_none())
                     || !matches!(
                         source.as_str(),
                         "hithink.a-share-index.prices.historical"
@@ -230,7 +268,8 @@ mod tests {
     use super::*;
     fn record() -> AdjustmentRecord {
         AdjustmentRecord {
-            schema_version: 3,
+            index_input: None,
+            schema_version: 4,
             instrument_id: "SH600000".into(),
             source_symbol: "SH600000".into(),
             basis: AdjustmentBasis::Explicit {
@@ -249,6 +288,17 @@ mod tests {
                 ],
             },
         }
+    }
+    #[test]
+    fn legacy_records_and_omitted_contract_slot_are_rejected() {
+        let mut r = record();
+        r.schema_version = 3;
+        assert!(r.validate().is_err());
+        let mut json = serde_json::to_value(record()).unwrap();
+        assert!(json["index_input"].is_null());
+        assert!(serde_json::from_value::<AdjustmentRecord>(json.clone()).is_ok());
+        json.as_object_mut().unwrap().remove("index_input");
+        assert!(serde_json::from_value::<AdjustmentRecord>(json).is_err());
     }
     #[test]
     fn coefficients_are_dated_and_cannot_fill_from_the_future() {

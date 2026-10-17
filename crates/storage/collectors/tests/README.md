@@ -8,3 +8,6 @@ DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-storage
 ```
 
 Rust验收还覆盖受监管子进程的取消、超时、签名及恢复、公告证据修订。线上服务权限、历史覆盖和长期稳定性必须通过账户实际请求验证，不能从fixture通过推断。完整接口与环境见[采集组件](../README.md)。
+
+运行时指数映射 fixture 位于 `test_tdx.py`：显式供应商映射、当前成员路线及未知路线拒绝。
+不访问真实 SDK 网络，不将当前成员作为历史覆盖。

@@ -204,6 +204,7 @@ pub(super) fn execute(
             let staging = w.root.join(format!(".jfquant/staging/actions-{owner}"));
             let dataset = DailyDataset::open(w.resolve(&market_version.path))?;
             let request = analytics_storage::collector::CollectionRequest {
+                index_inputs: Default::default(),
                 source_bindings: Default::default(),
                 provider: analytics_storage::collector::Provider::Hithink,
                 adjustment_source: analytics_storage::adjustment::AdjustmentSource::HithinkForward,

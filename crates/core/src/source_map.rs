@@ -29,11 +29,11 @@ pub struct SourceException {
     /// Provider-specific paths, with dated boundaries.
     pub locators: Vec<SourceLocator>,
 }
-/// Minimal mapping format 1. Empty means direct-code access, not an unreviewed directory.
+/// Explicit source mapping: format 2 with non-orderable index identities.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SourceMap {
-    /// Current format, 1.
+    /// Explicit format 2.
     pub schema_version: u32,
     /// Only special aliases, code changes or reused codes need entries.
     pub exceptions: BTreeMap<String, SourceException>,
@@ -41,7 +41,7 @@ pub struct SourceMap {
 impl Default for SourceMap {
     fn default() -> Self {
         Self {
-            schema_version: 1,
+            schema_version: 2,
             exceptions: BTreeMap::new(),
         }
     }
@@ -62,13 +62,19 @@ pub fn validate_key(id: &str) -> Result<(), String> {
 impl SourceMap {
     /// Validate only actual exceptions, without requiring records for ordinary securities.
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema_version != 1 {
+        if self.schema_version != 2 {
             return Err("unsupported source-map format".into());
         }
         let mut assigned: BTreeMap<(&str, &str), Vec<(&str, &DateRange)>> = BTreeMap::new();
         for (id, e) in &self.exceptions {
             validate_key(id)?;
-            crate::pool::validate_exchange_symbol(&e.exchange_symbol)?;
+            if e.kind == "price_index" {
+                if !e.exchange_symbol.is_empty() {
+                    return Err("index has no stock execution identity".into());
+                }
+            } else {
+                crate::pool::validate_exchange_symbol(&e.exchange_symbol)?;
+            }
             e.coverage.validate().map_err(|e| e.to_string())?;
             if !matches!(e.kind.as_str(), "a_share" | "price_index") {
                 return Err("invalid source-map asset kind".into());
@@ -77,7 +83,11 @@ impl SourceMap {
                 if removed_source(&l.provider) {
                     return Err("removed_provider: reconfigure source map".into());
                 }
-                validate_key(&l.symbol)?;
+                if e.kind == "price_index" {
+                    crate::indices::validate_locator(&l.symbol)?;
+                } else {
+                    validate_key(&l.symbol)?;
+                }
                 l.coverage.validate().map_err(|e| e.to_string())?;
                 if l.coverage.start < e.coverage.start || l.coverage.end > e.coverage.end {
                     return Err("source interval outside exception scope".into());
@@ -109,6 +119,9 @@ impl SourceMap {
     /// Resolve market rules for this date; ordinary codes are accepted directly.
     pub fn exchange_symbol<'a>(&'a self, id: &'a str, date: Date) -> Result<&'a str, String> {
         if let Some(e) = self.exceptions.get(id) {
+            if e.kind == "price_index" {
+                return Err("index is not an orderable stock".into());
+            }
             if !e.coverage.contains(date) {
                 return Err("source_interval_invalid".into());
             }
@@ -130,7 +143,7 @@ impl SourceMap {
     pub fn is_price_index(&self, id: &str) -> bool {
         self.exceptions
             .get(id)
-            .map_or(matches!(id, "SH000300" | "SH000905"), |e| {
+            .map_or(crate::indices::by_symbol(id).is_some(), |e| {
                 e.kind == "price_index"
             })
     }
@@ -138,6 +151,13 @@ impl SourceMap {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_source_maps_are_rejected() {
+        let mut map = SourceMap::default();
+        map.validate().unwrap();
+        map.schema_version = 1;
+        assert!(map.validate().is_err());
+    }
     #[test]
     fn ordinary_codes_need_no_directory_and_special_aliases_do_not_join() {
         let mut m = SourceMap::default();
@@ -178,7 +198,7 @@ mod tests {
             evidence: vec![],
         };
         let m = SourceMap {
-            schema_version: 1,
+            schema_version: 2,
             exceptions: BTreeMap::from([(
                 "SHT00018".into(),
                 SourceException {

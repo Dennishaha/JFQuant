@@ -2,7 +2,7 @@
 
 HiThink 为默认主源，由 Rust 直接调用 REST；通达信备用，维持内置 Python `tdxaidata==1.2.2`；巨潮公告使用独立 `cninfo` 来源。旧来源依赖、配置、权限检查及历史兼容入口已移除；旧数据不迁移、不删除，重新配置来源并采集。
 
-公共来源为 `hithink|tdxaidata|cninfo`，复权选项为 `hithink-forward|tdx-forward|none`。服务协议21、采集协议13、来源策略2；HiThink 行情格式6，通达信格式5与 Qlib 读取保留。HiThink 训练选择供应商口径（`price_basis=provider`），前复权 OHLC、原始股数及人民币成交额、VWAP null；回测使用原价。训练缓存与 manifest 冻结口径、来源和证据哈希，特征顺序及公式版本保持。
+公共来源为 `hithink|tdxaidata|cninfo`，复权选项为 `hithink-forward|tdx-forward|none`。服务协议21、采集协议15、来源策略2；HiThink 行情格式6，通达信格式5与 Qlib 读取保留。HiThink 训练选择供应商口径（`price_basis=provider`），前复权 OHLC、原始股数及人民币成交额、VWAP null；回测使用原价。训练缓存与 manifest 冻结口径、来源和证据哈希，特征顺序及公式版本保持。
 
 接口、凭据、覆盖范围与复现命令见[采集组件](../collectors/README.md)。当前成分不能回填历史，下载成功不代表研究或账户资料完整。
 
@@ -82,7 +82,7 @@ cargo nextest run -p analytics-cli -E 'test(standard_download) | test(retired_ac
 
 ## 独立系数接口
 
-[adjustment.rs](adjustment.rs)定义格式3的独立系数记录，含证券、源地址、观察末日和按日期升序的points；规范行情本身为格式5。DailyDataset::adjustment_factors返回原始系数对账，raw_volume返回真实股数，field生成研究OHLC、倒数缩放的研究量和实际金额VWAP；零量VWAP为null。price_inputs冻结源哈希、精度、覆盖、锚点与规则，进入缓存、模型和研究签名。供应商adj列是证据，保留有限负值，不参与正式计算。
+[adjustment.rs](adjustment.rs)定义格式4的独立系数记录，含证券、源地址、观察末日和按日期升序的points；规范行情本身为格式5。DailyDataset::adjustment_factors返回原始系数对账，raw_volume返回真实股数，field生成研究OHLC、倒数缩放的研究量和实际金额VWAP；零量VWAP为null。price_inputs冻结源哈希、精度、覆盖、锚点与规则，进入缓存、模型和研究签名。供应商adj列是证据，保留有限负值，不参与正式计算。
 
 底层field保留Qlib字段单位：volume为研究股数/100，amount为实际人民币元/1000；ML的prepare_year统一乘回100和1000后再交给GTJA191。因此正式因子输入是股数/k及人民币元，两种读取器结果一致；raw_volume始终返回真实股数，执行账本不会读取调整量。
 
@@ -183,3 +183,5 @@ GP29确认停牌日且缺少原始日线/成交量为零时，在日频账户适
 HiThink 公司行动查询失败按未知证券、参数、认证、权限、限流、上游与传输错误区分；1002 仅在原始消息精确匹配请求代码时认定未知证券。失败仍阻断准入，并持久化每只证券的 `*-actions-failure.json` 及全部 HTTP 响应、状态、URL 和哈希，不将失败当作无事件成功。
 
 同一除权日多行（包括完全重复行）保留在原始响应中，生成稳定的 `source_event_conflict` 核对项，不自动求和、去重或放弃其他日期。每行的身份、范围和金额先严格验证；正式公告经现有字段证据修订及问题哈希核对后方可消除冲突。供应商已完整返回的历史覆盖与事件条款冲突分别记录，账户执行继续遵守未解决问题的暴露检查。验收：`cargo test -p analytics-storage hithink::tests` 和现有公司行动修订测试。
+
+本次指数接入格式已收敛：AdjustmentRecord 仅接受格式4（`index_input` 必填，普通证券及内置目录指数显式为 null，自定义指数冻结完整合同）；SourceMap 仅接受格式2，指数无可下单证券身份；CollectionRequest 必须显式包含 `index_inputs`（可为空对象）。正常读取不升级旧版本、不猜测缺失字段。旧快照只作历史留存，显式离线转换后必须以新内容哈希重新登记，原始响应及采集器身份不得改写成当前版本。服务协议33、采集协议15拒绝旧检查点；格式更新不等于来源准入通过。

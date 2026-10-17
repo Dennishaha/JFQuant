@@ -494,6 +494,7 @@ mod tests {
         assert!(report.details["entries"].is_array());
         let collection = WorkflowRequest::CollectActions {
             request: analytics_storage::collector::CollectionRequest {
+                index_inputs: Default::default(),
                 provider: analytics_storage::collector::Provider::Hithink,
                 adjustment_source: analytics_storage::adjustment::AdjustmentSource::HithinkForward,
                 start: "2020-01-01".parse().unwrap(),

@@ -301,11 +301,11 @@ pub(super) fn finish_collection(
     };
     save(&staging.join("market/daily_manifest.json"), &manifest)?;
     let source_map = analytics_core::source_map::SourceMap {
-        schema_version: 1,
+        schema_version: 2,
         exceptions: request
             .source_bindings
             .iter()
-            .filter(|(id, source)| id != source)
+            .filter(|(id, source)| id != source || request.index_inputs.contains_key(*id))
             .map(|(id, source)| {
                 let coverage = analytics_core::DateRange {
                     start: request.start,
@@ -314,7 +314,11 @@ pub(super) fn finish_collection(
                 (
                     id.clone(),
                     analytics_core::source_map::SourceException {
-                        exchange_symbol: source.clone(),
+                        exchange_symbol: if request.benchmarks.contains(id) {
+                            String::new()
+                        } else {
+                            source.clone()
+                        },
                         kind: if request.benchmarks.contains(id) {
                             "price_index"
                         } else {
@@ -353,7 +357,7 @@ pub(super) fn finish_collection(
     }
     save(
         &staging.join("jfquant_source.json"),
-        &json!({"downloader":"JFQuant analytics-storage","independent_download":true,"snapshot_verified":true,"exception_bindings":!request.source_bindings.is_empty(),"provider":request.provider,"request":request,"evidence_sha256":evidence_hashes,"collector_protocol":13,"versions":complete["versions"],"collector_signature":complete["collector_signature"],"python_runtime":serde_json::from_slice::<Value>(include_bytes!("../../collectors/python-runtime.lock.json")).map_err(invalid)?,"calendar_source":if request.provider==Provider::Tdxaidata {"tdxaidata.get_trading_dates"} else {"unsupported"},"dependencies_sha256":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(include_bytes!("../../collectors/requirements.lock")))),"price_basis":manifest.price_basis,"normalization":manifest.normalization,"adjustment_source":request.adjustment_source,"adjustment_anchors":manifest.adjustment_anchors}),
+        &json!({"downloader":"JFQuant analytics-storage","independent_download":true,"snapshot_verified":true,"exception_bindings":!request.source_bindings.is_empty(),"provider":request.provider,"request":request,"evidence_sha256":evidence_hashes,"collector_protocol":COLLECTOR_PROTOCOL,"versions":complete["versions"],"collector_signature":complete["collector_signature"],"python_runtime":serde_json::from_slice::<Value>(include_bytes!("../../collectors/python-runtime.lock.json")).map_err(invalid)?,"calendar_source":if request.provider==Provider::Tdxaidata {"tdxaidata.get_trading_dates"} else {"unsupported"},"dependencies_sha256":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(include_bytes!("../../collectors/requirements.lock")))),"price_basis":manifest.price_basis,"normalization":manifest.normalization,"adjustment_source":request.adjustment_source,"adjustment_anchors":manifest.adjustment_anchors}),
     )?;
     Ok(staging.join("market"))
 }

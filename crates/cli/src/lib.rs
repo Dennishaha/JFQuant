@@ -1,4 +1,5 @@
 //! Clap frontend only: task execution and lifecycle live in analytics-workflow.
+mod indices;
 use analytics_core::{ExportFormat, ExportRequest, PageRequest, SortKey};
 use analytics_workflow::{
     ResearchTemplate, WorkflowRequest, Workspace,
@@ -35,6 +36,11 @@ pub struct Cli {
 pub enum Command {
     #[command(subcommand)]
     Workspace(WorkspaceCommand),
+    /// List built-in index identities and configured source routes (offline).
+    Indices {
+        #[command(subcommand)]
+        command: Option<IndexCommand>,
+    },
     #[command(subcommand)]
     Data(DataCommand),
     #[command(subcommand)]
@@ -62,6 +68,31 @@ pub enum Command {
     SelfCheck {
         #[arg(long)]
         output: PathBuf,
+    },
+}
+#[derive(Debug, Subcommand)]
+pub enum IndexCommand {
+    /// List builtin seeds and immutable workspace versions without network acquisition.
+    List,
+    /// Save portable JSON through the shared worker (same as import).
+    Import { path: PathBuf },
+    /// Structural and adapter validation, without saving or connecting.
+    Validate { path: PathBuf },
+    /// Show a verified immutable version, or `builtin:<id>`.
+    Show { version: String },
+    /// Export portable JSON to a workspace-relative path.
+    Export { version: String, output: PathBuf },
+    /// Collect the requested index dates through the normal adapter and publish a snapshot.
+    Verify {
+        version: String,
+        #[arg(long, value_enum, default_value = "hithink")]
+        provider: CollectionProvider,
+        #[arg(long)]
+        start: String,
+        #[arg(long)]
+        end: String,
+        #[arg(long)]
+        current_members: bool,
     },
 }
 #[derive(Debug, Subcommand)]
@@ -110,6 +141,9 @@ pub enum DataCommand {
         provider: CollectionProvider,
         #[arg(long, value_enum)]
         adjustment_source: Option<CollectionAdjustment>,
+        /// Portable frozen index configuration files; use indices export first.
+        #[arg(long = "index-config")]
+        index_configs: Vec<PathBuf>,
         #[arg(long)]
         start: String,
         #[arg(long)]
@@ -798,8 +832,11 @@ pub enum TemplateCommand {
         factor_set: FactorSetValue,
         #[arg(long)]
         output: Option<PathBuf>,
-        #[arg(long, default_value="csi500", value_parser=["csi300","csi500"])]
+        #[arg(long, default_value = "csi500")]
         universe: String,
+        /// Immutable runtime index version; overrides the builtin universe selection.
+        #[arg(long)]
+        index_version: Option<String>,
     },
     Validate {
         path: PathBuf,
@@ -881,6 +918,9 @@ pub fn wait(client: &Client, id: Uuid, timeout: Option<u64>) -> Result<Value, Se
 }
 
 pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
+    if let Some(result) = indices::offline(&cli)? {
+        return Ok(result);
+    }
     if let Command::Workspace(WorkspaceCommand::Create { path }) = &cli.command {
         let w = Workspace::open(path).map_err(invalid)?;
         return Ok(json!({"workspace":w.root()}));
@@ -937,6 +977,10 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
     client.ensure(None)?;
     let mut synchronous = false;
     let task = match cli.command {
+        Command::Indices {command}=>match indices::prepare(&client,command.expect("offline catalogue handled before connecting"))? {
+            indices::Action::Read(value)=>return Ok(value),
+            indices::Action::Task {request,synchronous:wait}=>{synchronous=wait;workflow(request)}
+        },
         Command::Workspace(WorkspaceCommand::Show) | Command::Service(ServiceCommand::Status) => {
             return client.call(Rpc::Status);
         }
@@ -1066,6 +1110,7 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
                 kind,
                 provider,
                 adjustment_source,
+                index_configs,
                 start,
                 end,
                 instruments,
@@ -1085,6 +1130,7 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
                     },
                 };
                 let mut request = analytics_storage::collector::CollectionRequest {
+                    index_inputs: Default::default(),
                     source_bindings: Default::default(),
                     adjustment_source,
                     provider: match provider {
@@ -1104,6 +1150,13 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
                     benchmarks: benchmarks.into_iter().collect(),
                     universes: universes.into_iter().collect(),
                 };
+                for path in index_configs {
+                    let config:analytics_core::indices::IndexConfig=read(&client.root,&path)?;
+                    analytics_storage::collector::validate_index(&config,request.provider).map_err(invalid)?;
+                    if !request.benchmarks.contains(&config.data_key) {return Err(invalid("index config key must be explicitly included in benchmarks and instruments"));}
+                    request.source_bindings.insert(config.data_key.clone(),config.mappings[request.provider.name()].clone());
+                    if request.index_inputs.insert(config.data_key.clone(),config).is_some() {return Err(invalid("duplicate index configuration"));}
+                }
                 if matches!(
                     kind,
                     CollectionKind::Actions | CollectionKind::Announcements
@@ -1471,13 +1524,12 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
                     output,
                     universe,
                     factor_set,
+                    index_version,
                 } => {
-                    let mut t = if universe == "csi300" {
-                        ResearchTemplate::builtin_csi300()
-                    } else {
-                        ResearchTemplate::builtin()
-                    }
-                    .map_err(invalid)?;
+                    let mut t = if let Some(version)=index_version {
+                        let value=client.call(Rpc::IndexTemplate {id:version})?;
+                        serde_json::from_value(value).map_err(invalid)?
+                    } else {ResearchTemplate::builtin_index(&universe).map_err(invalid)?};
                     t.select_factor_set(match factor_set {
                         FactorSetValue::Gtja191 => {
                             analytics_core::research_quality::FactorSet::Gtja191

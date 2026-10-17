@@ -13,6 +13,8 @@ use uuid::Uuid;
 /// Workspace catalog and durable task list; contains no native handles.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WorkspaceView {
+    /// Verified runtime index versions and builtin seeds.
+    pub index_versions: Vec<crate::indices::IndexVersion>,
     /// Verified registered input versions.
     pub datasets: Vec<DataVersion>,
     /// Current active-generation records.
@@ -39,6 +41,7 @@ fn workspace(root: &Path) -> Result<Workspace> {
 pub fn overview(root: &Path) -> Result<WorkspaceView> {
     let w = workspace(root)?;
     Ok(WorkspaceView {
+        index_versions: w.indices()?,
         datasets: w.datasets()?,
         runs: w.runs()?,
     })

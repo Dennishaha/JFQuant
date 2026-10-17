@@ -155,6 +155,7 @@ pub fn research_panel(
                 if ui.button("中证500默认模板").clicked(){state.platform.template=ResearchTemplate::builtin().expect("builtin");state.platform.schedule_editor.clear();state.platform.date_editor_valid=true;crate::schedule_ui::reset(ui);}
                 if ui.button("沪深300默认模板").clicked(){state.platform.template=ResearchTemplate::builtin_csi300().expect("builtin");state.platform.schedule_editor.clear();state.platform.date_editor_valid=true;crate::schedule_ui::reset(ui);}
             });
+            super::indices::research_selectors(ui, &mut state.platform.template, &state.platform.index_versions);
             ui.horizontal(|ui| {ui.label("股票池版本");ui.text_edit_singleline(&mut state.platform.template.pool_version);ui.label("基准证券");ui.text_edit_singleline(&mut state.platform.template.benchmark);});
             use analytics_core::pool::PoolExitPolicy;
             ui.horizontal(|ui| {ui.label("移除持仓");ui.selectable_value(&mut state.platform.template.pool_exit_policy,PoolExitPolicy::NextTradableDay,"下一可交易日退出");ui.selectable_value(&mut state.platform.template.pool_exit_policy,PoolExitPolicy::NextRebalance,"下次正常调仓退出");});

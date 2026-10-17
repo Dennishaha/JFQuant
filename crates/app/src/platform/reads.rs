@@ -72,6 +72,7 @@ pub(super) fn poll(state: &mut PlatformState, ctx: &egui::Context) {
                 if state.workspace.as_ref().is_some_and(|w| w.root() == root) {
                     match result {
                         Ok(view) => {
+                            state.index_versions = view.index_versions;
                             state.datasets = view.datasets;
                             state.runs = view.runs;
                             if state.market.is_empty() {

@@ -14,7 +14,7 @@ pub(super) fn collect_with_command(
     fs::create_dir_all(staging.join("market/adjustments"))?;
     fs::create_dir_all(staging.join("raw"))?;
     let owner = staging.join("owner.json");
-    let mut owner_value = json!({"operation":operation,"request":request,"collector_protocol":13,"normalization":NORMALIZATION,
+    let mut owner_value = json!({"operation":operation,"request":request,"collector_protocol":COLLECTOR_PROTOCOL,"normalization":NORMALIZATION,
         "collector_signature":collector_signature(),"dependencies_sha256":dependencies_signature(),
         "python_runtime_sha256":format!("sha256:{:x}",analytics_core::hash::Hex(Sha256::digest(include_bytes!("../../collectors/python-runtime.lock.json"))))});
     if operation == "reconcile_actions" {
@@ -171,7 +171,7 @@ pub(super) fn collect_with_command(
         log.sync_all()
     });
     let mut payload = serde_json::to_value(request).map_err(invalid)?;
-    payload["version"] = json!(13);
+    payload["version"] = json!(COLLECTOR_PROTOCOL);
     payload["expected_collector_signature"] = json!(collector_signature());
     payload["operation"] = json!(operation);
     if operation == "reconcile_actions" {
@@ -208,6 +208,33 @@ pub(super) fn collect_with_command(
             .map(|id| request.source_bindings.get(id).unwrap_or(id))
             .collect::<Vec<_>>()
     );
+    payload["index_inputs"] = json!(
+        request
+            .index_inputs
+            .iter()
+            .map(|(id, c)| (request.source_bindings.get(id).unwrap_or(id), c))
+            .collect::<BTreeMap<_, _>>()
+    );
+    let member_codes = request
+        .universes
+        .iter()
+        .map(|name| {
+            let config = request
+                .index_inputs
+                .values()
+                .find(|c| &c.definition.id == name)
+                .cloned()
+                .or_else(|| analytics_core::indices::builtin_config(name))
+                .ok_or_else(|| invalid("index member definition missing"))?;
+            let code = config
+                .mappings
+                .get(request.provider.name())
+                .ok_or_else(|| invalid("index member mapping missing"))?
+                .clone();
+            Ok((name.clone(), code))
+        })
+        .collect::<io::Result<BTreeMap<_, _>>>()?;
+    payload["index_member_codes"] = json!(member_codes);
     payload["security_ids"] = json!(native);
     payload["cache_dir"] = json!(cache);
     writeln!(input, "{}", payload)?;
@@ -284,7 +311,7 @@ pub(super) fn collect_with_command(
                             }
                         }
                     }
-                    if msg["version"] != 13 {
+                    if msg["version"] != COLLECTOR_PROTOCOL {
                         return Err(invalid("collector_protocol_mismatch"));
                     }
                     if completed.is_some() {
@@ -440,7 +467,10 @@ pub(super) fn collect_with_command(
                                 }
                                 _ => false,
                             };
-                            if adjustment.instrument_id != id || !allowed {
+                            if adjustment.instrument_id != id
+                                || !allowed
+                                || adjustment.index_input.as_deref() != request.index_inputs.get(id)
+                            {
                                 return Err(invalid("adjustment source/security mismatch"));
                             }
                             if !matches!(adjustment.basis, AdjustmentBasis::Unavailable { .. }) {

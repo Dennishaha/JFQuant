@@ -14,6 +14,7 @@ use std::{
 };
 use uuid::Uuid;
 mod evidence;
+mod indices;
 mod reads;
 pub struct PlatformState {
     pub(crate) reads: reads::ReadState,
@@ -53,8 +54,16 @@ pub struct PlatformState {
     pub adjustment_source: analytics_storage::adjustment::AdjustmentSource,
     pub collection_symbols: String,
     pub collection_benchmarks: String,
-    pub collection_csi300: bool,
-    pub collection_csi500: bool,
+    pub collection_universes: std::collections::BTreeSet<String>,
+    pub collection_index_inputs:
+        std::collections::BTreeMap<String, analytics_core::indices::IndexConfig>,
+    pub index_versions: Vec<analytics_workflow::indices::IndexVersion>,
+    pub index_editor: String,
+    pub index_path: String,
+    pub index_version: String,
+    pub index_current_members: bool,
+    pub index_query: String,
+    pub index_selection: String,
     pub pool_editor: String,
     pub pool_preview_date: String,
     pub start: String,
@@ -123,8 +132,15 @@ impl Default for PlatformState {
             adjustment_source: analytics_storage::adjustment::AdjustmentSource::HithinkForward,
             collection_symbols: "SH600000,SZ000001,SH000300".into(),
             collection_benchmarks: "SH000300".into(),
-            collection_csi300: false,
-            collection_csi500: false,
+            collection_universes: Default::default(),
+            collection_index_inputs: Default::default(),
+            index_versions: vec![],
+            index_editor: String::new(),
+            index_path: "index.json".into(),
+            index_version: String::new(),
+            index_current_members: false,
+            index_query: String::new(),
+            index_selection: "msci_a50".into(),
             pool_editor: String::new(),
             pool_preview_date: "2026-10-12".into(),
             start: "2013-01-01".into(),

@@ -1,4 +1,4 @@
-当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议29、采集协议13、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
+当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议33、采集协议15、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
 
 # analytics-desktop
 
@@ -18,7 +18,7 @@ flowchart LR
 配置独立编辑；任务开始时冻结，关闭界面不终止后台。界面支持进度、取消、重试、
 仅训练和使用已有模型回测，展示训练产物与回测停止原因。
 
-当前服务29、工作流10、训练描述4/5、模型manifest3、结果20。旧结果不按当前口径解释，
+当前服务32、工作流10、训练描述4/5、模型manifest3、结果20。旧结果不按当前口径解释，
 状态和日志仍可查看。研究页展示AKQuant事件日口径及执行费用合计，不展示已删除的
 精细权益账本，不提供不支持的净佣、配股认购或个人分红扣税控件。
 
@@ -42,7 +42,7 @@ DUCKDB_DOWNLOAD_LIB=1 cargo nextest run -p analytics-desktop
 当前结果对未模拟特殊事件显示“回测完成，含未模拟事件”，并保留未解决普通问题的阻断状态。
 核对规则、格式6与复现命令见storage/workflow组件README。验收包含公共任务、结果警告与旧格式隔离。
 
-原生刷新现在以3个证券工作线程获取行情和公司行动，沿用监督进程、检查点、取消及完整发布校验。后端`RefreshRequest`允许1—8线程及显式跨任务分片复用；公共`RefreshCoverage`只读RPC可读取进度、历史成员覆盖及候选可用池，报告不自动授权训练或改变股票池。CLI命令及完整验收见[工作流README](../workflow/README.md)。服务协议29。
+原生刷新现在以3个证券工作线程获取行情和公司行动，沿用监督进程、检查点、取消及完整发布校验。后端`RefreshRequest`允许1—8线程及显式跨任务分片复用；公共`RefreshCoverage`只读RPC可读取进度、历史成员覆盖及候选可用池，报告不自动授权训练或改变股票池。CLI命令及完整验收见[工作流README](../workflow/README.md)。服务协议33。
 
 “更新行动”按钮使用同一Rust动作分片流程，保持当前登记行情，重新获取事件；不读废弃动作版本作为补采输入。
 
@@ -59,7 +59,7 @@ Packaged CLI acceptance also invokes `research verify --task <UUID>` after the t
 
 因子页提供只读Alpha158/GTJA191组，以及复制、改名、编辑说明、筛选、保存、删除自定义组；
 “应用到研究配置”只替换因子选择，保留日期和股票池。修改内置组必须先复制。
-“因子有效性测试”独立发送服务协议29的EvaluateFactors任务，支持进度和取消；默认5日、5分层、
+“因子有效性测试”独立发送服务协议33的EvaluateFactors任务，支持进度和取消；默认5日、5分层、
 30个日内有效样本。报告展示覆盖率、配对率、有效天数、IC、RankIC、RankIC IR、正RankIC比例、
 高减低收益，展开查看每日统计与分层收益，可导出JSON及逐项加入自定义选择后保存。
 结果使用冻结参数，即使表单后来改变也不会改写报告；模型训练仍保留原入口。
@@ -93,7 +93,7 @@ Packaged CLI acceptance also invokes `research verify --task <UUID>` after the t
 
 A/B可重叠，横截面计算互相隔离；B不参与验证或早停。首日没有合法模型则拒绝回测。
 账户跨模型连续运行；报告显示曾见/未见标的及同一账户贡献，预测可独立重放。
-旧“年度研究/仅训练/已有模型回测”入口保持原配置语义。服务协议29，结果20仅读取当前格式。
+旧“年度研究/仅训练/已有模型回测”入口保持原配置语义。服务协议33，结果20仅读取当前格式。
 
 ```bash
 DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-desktop independent_training_and_backtest_editors
@@ -142,3 +142,30 @@ Independent backtest plans expose `evidence_only` and `research_transitions`. Th
 证据维护面板支持公告停复牌区间及逐边界原文引用、仅导入原生停牌证据、行情修订JSON载入／编辑／预览／发布。行情预览显示原价与研究值、研究和执行可用性及逐项冲突，输入、所选市场或任务改变后显示过期。业务校验和发布均走工作流后台，不在UI线程使用数据库或模型句柄。服务协议31，生成数据不随源码提交。
 
 差异化现金分红可在同一修订编辑器中人工审核：单份充分、已核验的正式文件即可，实际派息与除息参考分别维护字段引用及单位。预览和发布使用共享校验，只解除匹配证券、日期及原问题哈希的冲突；历史失败和其他问题继续显示，不要求多个来源一致。
+
+## Common index catalogue
+
+The Data panel includes a searchable19-entry catalogue with official links, role,
+currency, return basis and quote-route status.15 domestic indices can be added to both
+quote and index lists or selected as a research pool/benchmark. Research selectors reuse
+the same catalogue and retain factors and schedules; result charts display the actual
+benchmark name instead of a fixed CSI500 label. Current-member controls expose provider
+capabilities and never treat today's constituent list as historical membership.
+
+MSCI China A50 Connect RMB (746059), FTSE A50, CSI A50 and CSI2000 are distinctly labelled
+as awaiting data-source mappings. They remain inspectable and cannot be selected as
+executable builtin pools/benchmarks. UI selection performs no collection, training or
+source substitution. App/CLI use `analytics_core::indices`; all metadata is compiled
+into the binary and needs no source directory at runtime.
+
+Acceptance: `DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-desktop index_catalogue`;
+build/distribution commands remain the packaging commands above.
+
+## 指数配置维护
+
+数据页“维护指数配置”支持选择版本、编辑 JSON、生成示例、导入、导出及显式验证采集。
+文件和网络操作在现有 worker 中执行；验证沿用正常采集任务的进度、取消与报告持久化。
+研究页使用同一工作区目录选择基准和股票池；历史成员是否可用仍以所选数据版本为准。
+保存产生不可变版本，旧任务读取冻结快照。编辑内容与原报告不一致时显示过期提示；
+新任务重新校验，不依赖单独的通过标记。验证结果见运行记录，包含实际覆盖和能力边界。
+验收：`cargo test -p analytics-desktop runtime_index_editor`，包内命令见 CLI README。

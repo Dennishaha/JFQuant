@@ -79,3 +79,9 @@ Regression compares the optimized sets against the original observation-by-obser
 验证：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow --lib`；`python3 crates/workflow/checks/architecture.py`。
 
 完整原生公告批次的空白修订草稿同时填入覆盖审核骨架（查询日期、全部候选ID、源版本哈希、默认九类）；审核理由留空且校验未通过。审核人必须调整实际证明的事件日期/类别并审阅候选，查询日期本身不代表事件覆盖。选定PDF批次不生成完整覆盖骨架。
+
+## Allocation modules
+
+`allocation` defines strict shared config, independent weight/time verification and signed artifact manifests. `allocation_reference` maintains a separate fractional event-aware account. `allocation_migration` is the sole legacy reader for this upgrade, with offline preview/apply/resume/rollback. `allocation_comparison` checks frozen same-input completed methods. Multi-strategy orchestration lives beside research execution in `research/backtest/combined.rs`; App/CLI dispatch the same WorkflowRequest variants. Current protocol: service39 / worker3 / result21 / template11 / independent-backtest-plan3.
+
+`research/backtest/allocation_readiness.rs`在训练前检查冻结日历上的预测、参考账、正式账户边界，输出最早就绪日期下界；`allocation.rs`独立验证下一开盘生效、求解/目标一致性和账户换手。迁移模块覆盖中断归档和中断回滚恢复，未知注册格式阻断服务启动。

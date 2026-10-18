@@ -20,6 +20,7 @@ pub fn research_panel(
         return;
     }
     let enabled = !state.busy() && state.worker_error.is_none();
+    super::allocation::panel(ui, state, worker, cancel_slot, enabled);
     let mut save = false;
     let mut load = false;
     let mut export = false;
@@ -232,6 +233,25 @@ pub fn research_panel(
                     .speed(10000.0)
                     .range(1.0..=1e13),
             );
+        });
+        ui.collapsing("组合优化（目标仓位98%）", |ui| {
+            use analytics_workflow::allocation::AllocationMethod;
+            let c = &mut t.config.allocation;
+            egui::ComboBox::from_id_salt("allocation_method").selected_text(format!("{:?}",c.method)).show_ui(ui,|ui| {
+                for (m,label) in [(AllocationMethod::Equal,"等权"),(AllocationMethod::MinimumVariance,"最小方差"),(AllocationMethod::RiskBudgeting,"风险预算"),(AllocationMethod::MeanVariance,"预测收益均值方差")] {ui.selectable_value(&mut c.method,m,label);}
+            });
+            ui.horizontal(|ui|{ui.label("单股权重上限");ui.add(egui::DragValue::new(&mut c.max_stock_weight).range(0.001..=1.).speed(0.01));ui.label("风险历史窗口");ui.add(egui::DragValue::new(&mut c.risk_window).range(2..=10000));});
+            let mut turnover = c.max_turnover.is_some();
+            if ui.checkbox(&mut turnover,"限制全账户目标换手（L1）").changed(){c.max_turnover=turnover.then_some(1.);}
+            if let Some(v)=&mut c.max_turnover {ui.add(egui::DragValue::new(v).range(0.0..=2.).speed(0.01));}
+            if c.method==AllocationMethod::MeanVariance {
+                ui.label("必须显式设置风险厌恶参数；评分按已实现样本外收益校准。");
+                let mut enabled=c.risk_aversion.is_some();if ui.checkbox(&mut enabled,"设置风险厌恶参数").changed(){c.risk_aversion=enabled.then_some(1.);}
+                if let Some(v)=&mut c.risk_aversion {ui.add(egui::DragValue::new(v).range(0.000001..=1e8).speed(0.1));}
+                ui.horizontal(|ui|{ui.label("校准窗口");ui.add(egui::DragValue::new(&mut c.calibration_window).range(2..=10000));ui.label("最少日期");ui.add(egui::DragValue::new(&mut c.calibration_min_days).range(2..=10000));ui.label("每日配对证券");ui.add(egui::DragValue::new(&mut c.calibration_min_pairs).range(3..=10000));});
+            }
+            ui.small("收益期限匹配调仓周期；历史不足、不可行和求解异常均失败，不自动降级。");
+            if let Err(e)=c.validate_count(t.config.top_n){ui.colored_label(egui::Color32::YELLOW,e.to_string());}
         });
         ui.horizontal(|ui| {
             ui.label("佣金比例");
@@ -487,6 +507,9 @@ pub fn research_panel(
                     worker,
                     cancel_slot,
                     WorkflowRequest::BacktestPredictions {
+                        allocation: Some(Box::new(
+                            state.platform.template.config.allocation.clone(),
+                        )),
                         source,
                         actions: state.platform.actions.clone(),
                         rights_policy: state.platform.rights_policy.clone(),
@@ -537,7 +560,7 @@ fn independent_panel(
             if ui.add_enabled(enabled,egui::Button::new("查询已训练模型")).clicked() {match state.platform.training_job.parse() {Ok(training)=>submit(state,worker,cancel_slot,WorkflowRequest::Independent {request:Box::new(Job::Models {training})}),Err(_)=>state.platform.error=Some("训练任务ID无效".into())}}
         });
         ui.horizontal(|ui| {
-            if ui.button("生成独立回测计划").clicked() {let result=(|| -> Result<BacktestPlan,String> {Ok(BacktestPlan {schema_version:2,training:state.platform.training_job.parse().map_err(|_|"请先填写训练任务ID")?,models:ModelSelection::Rolling,pool_version:state.platform.template.pool_version.clone(),range:analytics_core::DateRange {start:state.platform.start.parse().map_err(|_|"开始日期无效")?,end:state.platform.end.parse().map_err(|_|"结束日期无效")?},market:state.platform.market.clone(),actions:state.platform.actions.clone(),benchmark:state.platform.template.benchmark.clone(),quality_policy:state.platform.template.quality_policy.clone(),execution:state.platform.template.execution_settings(),event_check_policy:state.platform.template.event_check_policy})})();match result {Ok(p)=>state.platform.independent_backtest_editor=serde_json::to_string_pretty(&p).unwrap(),Err(e)=>state.platform.error=Some(e)}}
+            if ui.button("生成独立回测计划").clicked() {let result=(|| -> Result<BacktestPlan,String> {Ok(BacktestPlan {schema_version:3,training:state.platform.training_job.parse().map_err(|_|"请先填写训练任务ID")?,models:ModelSelection::Rolling,pool_version:state.platform.template.pool_version.clone(),range:analytics_core::DateRange {start:state.platform.start.parse().map_err(|_|"开始日期无效")?,end:state.platform.end.parse().map_err(|_|"结束日期无效")?},market:state.platform.market.clone(),actions:state.platform.actions.clone(),benchmark:state.platform.template.benchmark.clone(),quality_policy:state.platform.template.quality_policy.clone(),execution:state.platform.template.execution_settings(),event_check_policy:state.platform.template.event_check_policy})})();match result {Ok(p)=>state.platform.independent_backtest_editor=serde_json::to_string_pretty(&p).unwrap(),Err(e)=>state.platform.error=Some(e)}}
             if ui.button("导出独立回测JSON").clicked() && let Some(p)=rfd::FileDialog::new().set_file_name("backtest-B.json").save_file() {match serde_json::from_str::<BacktestPlan>(&state.platform.independent_backtest_editor) {Ok(plan)=>{if let Err(e)=fs::write(p,serde_json::to_vec_pretty(&plan).unwrap()){state.platform.error=Some(e.to_string());}},Err(e)=>state.platform.error=Some(e.to_string())}}
             if ui.button("导入独立回测JSON").clicked() && let Some(p)=rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file() {match fs::read_to_string(p) {Ok(v)=>state.platform.independent_backtest_editor=v,Err(e)=>state.platform.error=Some(e.to_string())}}
         });

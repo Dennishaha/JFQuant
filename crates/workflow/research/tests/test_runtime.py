@@ -10,7 +10,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from jfquant_research.backtest import backtest
+from allocation_fixture import backtest
 from jfquant_research.training import train, predict
 
 

@@ -135,6 +135,10 @@ pub(super) fn inputs(
         }
     }
     report.dependency_ranges = serde_json::to_value(ranges)?;
+    if request.output.join("allocation-readiness.json").is_file() {
+        report.samples["allocation"] =
+            serde_json::from_slice(&fs::read(request.output.join("allocation-readiness.json"))?)?;
+    }
     if !report.missing_counts.is_empty() {
         report
             .warnings
@@ -233,6 +237,10 @@ pub(super) fn samples(
     }
     report.admission = admission.clone();
     report.samples = serde_json::json!({"selection":selections,"factor_receipts":receipts,"training_readiness_checked":report.plan.purpose!="backtest"});
+    if request.output.join("allocation-readiness.json").is_file() {
+        report.samples["allocation"] =
+            serde_json::from_slice(&fs::read(request.output.join("allocation-readiness.json"))?)?;
+    }
     report.stages[2].status = CheckStatus::Passed;
     report.stages[3].status = if issues.is_empty() && admission.ready() {
         CheckStatus::Passed

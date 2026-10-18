@@ -183,7 +183,9 @@ fn execute_scoped(
         WorkflowRequest::InspectActions { .. }
         | WorkflowRequest::ReconcileActions { .. }
         | WorkflowRequest::ReviseActions { .. } => actions::execute(w, request, run, context),
-        WorkflowRequest::Independent { .. }
+        WorkflowRequest::CompareAllocations { .. }
+        | WorkflowRequest::Combined { .. }
+        | WorkflowRequest::Independent { .. }
         | WorkflowRequest::PreviewResearch { .. }
         | WorkflowRequest::PrepareResearchData { .. }
         | WorkflowRequest::TrainResearch { .. }

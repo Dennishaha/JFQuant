@@ -317,7 +317,7 @@ impl Trainer for LightGbmTrainer {
             factor_definitions: Vec::new(),
         };
         let mut value = serde_json::to_value(manifest)?;
-        value["runtime"] = serde_json::json!({"worker":worker::runtime_signature(),"dependencies":worker::dependency_signature(),"lightgbm":"4.7.0"});
+        value["runtime"] = serde_json::json!({"worker":worker::training_runtime_signature(),"dependencies":worker::training_dependency_signature(),"lightgbm":"4.7.0"});
         fs::write(
             output.join("manifest.json"),
             serde_json::to_vec_pretty(&value)?,

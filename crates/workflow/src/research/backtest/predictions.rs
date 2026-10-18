@@ -48,7 +48,7 @@ fn identity(request: &ResearchRequest, factors: &str, folds: &[ResolvedFold]) ->
             folds,
             &execution["independent"],
             &request.quality_policy,
-            crate::research::worker::runtime_signature(),
+            crate::research::worker::training_runtime_signature(),
         ));
     }
     if let Some(source) = &request.reuse_predictions {
@@ -136,7 +136,7 @@ fn identity(request: &ResearchRequest, factors: &str, folds: &[ResolvedFold]) ->
             &training["models"],
             &training["feature_order"],
             &request.quality_policy,
-            crate::research::worker::runtime_signature()
+            crate::research::worker::training_runtime_signature()
         ))?))
     ))
 }

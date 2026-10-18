@@ -13,6 +13,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use uuid::Uuid;
+mod allocation;
 mod evidence;
 mod history;
 mod indices;
@@ -35,6 +36,9 @@ pub struct PlatformState {
     pub independent_backtest_editor: String,
     pub independent_models: Value,
     pub prediction_job: String,
+    pub combined_editor: String,
+    pub combined_sources: String,
+    pub allocation_editor: String,
     pub rights_policy: analytics_core::rights::Policy,
     pub action_review_instrument: String,
     pub action_evidence_manifest: String,
@@ -109,6 +113,9 @@ impl Default for PlatformState {
             independent_backtest_editor: String::new(),
             independent_models: Value::Null,
             prediction_job: String::new(),
+            combined_editor: String::new(),
+            combined_sources: String::new(),
+            allocation_editor: String::new(),
             rights_policy: Default::default(),
             action_review_editor: String::new(),
             evidence_tools: Default::default(),

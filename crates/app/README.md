@@ -190,3 +190,11 @@ build/distribution commands remain the packaging commands above.
 资料操作提供与CLI相同的结构化Register/Extract/Inspect/Review接口；不在UI读取PDF、联网或持有数据库。页面分别显示当前诊断、历史追溯、未证明交易日和连续区间；支持同上下文预览任务对比；不提供旧格式转换入口。高级JSON保留完整可维护字段，任务返回新草稿，需载入后继续编辑。
 
 构建与安装包验收：`crates/app/packaging/package-macos.sh`，包含PNG、包内PDF内嵌图片提取、人工核对及离线发布/股票池冒烟测试，不依赖源码或JFQlib。
+
+## 股票优化与多策略账户
+
+研究页提供四种组合方法、持仓上限、风险窗口、换手限制和显式风险厌恶参数。完整配置编辑器支持校准门槛及三个预热/执行起点。多策略区域接受冻结任务ID，生成/编辑计划，并通过与CLI相同的后台任务完成输入检查、统一账户执行和同输入方法对照。结果显示最近100次权重/资金漂移决策、参考净值、现金和锁定资产，完整证据保留在任务产物；实际收益及费用使用统一成交账本。
+
+新建小股票池可能因默认单股上限10%不可行，必须显式修改上限；不自动放宽。UI不持有DuckDB、LightGBM或优化器句柄。历史配置先使用CLI离线迁移，App不自动转换旧协议。
+
+验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-desktop`及`bash crates/app/packaging/package-macos.sh`；另一台Apple Silicon/macOS14设备的实机验收仍需实际执行。

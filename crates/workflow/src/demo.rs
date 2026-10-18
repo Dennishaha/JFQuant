@@ -140,6 +140,7 @@ pub fn create(w: &Workspace) -> Result<(DataVersion, DataVersion, ResearchTempla
         expanding: false,
         until: None,
     };
+    t.config.allocation.max_stock_weight = 1.;
     t.config.top_n = 1;
     t.config.rebalance_days = 1;
     t.config.factor_ids = vec!["alpha_002".into()];

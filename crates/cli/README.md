@@ -348,3 +348,19 @@ jfquant --workspace /research indices history compare --before PREVIEW_TASK --af
 每次材料操作返回新的`history_request`，并在`output`指向的任务目录保存`history-request-v2.json`，可直接复制为下一步草稿；原草稿不原地修改。先在请求`transcriptions`填写原图ID、哈希、像素区域和录入文字，再显式review。人工含义确认不替代名单、生效时间或完整事件链。单个可信来源可用；不新增事前可知时间放行方式。补证清单见`history_report.issues`，历史失败在`trace`。
 
 验收：`cargo test -p analytics-cli indices --lib`；包内离线迁移/图片/PDF/发布/股票池闭环使用`bash crates/app/packaging/verify-history.sh /path/JFQuant.app /tmp/history-check`。
+
+## 组合优化
+
+研究模板11中的allocation为显式完整配置。既有训练/回测/输入检查入口共享该配置；`research replay-predictions --allocation /absolute/allocation.json`可在冻结评分上改变优化方法，不加载或重训模型。省略该选项时保留来源配置。
+
+```bash
+jfquant --workspace "$JFQUANT_WORKSPACE" research combined-plan --sources UUID_A,UUID_B --start 2024-01-02 --end 2024-12-31 > /tmp/combined.json
+jfquant --workspace "$JFQUANT_WORKSPACE" research combined --plan /tmp/combined.json --check
+jfquant --workspace "$JFQUANT_WORKSPACE" research combined --plan /tmp/combined.json
+jfquant --workspace "$JFQUANT_WORKSPACE" research compare-allocations --tasks EQUAL_UUID,OPTIMIZED_UUID
+jfquant --workspace "$JFQUANT_WORKSPACE" research verify --task COMPLETED_UUID
+```
+
+日期必须为市场交易日；来源任务覆盖完整预热和执行区间，禁止递归组合。compare-allocations检查相同预测、市场、事件、区间、周期和账户规则，并要求等权基线。任务仍由jobs wait/results及现有导出操作读取。显式离线迁移使用workspace migrate-allocation，详见workflow README。
+
+迁移外部工作流时，其工作区外的factors/target引用也须逐份通过`--config`列入清单；缺失引用、未知格式和绝对profile引用会阻断。迁移同时归档已登记研究任务、旧因子缓存及工作区runs下具有研究审计标记的历史目录，保留证据采集任务。

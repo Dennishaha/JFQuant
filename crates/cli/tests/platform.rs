@@ -652,6 +652,14 @@ fn current_research_cli_and_api_share_results_and_reject_old_imports_without_mod
     ]);
     let cli_id = value["task_id"].as_str().unwrap().parse().unwrap();
     let actual = s.client.wait(cli_id, Some(15)).unwrap();
+    let allocation_input = |task: Uuid| {
+        serde_json::from_slice::<Value>(
+            &std::fs::read(w.resolve(format!(".jfquant/runs/{task}/allocation-input.json")))
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    assert_eq!(allocation_input(cli_id), allocation_input(id));
     assert_eq!(actual["results"], expected);
     assert_eq!(
         expected["schema_version"],
@@ -1552,7 +1560,7 @@ fn independent_fit_models_preview_and_new_pool_backtest_share_service() {
         })
         .unwrap();
     let plan = BacktestPlan {
-        schema_version: 2,
+        schema_version: 3,
         training: training.parse().unwrap(),
         models: ModelSelection::Rolling,
         pool_version: pool.id,
@@ -1782,4 +1790,74 @@ fn runtime_indices_roundtrip_without_compilation_and_queries_do_not_create_tasks
             .status
             .success()
     );
+}
+
+#[test]
+fn combined_cli_uses_frozen_targets_and_the_shared_account_verifier() {
+    let s = Sandbox::new();
+    let w = Workspace::open(&s.client.root).unwrap();
+    let (m, a, t) = analytics_workflow::demo::create_canonical(&w).unwrap();
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let context = analytics_core::task::TaskContext::default();
+        let request = WorkflowRequest::Research {
+            template: Box::new(t.clone()),
+            market: m.id.clone(),
+            actions: Some(a.id.clone()),
+            audit_only: false,
+        };
+        let mut run = w
+            .begin(
+                context.id,
+                "allocation source",
+                analytics_workflow::snapshot(&w, &request).unwrap(),
+            )
+            .unwrap();
+        analytics_workflow::execute(&w, &request, &run, &context).unwrap();
+        w.finish(&mut run, analytics_workflow::RunStatus::Succeeded, None)
+            .unwrap();
+        ids.push(run.id.to_string());
+    }
+    let mut plan = s.json(&[
+        "research",
+        "combined-plan",
+        "--sources",
+        &ids.join(","),
+        "--start",
+        "2010-01-02",
+        "--end",
+        "2010-01-12",
+    ]);
+    plan["execution"] = serde_json::to_value(t.execution_settings()).unwrap();
+    std::fs::write(
+        w.resolve("combined.json"),
+        serde_json::to_vec_pretty(&plan).unwrap(),
+    )
+    .unwrap();
+    let check = s.json(&["research", "combined", "--plan", "combined.json", "--check"]);
+    let check = s.json(&[
+        "jobs",
+        "wait",
+        check["task_id"].as_str().unwrap(),
+        "--timeout",
+        "30",
+    ]);
+    assert_eq!(check["record"]["status"], "succeeded");
+    let submitted = s.json(&["research", "combined", "--plan", "combined.json"]);
+    let task = submitted["task_id"].as_str().unwrap();
+    let done = s.json(&["jobs", "wait", task, "--timeout", "30"]);
+    assert_eq!(done["results"]["kind"], "combined");
+    assert_eq!(
+        s.json(&["research", "verify", "--task", task])["status"],
+        "consistent"
+    );
+    let compared = s.json(&["research", "compare-allocations", "--tasks", &ids.join(",")]);
+    let compared = s.json(&[
+        "jobs",
+        "wait",
+        compared["task_id"].as_str().unwrap(),
+        "--timeout",
+        "30",
+    ]);
+    assert_eq!(compared["record"]["status"], "succeeded");
 }

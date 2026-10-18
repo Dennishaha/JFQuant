@@ -186,6 +186,15 @@ pub enum IndexHistoryCommand {
 }
 #[derive(Debug, Subcommand)]
 pub enum WorkspaceCommand {
+    /// Offline explicit allocation migration; no runtime legacy readers.
+    MigrateAllocation {
+        #[arg(long)]
+        apply: bool,
+        #[arg(long, conflicts_with = "apply")]
+        rollback: bool,
+        #[arg(long = "config")]
+        configs: Vec<PathBuf>,
+    },
     Create {
         path: PathBuf,
     },
@@ -712,6 +721,27 @@ impl QualityOptions {
 
 #[derive(Debug, Subcommand)]
 pub enum ResearchCommand {
+    /// Compare successful same-input tasks; one must be equal-weight.
+    CompareAllocations {
+        #[arg(long, value_delimiter=',', num_args=1..)]
+        tasks: Vec<Uuid>,
+    },
+    /// Generate a current multi-strategy plan from explicit frozen task IDs.
+    CombinedPlan {
+        #[arg(long, value_delimiter=',', num_args=1..)]
+        sources: Vec<Uuid>,
+        #[arg(long)]
+        start: String,
+        #[arg(long)]
+        end: String,
+    },
+    /// Check sources/coverage, or run a single net stock account.
+    Combined {
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long)]
+        check: bool,
+    },
     /// Fit-only plan: no test dates required.
     Fit {
         #[arg(long)]
@@ -759,6 +789,9 @@ pub enum ResearchCommand {
     },
     /// Replay a completed task's published scores without loading or training models.
     ReplayPredictions {
+        /// Explicit allocation JSON; otherwise retain source configuration.
+        #[arg(long)]
+        allocation: Option<PathBuf>,
         #[arg(long)]
         source: Uuid,
         #[arg(long)]
@@ -1053,6 +1086,15 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
     if matches!(cli.command, Command::Service(ServiceCommand::Serve)) {
         analytics_workflow::service::serve(&root)?;
         return Ok(Value::Null);
+    }
+    if let Command::Workspace(WorkspaceCommand::MigrateAllocation {
+        apply,
+        rollback,
+        configs,
+    }) = &cli.command
+    {
+        return analytics_workflow::allocation_migration::run(&root, configs, *apply, *rollback)
+            .map_err(invalid);
     }
     if let Command::Workspace(WorkspaceCommand::Maintain { apply }) = &cli.command {
         return if *apply {
@@ -1409,6 +1451,17 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
         },
         Command::Model(ModelCommand::Artifacts { id }) => return client.call(Rpc::Results { id }),
         Command::Research(command) => match *command {
+            ResearchCommand::CompareAllocations {tasks} => workflow(WorkflowRequest::CompareAllocations {tasks}),
+            ResearchCommand::CombinedPlan {sources,start,end} => {
+                let t=analytics_workflow::ResearchTemplate::default();
+                let plan=analytics_workflow::research::backtest::combined::CombinedPortfolioPlan {schema_version:1,sources,range:analytics_core::DateRange{start:start.parse().map_err(invalid)?,end:end.parse().map_err(invalid)?},execution:t.execution_settings()};
+                plan.validate().map_err(invalid)?;return serde_json::to_value(plan).map_err(invalid);
+            },
+            ResearchCommand::Combined {plan,check} => {
+                let plan=read(&client.root,&plan)?;
+                let request=if check {analytics_workflow::research::backtest::combined::Job::Check{plan}}else{analytics_workflow::research::backtest::combined::Job::Run{plan}};
+                workflow(WorkflowRequest::Combined {request:Box::new(request)})
+            },
             ResearchCommand::Fit {plan,market,actions} => workflow(WorkflowRequest::Independent {request:Box::new(analytics_workflow::research::backtest::independent::Job::Train {plan:Box::new(read(&client.root,&plan)?),market,actions})}),
             ResearchCommand::FitInputs {plan,market,actions,prepare,announcements} => workflow(WorkflowRequest::Independent {request:Box::new(analytics_workflow::research::backtest::independent::Job::TrainingInputs {plan:Box::new(read(&client.root,&plan)?),market,actions,prepare,announcements})}),
             ResearchCommand::Models {training} => workflow(WorkflowRequest::Independent {request:Box::new(analytics_workflow::research::backtest::independent::Job::Models {training})}),
@@ -1504,7 +1557,8 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
                 market,
                 actions,
             }),
-            ResearchCommand::ReplayPredictions { source, actions, participation, attempt, insufficient_cash } => workflow(WorkflowRequest::BacktestPredictions {
+            ResearchCommand::ReplayPredictions { source, actions, allocation, participation, attempt, insufficient_cash } => workflow(WorkflowRequest::BacktestPredictions {
+                allocation:allocation.map(|p|read(&client.root,&p).map(Box::new)).transpose()?,
                 source, actions, rights_policy: serde_json::from_value(serde_json::json!({"participation":participation,"attempt":attempt,"insufficient_cash":insufficient_cash})).map_err(invalid)?,
             }),
             ResearchCommand::Backtest {
@@ -1564,7 +1618,7 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
                 },
                 TemplateCommand::ModelBacktest {template,training,market,actions,start,end,output}=> {
                     let t=ResearchTemplate::read(&resolve(&client.root,&template)).map_err(invalid)?;
-                    let plan=analytics_workflow::research::backtest::independent::BacktestPlan {schema_version:2,training,models:Default::default(),pool_version:t.pool_version.clone(),range:analytics_core::DateRange {start,end},market,actions,benchmark:t.benchmark.clone(),quality_policy:t.quality_policy.clone(),execution:t.execution_settings(),event_check_policy:t.event_check_policy};
+                    let plan=analytics_workflow::research::backtest::independent::BacktestPlan {schema_version:3,training,models:Default::default(),pool_version:t.pool_version.clone(),range:analytics_core::DateRange {start,end},market,actions,benchmark:t.benchmark.clone(),quality_policy:t.quality_policy.clone(),execution:t.execution_settings(),event_check_policy:t.event_check_policy};
                     plan.validate().map_err(invalid)?;
                     fs::write(resolve(&client.root,&output),serde_json::to_vec_pretty(&plan).map_err(invalid)?).map_err(invalid)?;
                     Ok(json!({"output":output,"plan":plan}))

@@ -40,6 +40,8 @@ pub struct TargetProfile {
 #[serde(deny_unknown_fields)]
 #[allow(missing_docs)]
 pub struct WorkflowDocument {
+    /// Explicit allocation settings.
+    pub allocation: crate::allocation::AllocationConfig,
     pub schema_version: u32,
     pub id: String,
     pub name: String,
@@ -139,11 +141,11 @@ impl TargetProfile {
 impl WorkflowDocument {
     /// Resolve shared profiles into the single common request used by App and CLI.
     pub fn resolve(self, f: FactorProfile, u: TargetProfile) -> Result<ResearchTemplate> {
-        if self.schema_version != 10 {
+        if self.schema_version != 11 {
             return Err("unsupported_workflow_template_format".into());
         }
         let mut t = ResearchTemplate {
-            schema_version: 10,
+            schema_version: 11,
             id: self.id,
             name: self.name,
             schedule: self.schedule,
@@ -151,6 +153,7 @@ impl WorkflowDocument {
             event_check_policy: self.event_check_policy,
             quality_policy: self.quality_policy,
             config: ResearchConfig {
+                allocation: self.allocation,
                 top_n: self.top_n,
                 rebalance_days: self.rebalance_days,
                 training: self.training,
@@ -212,7 +215,7 @@ impl WorkflowDocument {
         persist(&parent.join(&fp), &f)?;
         persist(&parent.join(&up), &u)?;
         let d = Self {
-            schema_version: 10,
+            schema_version: 11,
             id: t.id.clone(),
             name: t.name.clone(),
             factors: fp,
@@ -221,6 +224,7 @@ impl WorkflowDocument {
             action_policy: t.action_policy.clone(),
             event_check_policy: t.event_check_policy,
             quality_policy: t.quality_policy.clone(),
+            allocation: t.config.allocation.clone(),
             top_n: t.config.top_n,
             rebalance_days: t.config.rebalance_days,
             training: t.config.training.clone(),

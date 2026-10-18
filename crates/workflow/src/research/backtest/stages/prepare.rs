@@ -231,6 +231,23 @@ pub(super) fn prepare(
         .partition_point(|d| *d < pool.coverage.start)
         .min(dataset.calendar.len() - 1);
     let mut admission_issues = Vec::<String>::new();
+    if !request.train_only {
+        let allocation = allocation_readiness::report(
+            &request.config.allocation,
+            request.config.top_n,
+            request.config.rebalance_days,
+            &dataset.calendar,
+            &folds,
+        )?;
+        if allocation["ready"] != true {
+            admission_issues
+                .push("allocation warmup incomplete; see allocation-readiness.json".into());
+        }
+        save(
+            request.output.join("allocation-readiness.json"),
+            &allocation,
+        )?;
+    }
     if quality_snapshot
         .decisions
         .iter()

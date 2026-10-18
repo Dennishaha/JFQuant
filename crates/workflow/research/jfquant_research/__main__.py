@@ -15,7 +15,7 @@ from . import PROTOCOL_VERSION
 
 def signature():
     digest = hashlib.sha256()
-    for name in ("__init__.py", "__main__.py", "training.py", "backtest.py"):
+    for name in ("__init__.py", "__main__.py", "training.py", "backtest.py", "combined.py", "allocation.py"):
         digest.update(name.encode() + b"\0" + Path(__file__).with_name(name).read_bytes() + b"\0")
     return "sha256:" + digest.hexdigest()
 

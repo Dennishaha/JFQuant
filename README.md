@@ -80,3 +80,9 @@ crates/app/packaging/package-macos.sh
 打包通过锁定wheel获取LightGBM和AKQuant，只编译OpenMP辅助库。包内Python全部Mach-O
 对象通过arm64、macOS14、依赖路径审核。另一台干净Apple Silicon/macOS14设备的
 安装、离线读取及取消验收需要在实际设备执行，不能由本机测试代替。
+
+## 组合优化与统一账户
+
+股票评分后支持等权、最小方差、风险预算及滚动样本外校准的均值方差；多策略引用冻结目标，通过一个AKQuant账户净额成交。98%为目标仓位，实际漂移、拒单和锁定资产单独披露。参考账允许分数股且无费用，不能代替扣费收益。
+
+当前协议39、worker3、结果21、回测计划3、模板11；正常运行拒绝旧格式。本地显式迁移与验收见[工作流组件](crates/workflow/README.md#组合优化与离线迁移)。

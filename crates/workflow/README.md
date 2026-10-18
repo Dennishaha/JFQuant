@@ -291,3 +291,44 @@ flowchart LR
 ```
 
 验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow history_ --lib`；`python3 crates/workflow/checks/architecture.py`。研究数据、模型和既有因子合同不改变。
+
+## 组合优化与离线迁移
+
+`allocation::AllocationConfig`是股票和策略共用的目标合同，缺少新字段时拒绝读取。默认等权、风险窗口252、单股上限0.1、策略上限0.6、无换手限制；固定目标仓位0.98。小股票池须显式提高上限，否则失败。均值方差必须填写正的risk_aversion。收益期限与调仓周期一致，收益端点必须已经实现；不填零、删候选或降级。
+
+`research::backtest::combined::{CombinedPortfolioPlan,Job}`接受2—20个成功原生股票策略任务，不递归组合。来源市场、日历和事件政策一致；提交冻结来源字节，worker重验。参考账从目标、原价和事件事实重建，独立维护分数股、现金、待执行目标和锁定资产。普通参考初始资金为1 CNY，事件要求的离散数量及现金舍入仍保留，因此涉及离散权益时不能假定资金规模完全不影响参考结果。
+
+```mermaid
+flowchart LR
+  P[冻结样本外预测] --> A[股票优化与目标收据]
+  A --> R[独立参考账与资金漂移]
+  R --> C[策略配置 / 股票净额]
+  C --> N[单账户AKQuant成交]
+  N --> V[Rust账本与目标约束复核]
+```
+
+prediction_start指定已有调度必须生成的历史样本外预测起点；reference_start指定参考账预热起点；execution_start指定正式账户起点。null使用既有调度/执行区间。不会用训练预测补足历史，也不自动移动起点。allocation-readiness.json在训练前列出三类区间、缺口与最早可能就绪日期下界；App输入检查直接展示。具体候选与收益端点随真实样本外预测再次核验。正式收益排除预热；风险需要252个完整H期观测，校准默认至少60个有效横截面、每日30个配对证券。
+
+因子、训练、校准、优化和成交分别留痕；训练签名只绑定训练代码及所用库，不因优化配置变化失效。完整产物包含allocation-input.json、allocation_report.json、allocation-manifest.json、reference-targets.json、reference-input.json、reference-account.json和reference-event-checks.json；最终执行签名绑定其哈希。calibration、optimization、execution分别记录代码及依赖签名；校准收据按评分日期关联模型拟合截止日、策略合同、配对数量和H日收益端点。求解器不精确状态附带警告，风险预算显式报告贡献偏离。
+
+服务39、worker3、研究结果21、独立回测计划3、模板/工作流11。正常服务不转换旧格式。离线迁移仅解析升级前模板10和独立回测计划2；未知格式列阻断。旧配置转为显式等权、单股上限1，保留原Top N及周期；旧模型/缓存/研究产物归档，原始数据和证据保持。配置备份、逐文件哈希和事务日志支持恢复；新任务或配置阻止回滚。
+
+```bash
+export DUCKDB_DOWNLOAD_LIB=1
+cargo run -p analytics-cli -- --workspace "$JFQUANT_WORKSPACE" workspace migrate-allocation
+# 服务停止并释放工作区独占锁后执行；外部配置逐份显式传入
+cargo run -p analytics-cli -- --workspace "$JFQUANT_WORKSPACE" workspace migrate-allocation --apply --config /absolute/plan.json
+# 迁移后无新任务/配置时，支持离线回滚；中断后重复原命令恢复
+cargo run -p analytics-cli -- --workspace "$JFQUANT_WORKSPACE" workspace migrate-allocation --rollback
+cargo test -p analytics-workflow --lib
+PYTHONPATH=crates/workflow/research target/collector-build/python/bin/python3 -B -m unittest discover -s crates/workflow/research/tests
+python3 crates/workflow/checks/architecture.py
+```
+
+池外强制退出沿用所选退出政策，生成显式pool_exit目标并核验全账户换手；资金暂留现金，下一次定期调仓恢复普通目标预算。撤单意图在同一回调中先移除原生挂单投影，替换订单前重查现金、可卖股份及锁定资产；收据保存两次快照。
+
+组合来源可使用不同基准；基准仅属于已冻结的子策略评分合同。统一账户的展示基准取显式来源列表的第一项，市场、日历及事件事实和政策仍须一致。
+
+外部工作流的工作区外profile引用必须同时在显式迁移文件清单中；正常启动检查注册配置的引用和格式。未列明的外部引用不会被扫描或隐式补迁。迁移归档还包括旧.factor-cache及带research_signature/formula_version审计标记的历史研究目录，证据采集产物保留。
+
+股票层与策略层的H均取各自调仓周期。H大于1时，最近252个完整H日收益允许重叠，代表252个收益起始交易日，不代表252个独立观测。

@@ -508,7 +508,7 @@ fn split_profiles_are_reusable_portable_and_reject_flat_or_conflicting_templates
     let mut t = ResearchTemplate::builtin_csi300().unwrap();
     t.write(&root.join("workflow.json")).unwrap();
     let d: Value = serde_json::from_slice(&fs::read(root.join("workflow.json")).unwrap()).unwrap();
-    assert_eq!(d["schema_version"], 10);
+    assert_eq!(d["schema_version"], 11);
     for k in [
         "config",
         "factor_ids",

@@ -115,6 +115,10 @@ pub fn report(workspace: &Workspace, task_id: Uuid) -> Result<Value> {
             return Err("rights_policy_mismatch".into());
         }
     }
+    crate::allocation::verify_artifacts(&root)?;
+    if read(&root, "allocation-manifest.json")? != summary["execution"]["allocation_artifacts"] {
+        return Err("allocation_execution_receipt_mismatch".into());
+    }
     let snapshots: BTreeMap<Date, Value> =
         serde_json::from_value(read(&root, "portfolio_snapshots.json")?)?;
     let days: Vec<portfolio::DayResult> = serde_json::from_value(read(&root, "daily.json")?)?;
@@ -188,7 +192,16 @@ pub fn report(workspace: &Workspace, task_id: Uuid) -> Result<Value> {
             "corporate_event_report.json",
         ]);
     }
-    names.extend(["execution_checks.json", "execution-dependencies.json"]);
+    names.extend([
+        "execution_checks.json",
+        "execution-dependencies.json",
+        "allocation-manifest.json",
+        "allocation_report.json",
+        "reference-account.json",
+        "reference-input.json",
+        "allocation-input.json",
+        "research-request.json",
+    ]);
     let hashes = names
         .into_iter()
         .map(|name| {

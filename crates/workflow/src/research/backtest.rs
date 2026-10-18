@@ -56,8 +56,11 @@ pub(crate) const SUPPORTED_RESEARCH_INPUTS: [&str; 15] = [
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+/// Multi-strategy net account execution.
+pub mod combined;
+
 /// Current strict integer-share research result format.
-pub const RESEARCH_SCHEMA_VERSION: u32 = 20;
+pub const RESEARCH_SCHEMA_VERSION: u32 = 21;
 
 /// A result cannot be interpreted using the current research contract.
 #[derive(Debug, thiserror::Error)]
@@ -162,6 +165,25 @@ pub fn validate_result(
     value: &serde_json::Value,
 ) -> std::result::Result<(), UnsupportedResultFormat> {
     let validate = || -> Result<()> {
+        if value["kind"] == "combined" {
+            if value["schema_version"] != RESEARCH_SCHEMA_VERSION
+                || value["execution"]["mode"] != "akquant_ex_date"
+                || !matches!(
+                    value["backtest_status"].as_str(),
+                    Some("completed" | "no_valid_trades")
+                )
+                || crate::signature(&(
+                    value["factor_signature"]
+                        .as_str()
+                        .ok_or("combined_signature_missing")?,
+                    &value["execution"],
+                ))? != value["signature"]
+            {
+                return Err("combined_result_invalid".into());
+            }
+            return Ok(());
+        }
+
         if value["schema_version"] != RESEARCH_SCHEMA_VERSION
             || value["execution"]["mode"] != "akquant_ex_date"
             || !matches!(
@@ -548,6 +570,8 @@ pub fn validate_result(
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ResearchConfig {
+    /// Explicit account allocation contract.
+    pub allocation: crate::allocation::AllocationConfig,
     /// Ranked portfolio target count.
     pub top_n: usize,
     /// Trading days between target rebalances.
@@ -563,6 +587,7 @@ pub struct ResearchConfig {
 impl Default for ResearchConfig {
     fn default() -> Self {
         Self {
+            allocation: Default::default(),
             top_n: 50,
             rebalance_days: 5,
             factor_ids: Vec::new(),
@@ -588,6 +613,7 @@ impl Default for ResearchConfig {
 impl ResearchConfig {
     /// Validate bounds before allocating matrices or starting native work.
     pub fn validate(&self) -> Result<()> {
+        self.allocation.validate_count(self.top_n)?;
         if !(1..=1000).contains(&self.top_n) || !(1..=252).contains(&self.rebalance_days) {
             return Err("invalid rolling window/portfolio parameters".into());
         }
@@ -690,6 +716,8 @@ pub struct ResearchRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResearchExecution {
+    /// Explicit account allocation contract.
+    pub allocation: crate::allocation::AllocationConfig,
     /// Explicit corporate event assumptions, independent of fitting.
     pub corporate_event_policy: analytics_core::corporate_account::Policy,
     /// Initial account cash in CNY.
@@ -839,8 +867,9 @@ fn adjustment_basis_signature(
 /// Validate current training descriptor on every read; unsupported files are never converted.
 pub fn validate_training_artifact(artifact: &serde_json::Value) -> Result<()> {
     if artifact["schema_version"] != artifacts::TRAINING_SCHEMA_VERSION
-        || artifact["runtime_signature"] != crate::research::worker::runtime_signature()
-        || artifact["dependency_signature"] != crate::research::worker::dependency_signature()
+        || artifact["runtime_signature"] != crate::research::worker::training_runtime_signature()
+        || artifact["dependency_signature"]
+            != crate::research::worker::training_dependency_signature()
         || artifact["status"] != "trained"
     {
         return Err("unsupported_training_format".into());
@@ -970,6 +999,7 @@ pub fn backtest_from_training_with_policy(
     if let Some(execution) = execution {
         request.initial_cash_cny = execution.initial_cash_cny;
         request.market_rules = execution.market_rules.clone();
+        request.config.allocation = execution.allocation.clone();
         request.config.top_n = execution.top_n;
         request.config.rebalance_days = execution.rebalance_days;
         request.pool_exit_policy = execution.pool_exit_policy;
@@ -986,10 +1016,18 @@ pub fn backtest_from_predictions(
     output: &Path,
     actions: &Path,
     rights_policy: analytics_core::rights::Policy,
+    allocation: Option<&crate::allocation::AllocationConfig>,
     context: &analytics_core::task::TaskContext,
 ) -> Result<()> {
     if source.join("model_selection.json").is_file() {
-        return independent::replay_predictions(source, output, actions, rights_policy, context);
+        return independent::replay_predictions(
+            source,
+            output,
+            actions,
+            rights_policy,
+            allocation,
+            context,
+        );
     }
     let (training_root, _) = predictions::training_source(source)?;
     let training: serde_json::Value =
@@ -1001,6 +1039,10 @@ pub fn backtest_from_predictions(
         return Err("prediction market identity mismatch".into());
     }
     request.config = serde_json::from_value(execution["research_config"].clone())?;
+    if let Some(c) = allocation {
+        c.validate_count(request.config.top_n)?;
+        request.config.allocation = c.clone();
+    }
     request.market_rules = serde_json::from_value(execution["market_rules"].clone())?;
     request.initial_cash_cny = execution["initial_cash_cny"]
         .as_f64()
@@ -1029,7 +1071,7 @@ fn execute_account(
     folds: &[analytics_core::schedule::ResolvedFold],
     signals: Vec<(Date, String, f64)>,
     mut reports: Vec<FoldReport>,
-    run_signature: &str,
+    _run_signature: &str,
     signature: &str,
 ) -> Result<()> {
     let context = analytics_core::task::TaskContext::current();
@@ -1050,7 +1092,11 @@ fn execute_account(
         action_book,
         &signals,
         &DateRange {
-            start: folds.first().unwrap().actual.test.start,
+            start: request
+                .config
+                .allocation
+                .execution_start
+                .unwrap_or(folds.first().unwrap().actual.test.start),
             end: folds.last().unwrap().actual.test.end,
         },
         pool,
@@ -1083,11 +1129,22 @@ fn execute_account(
         )?;
     }
     save(request.output.join("fold_reports.json"), &reports)?;
+    crate::allocation::publish_artifacts(&request.output)?;
+    let mut audit: serde_json::Value =
+        serde_json::from_slice(&fs::read(request.output.join("data_audit.json"))?)?;
+    audit["execution"]["allocation_components"] = crate::allocation::component_signatures();
+    audit["execution"]["allocation_display"] = crate::allocation::display(&request.output)?;
+    audit["execution"]["allocation_artifacts"] =
+        serde_json::from_slice(&fs::read(request.output.join("allocation-manifest.json"))?)?;
+    let run_signature = crate::signature(&(signature, &audit["execution"]))?;
+    audit["research_signature"] = run_signature.clone().into();
+    save(request.output.join("execution.json"), &audit["execution"])?;
+    save(request.output.join("data_audit.json"), &audit)?;
     finish(
         request,
         &reports,
         &all_returns,
-        run_signature,
+        &run_signature,
         signature,
         &dataset.calendar,
     )?;
@@ -1293,3 +1350,5 @@ pub fn preview_samples_with_policy(
         serde_json::json!({"folds":counts.iter().enumerate().map(|(i,c)|serde_json::json!({"fold":i,"training_label_rows":c[0],"validation_label_rows":c[1],"test_prediction_rows":c[2]})).collect::<Vec<_>>(),"issues":issues,"feature_finite_counts":"not_computed_until_factor_execution"}),
     )
 }
+
+mod allocation_readiness;

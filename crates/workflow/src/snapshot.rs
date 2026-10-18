@@ -6,6 +6,16 @@ use std::fs;
 
 /// Snapshot selected input versions when creating a run, rather than resolving them later.
 pub fn snapshot(workspace: &Workspace, request: &WorkflowRequest) -> Result<Value> {
+    if let WorkflowRequest::CompareAllocations { tasks } = request {
+        return Ok(
+            json!({"request":request,"comparison":crate::allocation_comparison::snapshot(workspace,tasks)?}),
+        );
+    }
+    if let WorkflowRequest::Combined { request: job } = request {
+        return Ok(
+            json!({"request":request,"combined":crate::research::backtest::combined::snapshot(workspace,job)?,"app_version":env!("CARGO_PKG_VERSION")}),
+        );
+    }
     if let WorkflowRequest::Independent { request: job } = request {
         return Ok(
             json!({"request":request,"independent":research::backtest::independent::snapshot(workspace,job)?,"app_version":env!("CARGO_PKG_VERSION")}),

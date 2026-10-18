@@ -236,6 +236,71 @@ pub(super) fn show_results(ui: &mut egui::Ui, value: &Value) {
             "无有效交易。账户保留现金，本次结果不能用于判断策略效果。",
         );
     }
+    if value["samples"]["allocation"].is_object() {
+        let a = &value["samples"]["allocation"];
+        ui.collapsing("优化预热与就绪边界", |ui| {
+            ui.label(format!(
+                "预测预热 {} → {}；参考账预热 {} → {}；正式账户 {} → {}",
+                a["prediction_warmup"]["start"],
+                a["prediction_warmup"]["end"],
+                a["reference_warmup"]["start"],
+                a["reference_warmup"]["end"],
+                a["execution"]["start"],
+                a["execution"]["end"]
+            ));
+            ui.label(format!(
+                "最早可能参考账就绪日期（数据完整时）：{}",
+                a["earliest_possible_reference_date_lower_bound"]
+            ));
+            for issue in a["issues"].as_array().into_iter().flatten() {
+                ui.label(issue.as_str().unwrap_or(""));
+            }
+            ui.small("候选数量、配对样本和收益端点还需按已生成预测检查；不会自动推迟正式起点。");
+        });
+    }
+    if value["execution"]["allocation_display"].is_object() {
+        let a = &value["execution"]["allocation_display"];
+        ui.collapsing("组合优化与资金漂移", |ui| {
+            ui.label(format!(
+                "方法 {}；共{}次决策，最多展示最近100次。",
+                a["config"]["method"], a["decision_count"]
+            ));
+            ui.small("参考账无费用且允许分数股；实际费用和收益以成交账户为准。");
+            for d in a["decisions"].as_array().into_iter().flatten() {
+                ui.collapsing(format!("{} · {}", d["date"], d["status"]), |ui| {
+                    ui.label(serde_json::to_string_pretty(d).unwrap_or_default());
+                });
+            }
+            ui.collapsing("参考净值、现金与锁定资产", |ui| {
+                for r in a["reference_rows"].as_array().into_iter().flatten() {
+                    ui.label(format!(
+                        "{} 净值{} 现金{} 锁定{} 待执行{}",
+                        r["date"], r["nav"], r["cash"], r["locked_value"], r["pending"]
+                    ));
+                }
+            });
+        });
+    }
+    if value["kind"] == "allocation_comparison" {
+        ui.collapsing(
+            "优化方法对照（相同输入、含实际费用）",
+            |ui| {
+                for r in value["runs"].as_array().into_iter().flatten() {
+                    ui.label(format!(
+                        "{} 收益{} 回撤{} 夏普{} 换手{} 拒单{} 集中度{} 引擎秒数{}",
+                        r["method"],
+                        r["aggregate"]["total_return"],
+                        r["aggregate"]["max_drawdown"],
+                        r["aggregate"]["sharpe"],
+                        r["aggregate"]["mean_daily_turnover"],
+                        r["aggregate"]["blocked_orders"],
+                        r["mean_target_hhi"],
+                        r["timing"]["engine_seconds"]
+                    ));
+                }
+            },
+        );
+    }
     if value["execution_diagnostics"].is_object() {
         let d = &value["execution_diagnostics"];
         ui.label(format!(

@@ -1114,3 +1114,39 @@
 @@ -268 +268 @@
 -        )
 +        ) + self.jfquant_locked_value(prices)
+
+--- a/src/context.rs
++++ b/src/context.rs
+@@ -927,6 +927,22 @@
+         self.cash.to_f64().unwrap_or_default()
+     }
+ 
++    /// Snapshot of the finalized cross-section context; never reborrows Engine.
++    fn jfquant_decision_snapshot(&self) -> PyResult<String> {
++        let prices = self.last_prices.read().map_err(|_|pyo3::exceptions::PyValueError::new_err("decision prices poisoned"))?;
++        let positions = self.positions.iter().map(|(s,q)|(s.clone(),q.to_f64())).collect::<std::collections::BTreeMap<_,_>>();
++        let available = self.available_positions.iter().map(|(s,q)|(s.clone(),q.to_f64())).collect::<std::collections::BTreeMap<_,_>>();
++        let marks = prices.iter().map(|(s,p)|(s.clone(),p.to_f64())).collect::<std::collections::BTreeMap<_,_>>();
++        let orders = self.active_orders_arc.iter().map(|o|serde_json::json!({"id":o.id,"symbol":o.symbol,"side":format!("{:?}",o.side),"quantity":o.quantity.to_f64(),"filled_quantity":o.filled_quantity.to_f64(),"status":format!("{:?}",o.status)})).collect::<Vec<_>>();
++        serde_json::to_string(&serde_json::json!({
++            "schema_version":1,"timestamp":self.current_time,"cash":self.cash.to_f64(),
++            "equity":self.account_equity,"frozen_cash":self.account_frozen_cash,
++            "positions":positions,"available_positions":available,"marks":marks,
++            "locked_value":self.account_equity-self.cash.to_f64().ok_or_else(||pyo3::exceptions::PyValueError::new_err("cash overflow"))?-self.positions.iter().map(|(s,q)|q.to_f64().unwrap_or(0.)*prices.get(s).and_then(|p|p.to_f64()).unwrap_or(0.)).sum::<f64>(),
++            "orders":orders,"cancel_intents":self.canceled_order_ids,"projected_buying_power":self.get_buying_power()
++        })).map_err(|e|pyo3::exceptions::PyValueError::new_err(e.to_string()))
++    }
++
+     /// 可用买入力:现金 + 本回调及既有挂单的净预期回笼,投影后按风控口径
+     /// 计算 free_margin × (1 - safety_margin)。用于在同一 on_bar 内、卖出后
+     /// 为买单定量(卖出资金当日可复用)。
+@@ -1022,6 +1038,9 @@
+     ///
+     /// :param order_id: 订单 ID
+     fn cancel_order(&mut self, order_id: String) {
++        // Cancel intentions must leave the callback's projection before replacement orders.
++        self.active_orders.retain(|order| order.id != order_id);
++        self.active_orders_arc = Arc::new(self.active_orders.clone());
+         if !self
+             .canceled_order_ids
+             .iter()

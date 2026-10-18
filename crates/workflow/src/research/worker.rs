@@ -15,7 +15,10 @@ use std::{
     },
     time::{Duration, Instant},
 };
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
+// A fresh signed macOS runtime can spend over a minute validating native extensions.
+// Startup remains cancellable every 100 ms; an unresponsive process is still retired.
+const STARTUP_TIMEOUT_SECONDS: u64 = 180;
 thread_local! {static SESSION:RefCell<Option<Session>>=const {RefCell::new(None)};}
 /// Fingerprint of worker code and the exact bundled dependency lock.
 pub fn runtime_signature() -> String {
@@ -37,12 +40,56 @@ pub fn runtime_signature() -> String {
             "backtest.py",
             include_bytes!("../../research/jfquant_research/backtest.py").as_slice(),
         ),
+        (
+            "combined.py",
+            include_bytes!("../../research/jfquant_research/combined.py").as_slice(),
+        ),
+        (
+            "allocation.py",
+            include_bytes!("../../research/jfquant_research/allocation.py").as_slice(),
+        ),
     ] {
         h.update(name);
         h.update([0]);
         h.update(bytes);
         h.update([0]);
     }
+    format!("sha256:{:x}", analytics_core::hash::Hex(h.finalize()))
+}
+/// Training code identity, independent of allocation and native execution adapters.
+pub(crate) fn training_runtime_signature() -> String {
+    let mut h = Sha256::new();
+    h.update(b"training-contract-v2");
+    h.update(include_bytes!(
+        "../../research/jfquant_research/training.py"
+    ));
+    h.update(include_bytes!("mod.rs"));
+    format!("sha256:{:x}", analytics_core::hash::Hex(h.finalize()))
+}
+/// Only the exact libraries used by training; optimizer dependencies do not invalidate models.
+pub(crate) fn training_dependency_signature() -> String {
+    let names = [
+        "lightgbm",
+        "numpy",
+        "scipy",
+        "pandas",
+        "pyarrow",
+        "python-dateutil",
+        "six",
+        "tzdata",
+    ];
+    let mut h = Sha256::new();
+    let mut selected = false;
+    for line in include_str!("../../research/requirements.lock").lines() {
+        if !line.starts_with(char::is_whitespace) && !line.starts_with('#') && line.contains("==") {
+            selected = names.contains(&line.split("==").next().unwrap_or(""));
+        }
+        if selected && !line.trim_start().starts_with('#') {
+            h.update(line.as_bytes());
+            h.update(b"\n");
+        }
+    }
+    h.update(b"python3.12.15");
     format!("sha256:{:x}", analytics_core::hash::Hex(h.finalize()))
 }
 /// Dependency receipt for cache and model isolation.
@@ -140,7 +187,7 @@ impl Session {
             match s.events.recv_timeout(Duration::from_millis(100)) {
                 Ok(event) => break event?,
                 Err(mpsc::RecvTimeoutError::Timeout)
-                    if started.elapsed() < Duration::from_secs(60) =>
+                    if started.elapsed() < Duration::from_secs(STARTUP_TIMEOUT_SECONDS) =>
                 {
                     continue;
                 }
@@ -225,7 +272,7 @@ impl Drop for Session {
     fn drop(&mut self) {
         let _ = writeln!(
             self.input,
-            "{{\"version\":1,\"operation\":\"shutdown\",\"signature\":\"{}\"}}",
+            "{{\"version\":3,\"operation\":\"shutdown\",\"signature\":\"{}\"}}",
             runtime_signature()
         );
         let _ = self.input.flush();

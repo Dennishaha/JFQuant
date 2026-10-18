@@ -111,7 +111,7 @@
   },
   "initial_cash_cny": 1000000.0,
   "dividend_withholding_rate": 0.0,
-  "schema_version": 10,
+  "schema_version": 11,
   "id": "csi300-annual",
   "name": "沪深300默认年度流程",
   "factors": "factors/gtja191.json",
@@ -133,5 +133,19 @@
       "seed": "17"
     }
   },
-  "event_check_policy": "provider"
+  "event_check_policy": "provider",
+  "allocation": {
+    "method": "equal",
+    "risk_window": 252,
+    "max_stock_weight": 0.1,
+    "max_strategy_weight": 0.6,
+    "max_turnover": null,
+    "risk_aversion": null,
+    "calibration_window": 252,
+    "calibration_min_days": 60,
+    "calibration_min_pairs": 30,
+    "prediction_start": null,
+    "reference_start": null,
+    "execution_start": null
+  }
 }

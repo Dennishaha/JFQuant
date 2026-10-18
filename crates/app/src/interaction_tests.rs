@@ -1269,7 +1269,7 @@ fn service_client_tasks_appear_in_egui_can_be_cancelled_and_share_research_resul
         })
         .unwrap();
     h.wait_for(|app| !app.state.busy() && app.state.platform.runs.iter().any(|r| r.id == task));
-    assert_eq!(h.app.state.platform.template.schema_version, 10);
+    assert_eq!(h.app.state.platform.template.schema_version, 11);
     h.app.state.panel = Panel::Research;
     h.click("执行年度研究");
     h.wait_for(|app| !app.state.busy() && app.state.platform.details.get("aggregate").is_some());
@@ -1518,7 +1518,7 @@ fn prediction_replay_exposes_rights_defaults_and_shared_task() {
     h.click("复用已发布预测回测");
     let command = h.commands.try_recv().unwrap();
     assert!(
-        matches!(command,WorkerCommand::ExecuteWorkflow{request,..} if matches!(&*request,analytics_workflow::WorkflowRequest::BacktestPredictions{source:id,actions,rights_policy} if *id==source && actions==&a.id && rights_policy==&analytics_core::rights::Policy::default()))
+        matches!(command,WorkerCommand::ExecuteWorkflow{request,..} if matches!(&*request,analytics_workflow::WorkflowRequest::BacktestPredictions{source:id,actions,rights_policy,..} if *id==source && actions==&a.id && rights_policy==&analytics_core::rights::Policy::default()))
     );
 }
 

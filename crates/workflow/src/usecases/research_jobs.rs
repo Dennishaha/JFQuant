@@ -9,6 +9,19 @@ pub(super) fn execute(
     let data = None;
     let mut details;
     match request {
+        WorkflowRequest::CompareAllocations { tasks } => {
+            details = crate::allocation_comparison::snapshot(w, tasks)?;
+            if details != run.request["comparison"] {
+                return Err("comparison_sources_changed".into());
+            }
+            atomic_json(
+                &w.resolve(&run.output).join("allocation-comparison.json"),
+                &details,
+            )?;
+        }
+        WorkflowRequest::Combined { request } => {
+            details = crate::research::backtest::combined::execute(w, run, request, context)?;
+        }
         WorkflowRequest::Independent { request } => {
             details = research_api::backtest::independent::execute(w, run, request, context)?;
         }
@@ -67,6 +80,7 @@ pub(super) fn execute(
             details = w.results(run)?;
         }
         WorkflowRequest::BacktestPredictions {
+            allocation,
             source,
             actions,
             rights_policy,
@@ -99,6 +113,7 @@ pub(super) fn execute(
                 &w.resolve(&run.output),
                 &w.resolve(a.path),
                 rights_policy.clone(),
+                allocation.as_deref(),
                 context,
             )?;
             details = w.results(run)?;

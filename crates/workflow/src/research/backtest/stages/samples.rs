@@ -185,8 +185,8 @@ pub(super) fn samples(
                 serde_json::to_value(dataset.source_map())?
             },
             &ids,
-            crate::research::worker::runtime_signature(),
-            crate::research::worker::dependency_signature()
+            crate::research::worker::training_runtime_signature(),
+            crate::research::worker::training_dependency_signature()
         ))?))
     );
     let run_signature = format!(

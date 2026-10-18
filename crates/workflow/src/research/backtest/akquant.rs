@@ -55,6 +55,41 @@ pub(super) fn simulate(
     signal_dates: &[Date],
 ) -> Result<Vec<portfolio::DayResult>> {
     let (start, end) = (range.start, range.end);
+    let reference_start = request.config.allocation.reference_start.unwrap_or(start);
+    let prediction_start = request
+        .config
+        .allocation
+        .prediction_start
+        .unwrap_or(reference_start);
+    if prediction_start > reference_start
+        || reference_start > start
+        || start > end
+        || !dataset.calendar.contains(&start)
+        || !dataset.calendar.contains(&reference_start)
+    {
+        return Err("allocation_warmup_ranges_invalid".into());
+    }
+    if request.config.allocation.prediction_start.is_some()
+        && signals
+            .iter()
+            .map(|s| s.0)
+            .min()
+            .is_none_or(|d| d > prediction_start)
+    {
+        return Err(
+            "allocation_prediction_warmup_not_generated: extend schedule test predictions".into(),
+        );
+    }
+    let reference_range = DateRange {
+        start: reference_start,
+        end,
+    };
+    let mut portable_request = request.clone();
+    portable_request.output = PathBuf::new();
+    save(
+        request.output.join("research-request.json"),
+        &portable_request,
+    )?;
     use analytics_core::market_rules::CommissionMode;
     let frozen: serde_json::Value =
         serde_json::from_slice(&fs::read(request.output.join("execution.json"))?)?;
@@ -152,13 +187,13 @@ pub(super) fn simulate(
             .iter()
             .enumerate()
             .rev()
-            .filter(|(_, date)| **date < start)
+            .filter(|(_, date)| **date < reference_start)
             .find_map(|(day, _)| fields[3].get(day).filter(|p| p.is_finite() && *p > 0.));
         for (day, date) in dataset
             .calendar
             .iter()
             .enumerate()
-            .filter(|(_, d)| **d >= start && **d <= end)
+            .filter(|(_, d)| **d >= reference_start && **d <= end)
         {
             analytics_core::task::TaskContext::current().check()?;
             let mut prices = fields.iter().map(|f| f.get(day)).collect::<Vec<_>>();
@@ -284,6 +319,21 @@ pub(super) fn simulate(
             actions.push(serde_json::json!({"symbol":event.instrument,"date":event.ex_date,"kind":"Split","value":event.share_multiplier()?}));
         }
     }
+    let mut reference_actions = Vec::new();
+    for event in book.actions.iter().filter(|a| {
+        symbols.contains(&a.instrument)
+            && reference_range.contains(a.ex_date)
+            && super::execution::supported_distribution(a)
+    }) {
+        event.validate_adjustment_terms()?;
+        if event.cash() > 0. {
+            reference_actions.push(serde_json::json!({"symbol":event.instrument,"date":event.ex_date,"kind":"Dividend","value":event.cash_per_share}));
+        }
+        if event.shares() > 0. {
+            reference_actions.push(serde_json::json!({"symbol":event.instrument,"date":event.ex_date,"kind":"Split","value":event.share_multiplier()?}));
+        }
+    }
+    let reference_rights = super::rights::input(request, book, dataset, pool, &reference_range)?;
     let benchmark = dataset.research_field(&request.benchmark, "close", false)?;
     let mut benchmark_returns = BTreeMap::new();
     for (day, date) in dataset
@@ -304,6 +354,63 @@ pub(super) fn simulate(
         };
         benchmark_returns.insert(date.to_string(), r);
     }
+    let mut allocation_prices = BTreeMap::<String, BTreeMap<String, f64>>::new();
+    if request.config.allocation.method != crate::allocation::AllocationMethod::Equal {
+        for id in &symbols {
+            let prices = dataset.research_field(id, "open", true)?;
+            let volume = dataset.research_raw_volume(id, true)?;
+            let mut observed = BTreeMap::new();
+            for (day, date) in dataset
+                .calendar
+                .iter()
+                .enumerate()
+                .filter(|(_, d)| **d <= end)
+            {
+                if volume.get(day).is_some_and(|v| v > 0.)
+                    && let Some(value) = prices.get(day).filter(|v| v.is_finite() && *v > 0.)
+                {
+                    observed.insert(date.to_string(), value);
+                }
+            }
+            allocation_prices.insert(id.clone(), observed);
+        }
+    }
+    let prediction_manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(request.output.join("prediction_manifest.json"))?)?;
+    let training_root = if frozen["independent"].is_object() {
+        None // Frozen independent catalogue already contains the selected model receipts.
+    } else if let Some(source) = &request.reuse_predictions {
+        Some(predictions::training_source(source)?.0)
+    } else if let Some(source) = &request.reuse_training {
+        Some(source.clone())
+    } else if request.output.join("training.json").is_file() {
+        Some(request.output.clone())
+    } else {
+        None
+    };
+    let training: serde_json::Value = if let Some(root) = training_root {
+        serde_json::from_slice(&fs::read(root.join("training.json"))?)?
+    } else {
+        serde_json::Value::Null
+    };
+    let prediction_folds = frozen["resolved_folds"].as_array().map(|folds| folds.iter().enumerate().map(|(index, f)| {
+        let train = f["actual"]["train"]["end"].as_str().unwrap_or("");
+        let validation = f["actual"]["validation"]["end"].as_str().unwrap_or("");
+        serde_json::json!({"fold":index,"fit_cutoff":train.max(validation),"range":f["actual"]["test"],"prediction_sha256":prediction_manifest["sha256"],"model_sha256":if frozen["independent"].is_object(){let m=frozen["independent"]["segments"][index]["model_index"].as_u64().unwrap_or(index as u64) as usize; &frozen["independent"]["catalogue"]["models"][m]["model_sha256"]}else{&training["models"][index]["model_sha256"]}})
+    }).collect::<Vec<_>>()).unwrap_or_default();
+    let strategy_contract = crate::signature(
+        &serde_json::json!({"feature_order":request.config.factor_ids,"formula_version":request.factor_registry()?.selection_version(&request.config.factor_ids)?,"factor_refs":request.config.factor_refs,"objective":"regression","price_basis":request.price_basis,"label":"next-open-to-following-open-training-v1","score":"lightgbm-regression-raw;candidate-percentile-v1","horizon":request.config.rebalance_days,"pool_signature":request.pool_signature}),
+    )?;
+    save(
+        request.output.join("allocation-input.json"),
+        &serde_json::json!({
+            "schema_version":1,"calendar":dataset.calendar.iter().filter(|d|**d<=end).collect::<Vec<_>>(),
+            "prices":allocation_prices,"config":request.config.allocation,"horizon":request.config.rebalance_days,
+            "formal_range":range,"reference_range":reference_range,"prediction_start":prediction_start,"market_sha256":frozen["market_content_sha256"],
+            "folds":frozen["resolved_folds"],"event_sha256":frozen["corporate_action_sha256"],
+            "prediction_provenance":{"models":prediction_folds,"strategy_contract":strategy_contract}
+        }),
+    )?;
     let output = fs::canonicalize(&request.output)?;
     let bars = output.join(".worker-bars.parquet");
     let score_path = output.join("predictions.parquet");
@@ -335,10 +442,43 @@ pub(super) fn simulate(
         rules.exchanges.first().unwrap().transfer_rate
     };
     let result = crate::research::worker::call(
-        serde_json::json!({"operation":"backtest","rights":rights,"bars":bars,"signals":score_path,"output":output,"initial_cash":request.initial_cash_cny,"top_n":request.config.top_n,"rebalance_days":request.config.rebalance_days,"commission_rate":rules.commission.rate,"minimum_commission":rules.commission.minimum_cny,"stamp_tax":stamp,"transfer_fee":transfer,"lot_sizes":lots,"actions":actions,"benchmark_returns":benchmark_returns,"pool":pool,"pool_exit_policy":request.pool_exit_policy,"signal_dates":signal_dates}),
+        serde_json::json!({"operation":"backtest","allocation":request.config.allocation,"allocation_input":output.join("allocation-input.json"),"formal_start":start,"reference_actions":reference_actions,"reference_rights":reference_rights,"combined_input":output.join("combined-input.json").exists().then(||output.join("combined-input.json")),"rights":rights,"bars":bars,"signals":score_path,"output":output,"initial_cash":request.initial_cash_cny,"top_n":request.config.top_n,"rebalance_days":request.config.rebalance_days,"commission_rate":rules.commission.rate,"minimum_commission":rules.commission.minimum_cny,"stamp_tax":stamp,"transfer_fee":transfer,"lot_sizes":lots,"actions":actions,"benchmark_returns":benchmark_returns,"pool":pool,"pool_exit_policy":request.pool_exit_policy,"signal_dates":signal_dates}),
         analytics_core::task::TaskContext::current().cancel,
     );
     let _ = fs::remove_file(bars);
+    let mut reference_blocked = false;
+    if result.is_ok() {
+        let reference = crate::allocation_reference::build(&output)?;
+        let mut snapshots = BTreeMap::new();
+        for row in reference["rows"]
+            .as_array()
+            .ok_or("reference_rows_missing")?
+        {
+            let date: Date = serde_json::from_value(row["date"].clone())?;
+            let positions = row["positions"]
+                .as_object()
+                .ok_or("reference_positions_missing")?
+                .iter()
+                .map(|(s, q)| {
+                    Ok((
+                        s.clone(),
+                        q.as_str()
+                            .ok_or("reference_quantity_invalid")?
+                            .parse::<f64>()?,
+                    ))
+                })
+                .collect::<Result<BTreeMap<_, _>>>()?;
+            snapshots.insert(date, serde_json::json!({"positions":positions}));
+        }
+        let checks = super::execution::exposure_checks(
+            book,
+            &snapshots,
+            &reference_range,
+            request.event_check_policy,
+        );
+        save(output.join("reference-event-checks.json"), &checks)?;
+        reference_blocked = checks.iter().any(|c| c["status"] == "blocked");
+    }
     if let Err(error) = result {
         if output.join("rights_failed_state.json").is_file() {
             let failed: analytics_core::rights_account::Ledger =
@@ -417,6 +557,9 @@ pub(super) fn simulate(
     save(output.join("event_exposure_checks.json"), &exposure)?;
     if exposure.iter().any(|c| c["status"] == "blocked") {
         return Err("execution_event_exposure_unresolved: actual opening position intersects an unresolved event; provisional simulation is not a published return".into());
+    }
+    if reference_blocked {
+        return Err("execution_event_exposure_unresolved: reference account".into());
     }
     Ok(reconciled.days)
 }

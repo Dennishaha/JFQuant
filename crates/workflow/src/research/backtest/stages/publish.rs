@@ -56,7 +56,7 @@ pub(super) fn publish(
         original.train_only = false;
         original.config.factor_ids = ids.clone();
         original.reuse_training = None;
-        let mut training = serde_json::json!({"schema_version":artifacts::TRAINING_SCHEMA_VERSION,"runtime_signature":crate::research::worker::runtime_signature(),"dependency_signature":crate::research::worker::dependency_signature(),"factor_set":request.factor_set,"price_basis":request.price_basis,"status":"trained","request":original,"factor_signature":signature,"models":models,"adjustment_basis_signature":historical_basis_signature,"training_signature":training_signature,"source_map":dataset.source_map(),"resolved_folds":folds,"formula_version":formula_version,"feature_order":ids});
+        let mut training = serde_json::json!({"schema_version":artifacts::TRAINING_SCHEMA_VERSION,"runtime_signature":crate::research::worker::training_runtime_signature(),"dependency_signature":crate::research::worker::training_dependency_signature(),"factor_set":request.factor_set,"price_basis":request.price_basis,"status":"trained","request":original,"factor_signature":signature,"models":models,"adjustment_basis_signature":historical_basis_signature,"training_signature":training_signature,"source_map":dataset.source_map(),"resolved_folds":folds,"formula_version":formula_version,"feature_order":ids});
         let fit_cache_receipts = (history_start.year()..=needed_end.year())
             .map(|year| {
                 let paths = [

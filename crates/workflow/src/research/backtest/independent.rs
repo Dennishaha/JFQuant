@@ -316,7 +316,7 @@ impl BacktestPlan {
     pub fn validate(&self) -> Result<()> {
         self.range.validate()?;
         self.quality_policy.validate()?;
-        if self.schema_version != 2
+        if self.schema_version != 3
             || self.pool_version.is_empty()
             || self.market.is_empty()
             || self.actions.is_empty()
@@ -327,6 +327,9 @@ impl BacktestPlan {
         }
         analytics_core::pool::validate_instrument(&self.benchmark)?;
         self.execution.market_rules.validate()?;
+        self.execution
+            .allocation
+            .validate_count(self.execution.top_n)?;
         if !self.execution.initial_cash_cny.is_finite() || self.execution.initial_cash_cny <= 0. {
             return Err("invalid initial cash".into());
         }
@@ -893,6 +896,7 @@ pub fn backtest(
     r.reuse_predictions = None;
     r.factor_set = c.plan.factor_set;
     r.config = c.plan.config.research_config();
+    r.config.allocation = plan.execution.allocation.clone();
     r.config.top_n = plan.execution.top_n;
     r.config.rebalance_days = plan.execution.rebalance_days;
     r.price_basis = c.plan.price_basis;
@@ -1130,7 +1134,8 @@ pub fn execute(
     context: &analytics_core::task::TaskContext,
 ) -> Result<Value> {
     let frozen = &run.request["independent"];
-    if !crate::membership_history::history_inputs(&frozen["pool"])?.is_empty()
+    if !matches!(job, Job::Models { .. })
+        && !crate::membership_history::history_inputs(&frozen["pool"])?.is_empty()
         && snapshot(w, job)? != *frozen
     {
         return Err("independent frozen inputs changed since submission".into());
@@ -1502,6 +1507,7 @@ pub(super) fn replay_predictions(
     output: &Path,
     actions: &Path,
     rights_policy: analytics_core::rights::Policy,
+    allocation: Option<&crate::allocation::AllocationConfig>,
     context: &analytics_core::task::TaskContext,
 ) -> Result<()> {
     let summary: Value = serde_json::from_slice(&fs::read(source.join("summary.json"))?)?;
@@ -1519,6 +1525,10 @@ pub(super) fn replay_predictions(
         segments: serde_json::from_value(selected["segments"].clone())?,
         training_plan: None,
     };
+    if let Some(c) = allocation {
+        c.validate_count(r.config.top_n)?;
+        r.config.allocation = c.clone();
+    }
     r.output = output.to_owned();
     r.reuse_training = None;
     r.reuse_predictions = Some(source.to_owned());

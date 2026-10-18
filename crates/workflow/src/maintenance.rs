@@ -177,6 +177,7 @@ pub fn preview(path: &Path) -> Result<MaintenancePlan> {
 }
 /// Prevent normal service startup while a maintenance transaction is incomplete.
 pub(crate) fn require_complete(root: &Path) -> Result<()> {
+    crate::allocation_migration::require_complete(root)?;
     let path = root.join(".jfquant/maintenance.json");
     if path.exists() {
         let journal: Journal = serde_json::from_slice(&fs::read(path)?)?;

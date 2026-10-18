@@ -3,6 +3,14 @@
 #![warn(missing_docs)]
 /// Reusable evidence capture, recovery, status and review drafts.
 pub mod action_evidence;
+/// Portfolio allocation configuration and validation.
+pub mod allocation;
+/// Same-input comparisons of allocation methods.
+pub mod allocation_comparison;
+/// Explicit offline migration into the allocation protocol.
+pub mod allocation_migration;
+/// Independent reference strategy accounts.
+pub mod allocation_reference;
 /// Shared computation worker and plain-data protocol.
 pub mod backend;
 /// Acquisition progress, historical coverage and explicit availability-pool proposals.

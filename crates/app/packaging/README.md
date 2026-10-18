@@ -70,3 +70,9 @@ Company-event execution extends the existing private native patch. Build inputs 
 
 
 历史成员补证离线验收：`verify-history.sh`只使用包内CLI和Python。覆盖旧格式与已移除命令拒绝、逐证券关联、PDF内嵌图片提取、人工区域核对、冻结发布、组合池解析、导出导入及篡改拒绝；采集锁新增`pypdf[image]`的Pillow依赖，`verify-bundle.sh`核对包内导入。新历史请求/报告/产物2、服务38，不增加运行时旧格式回退。
+
+## skfolio runtime
+
+Research lock adds skfolio 1.9.4 and exact hashes for scikit-learn, CVXPY-base, CLARABEL and their dependencies. The existing Python Mach-O audit applies to every added extension; licenses are collected with other Python packages. The reviewed native patch adds finalized-context `jfquant_decision_snapshot` and its hash is bound by akquant-source.lock.json. Rebuild with `bash crates/app/packaging/build-collector.sh`; then run `bash crates/app/packaging/package-macos.sh`. Do not copy a running bundle or commit generated wheels/native libraries.
+
+AKQuant生成源码的Cargo.toml显式声明独立workspace，确保干净解压后可复现构建；构建脚本与补丁共同进入source lock。原生上下文快照用于收盘横截面决策，撤单从回调投影中移除后再创建替换订单。

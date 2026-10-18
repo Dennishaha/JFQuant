@@ -12,13 +12,13 @@ use uuid::Uuid;
 
 /// Editable, portable research recipe. Generated data and paths are separate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct ResearchTemplate {
     /// Independently versioned feature family.
     pub factor_set: analytics_core::research_quality::FactorSet,
     /// Training source trust, separate from sample completeness.
     pub price_basis: analytics_core::research_quality::PriceBasis,
-    /// Resolved template schema, currently 10; absence is unsupported.
+    /// Resolved template schema, currently 11; absence is unsupported.
     #[serde(default = "missing_template_version")]
     pub schema_version: u32,
     /// Immutable pool version, or `builtin:<catalogue index ID>` bound to the selected market.
@@ -67,7 +67,7 @@ impl Default for ResearchTemplate {
             ..ResearchConfig::default()
         };
         Self {
-            schema_version: 10,
+            schema_version: 11,
             factor_set: Default::default(),
             price_basis: Default::default(),
             pool_version: "builtin:csi500".into(),
@@ -91,6 +91,7 @@ impl ResearchTemplate {
     /// Extract account settings without changing frozen training inputs.
     pub fn execution_settings(&self) -> research::backtest::ResearchExecution {
         research::backtest::ResearchExecution {
+            allocation: self.config.allocation.clone(),
             corporate_event_policy: Default::default(),
             initial_cash_cny: self.initial_cash_cny,
             market_rules: self.market_rules.clone(),
@@ -183,7 +184,7 @@ impl ResearchTemplate {
     }
     /// Validate before saving or starting a task.
     pub fn validate(&self) -> Result<()> {
-        if self.schema_version != 10
+        if self.schema_version != 11
             || self.id.trim().is_empty()
             || self.formula_version != self.resolved_formula_version()?
             || self.name.trim().is_empty()
@@ -305,6 +306,16 @@ pub struct RunRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkflowRequest {
+    /// Compare completed allocation methods against an equal-weight baseline.
+    CompareAllocations {
+        /// Distinct successful tasks with identical inputs.
+        tasks: Vec<Uuid>,
+    },
+    /// Frozen multi-strategy target allocation and unified execution.
+    Combined {
+        /// Shared App/CLI combined-account operation.
+        request: Box<research::backtest::combined::Job>,
+    },
     /// Independent fit-only models and cross-pool prediction/account execution.
     Independent {
         /// Shared App/CLI worker operation.
@@ -508,6 +519,8 @@ pub enum WorkflowRequest {
     },
     /// Replay hash-verified published predictions without loading trained models.
     BacktestPredictions {
+        /// Optional explicit allocation experiment using the frozen source scores.
+        allocation: Option<Box<crate::allocation::AllocationConfig>>,
         /// Successful native backtest containing published predictions.
         source: Uuid,
         /// Immutable event snapshot for the new experiment.
@@ -531,6 +544,8 @@ impl WorkflowRequest {
     /// Display operation names without exposing backend details in the user flow.
     pub fn label(&self) -> String {
         match self {
+            Self::CompareAllocations { .. } => "比较组合优化方法".into(),
+            Self::Combined { .. } => "多策略统一账户".into(),
             Self::CollectAnnouncements { .. } => "采集巨潮实施公告证据".into(),
             Self::CollectReference { .. } => "采集日历或当前成分".into(),
             Self::SourceStatus {} => "查看数据来源与优先级".into(),

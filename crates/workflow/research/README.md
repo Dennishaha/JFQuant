@@ -108,3 +108,19 @@ JFQUANT_CORPORATE_FIXTURE_DIR="$PWD/target/corporate-fixtures" DUCKDB_DOWNLOAD_L
 ```
 
 Fixtures cover midrun/final-day liquidation, migration and locked merger delivery. Current results reject obsolete result schemas; the independent schema-5 model catalogue continues its own model/hash/feature verification and does not require retraining merely for an execution change.
+
+## Allocation backend
+
+Current worker protocol is **3**. The bundled hash lock includes skfolio **1.9.4**, Ledoit–Wolf estimation and CLARABEL. `allocation.py` owns holding-period risk, daily equally weighted historical OOS calibration, independent constraint checks and original solver receipts. `combined.py` uses frozen source targets and independent reference NAV, tracks self-financing capital drift, and emits one net security target. Unsupported/infeasible inputs fail without fallback.
+
+The native cross-section context exposes `jfquant_decision_snapshot()` after timestamp finalization; it never reborrows Engine and includes cash, prices, positions, sellable quantities, frozen cash, locked value and pending orders. Portfolio-update and after-trading callbacks are not used as closing evidence. The reference account owns separate event state and does not reuse real order or reservation audit rows. RiskBudgeting's unit-budget variables are explicitly transformed to the 0.98 stock budget; this is part of the mathematical formulation, not post-solve repair.
+
+MeanRisk and RiskBudgeting use fixed CLARABEL tolerances of 1e-10 with 200 iterations. All outputs undergo independent 1e-6 budget/cap/turnover checks. `optimal_inaccurate` is disclosed and accepted only after those checks. Actual money/share checks retain the existing ledger tolerances. Overlapping H-period observations are not independent statistical evidence.
+
+```bash
+bash crates/app/packaging/build-collector.sh
+PYTHONPATH=crates/workflow/research target/collector-build/python/bin/python3 -B -m unittest discover -s crates/workflow/research/tests -p test_allocation.py
+DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow frozen_sources_net_into_one_account --lib
+```
+
+首次启动已签名的macOS运行时可能触发原生扩展校验；worker就绪限时180秒，每100毫秒检查取消。超时、协议或依赖校验失败仍回收进程，不更换优化方法。

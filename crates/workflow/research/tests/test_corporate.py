@@ -10,7 +10,7 @@ from unittest.mock import patch
 import pyarrow as pa
 import pyarrow.parquet as pq
 import test_runtime
-from jfquant_research.backtest import backtest
+from allocation_fixture import backtest
 
 
 def fixture(root, kind, final=False):

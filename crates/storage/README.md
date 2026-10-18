@@ -270,3 +270,5 @@ CNY 价格指数。HiThink 接受确切供应商代码（或转换明确的 SH/S
 历史请求仅接受格式2；旧格式转换模块及入口已移除。本地一次性迁移完成后保留原始文件归档和旧任务，缺少的证明、定位、审核或发布时间保持待补。原文篡改仍是当前阻断；未被当前事实引用的旧正文失败保存在追溯区。
 
 验收：`cargo test -p analytics-storage membership_history --lib`。依赖锁复现：`uv pip compile crates/storage/collectors/requirements.in --python-version 3.12 --python-platform aarch64-apple-darwin --generate-hashes -o crates/storage/collectors/requirements.lock`。
+
+停牌边界的逐字段审阅接受正式公告中含义相同的“开市起停牌”“开市起开始停牌”“开市时起停牌”“开市时起开始停牌”措辞。仍要求完整证券身份、精确原文、公告日不晚于边界日及独立复牌证据；“若/拟于/预计/最晚”等条件或预计日期不能证明边界。原始公告、哈希和审阅收据保持可回放，未增加旧格式解析。复现：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-storage confirmed_opening_wording_variants --lib`。

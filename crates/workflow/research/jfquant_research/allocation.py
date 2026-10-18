@@ -100,7 +100,7 @@ def solve(config, names, returns, previous, expected=None, mapping=None, cancell
             if config["max_turnover"] is not None:
                 result.append(cp.norm1(stock - previous) <= config["max_turnover"])
             return result
-        kwargs = dict(prior_estimator=prior, min_weights=0., max_weights=cap, budget=exposure, solver="CLARABEL", solver_params={"tol_gap_abs":config["solver_tolerance"],"tol_feas":config["solver_tolerance"],"tol_gap_rel":config["solver_tolerance"],"max_iter":200}, scale_objective=1000., add_constraints=constraints, save_problem=True, raise_on_failure=True)
+        kwargs = dict(prior_estimator=prior, min_weights=0., max_weights=cap, budget=exposure, solver="CLARABEL", solver_params={"tol_gap_abs":config["solver_tolerance"],"tol_feas":config["solver_tolerance"],"tol_gap_rel":config["solver_tolerance"],"max_iter":200}, scale_objective=1000., scale_constraints=100., add_constraints=constraints, save_problem=True, raise_on_failure=True)
         if config["method"] == "risk_budgeting":
             kwargs.pop("budget")
             kwargs["max_weights"] = cap / exposure
@@ -114,7 +114,7 @@ def solve(config, names, returns, previous, expected=None, mapping=None, cancell
         status = problem.status
         if status not in ("optimal", "optimal_inaccurate"):
             raise ValueError(f"allocation_solver_status: {status}")
-        solver_stats = {"solver": problem.solver_stats.solver_name, "iterations": problem.solver_stats.num_iters, "tolerance":config["solver_tolerance"], "objective_scale":1000., "objective_value":float(problem.value)}
+        solver_stats = {"solver": problem.solver_stats.solver_name, "iterations": problem.solver_stats.num_iters, "tolerance":config["solver_tolerance"], "objective_scale":1000., "constraint_scale":100., "objective_value":float(problem.value)}
         covariance = np.asarray(model.prior_estimator_.return_distribution_.covariance)
     residuals = independent_checks(w, exposure, cap, previous, config["max_turnover"], mapping, config["max_stock_weight"], stock_exposure)
     risk = None

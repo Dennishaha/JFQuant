@@ -160,7 +160,7 @@ pub fn component_signatures() -> serde_json::Value {
     serde_json::json!({
         "calibration":digest(&[b"percentile-equal-date-intercept-ols-v1", numerical, include_bytes!("research/backtest/allocation_readiness.rs"), include_bytes!("research/backtest/allocation_admission.rs"), dependencies]),
         "optimization":digest(&[b"allocation-constrained-original-output-v1", numerical, include_bytes!("../research/jfquant_research/combined.py"), include_bytes!("allocation.rs"), include_bytes!("research/backtest/allocation_admission.rs"), include_bytes!("research/backtest/combined.rs"), dependencies]),
-        "execution":digest(&[include_bytes!("allocation_reference.rs"), include_bytes!("research/backtest/akquant.rs"), include_bytes!("../research/jfquant_research/backtest.py"), include_bytes!("../research/akquant-source.lock.json"), include_bytes!("research/worker.rs"), include_bytes!("research/backtest/account.rs"), dependencies])
+        "execution":digest(&[include_bytes!("allocation_reference.rs"), include_bytes!("persistence.rs"), include_bytes!("../../../Cargo.toml"), include_bytes!("research/backtest/akquant.rs"), include_bytes!("../research/jfquant_research/backtest.py"), include_bytes!("../research/akquant-source.lock.json"), include_bytes!("research/worker.rs"), include_bytes!("research/backtest/account.rs"), dependencies])
     })
 }
 

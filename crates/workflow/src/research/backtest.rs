@@ -1264,6 +1264,11 @@ fn finish(
     validate_result(&summary)?;
     let summary: artifacts::ResultSummary = serde_json::from_value(summary)?;
     save(request.output.join("summary.json"), &summary)?;
+    let persisted: serde_json::Value =
+        serde_json::from_slice(&fs::read(request.output.join("summary.json"))?)?;
+    if crate::signature(&(factor_signature, &persisted["execution"]))? != run_signature {
+        return Err("publication_execution_signature_roundtrip_mismatch".into());
+    }
 
     Ok(())
 }

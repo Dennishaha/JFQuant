@@ -16,6 +16,19 @@ fn num(v: Decimal) -> Result<f64> {
         .filter(|x| x.is_finite())
         .ok_or_else(|| "reference_number_overflow".into())
 }
+fn funded_quantity(wanted: Decimal, cash: Decimal, price: Decimal) -> Result<Decimal> {
+    let mut quantity = wanted.max(Decimal::ZERO).min(cash / price);
+    // Decimal division rounds to a representable fraction. When it rounds up,
+    // use the preceding representable share quantity rather than overdrawing
+    // cash or silently erasing a negative balance after the trade.
+    if quantity * price > cash {
+        quantity = (quantity - Decimal::new(1, quantity.scale())).max(Decimal::ZERO);
+    }
+    if quantity * price > cash {
+        return Err("reference_funding_precision".into());
+    }
+    Ok(quantity)
+}
 fn mark(
     positions: &BTreeMap<String, Decimal>,
     prices: &BTreeMap<String, Decimal>,
@@ -148,8 +161,14 @@ pub fn build(root: &Path) -> Result<Value> {
                 .chain(wanted.keys())
                 .cloned()
                 .collect::<std::collections::BTreeSet<_>>();
+            let tradable = |s: &String| {
+                day.get(s)
+                    .and_then(|r| r["volume"].as_f64())
+                    .is_some_and(|v| v > 0.)
+            };
             let desired = names
                 .iter()
+                .filter(|s| tradable(s))
                 .map(|s| {
                     Ok((
                         s.clone(),
@@ -160,11 +179,6 @@ pub fn build(root: &Path) -> Result<Value> {
                     ))
                 })
                 .collect::<Result<BTreeMap<_, _>>>()?;
-            let tradable = |s: &String| {
-                day.get(s)
-                    .and_then(|r| r["volume"].as_f64())
-                    .is_some_and(|v| v > 0.)
-            };
             for s in names.iter().filter(|s| tradable(s)) {
                 let q = positions.entry(s.clone()).or_default();
                 let sell = (*q - desired[s]).max(Decimal::ZERO);
@@ -174,14 +188,17 @@ pub fn build(root: &Path) -> Result<Value> {
             }
             for s in names.iter().filter(|s| tradable(s)) {
                 let q = positions.entry(s.clone()).or_default();
-                let buy = (desired[s] - *q).max(Decimal::ZERO).min(cash / opens[s]);
+                let buy = funded_quantity(desired[s] - *q, cash, opens[s])?;
                 *q += buy;
                 cash -= buy * opens[s];
                 changed |= buy > Decimal::ZERO;
             }
             pending = names.iter().any(|s| {
-                (positions.get(s).copied().unwrap_or_default() - desired[s]).abs()
-                    > Decimal::new(1, 12)
+                let held = positions.get(s).copied().unwrap_or_default();
+                match desired.get(s) {
+                    Some(target) => (held - target).abs() > Decimal::new(1, 12),
+                    None => held != Decimal::ZERO || wanted.get(s).is_some_and(|w| !w.is_zero()),
+                }
             });
         }
         positions.retain(|_, q| *q != Decimal::ZERO);
@@ -190,7 +207,7 @@ pub fn build(root: &Path) -> Result<Value> {
             ledger.close_account(*date, &mut cash, &mut positions, &mut available)?;
         }
         if cash < Decimal::ZERO || positions.values().any(|q| *q < Decimal::ZERO) {
-            return Err("reference_negative_cash_or_shares".into());
+            return Err(format!("reference_negative_cash_or_shares:{date}:cash={cash}").into());
         }
         let locked = ledger.value(&closes)?;
         let nav = cash + mark(&positions, &closes)? + locked;
@@ -211,6 +228,82 @@ pub fn build(root: &Path) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fractional_funding_never_rounds_quantity_above_available_cash() {
+        for cash in ["1", "0.02", "0.00000000000000000000000001"] {
+            for price in ["6", "91.19", "0.001", "123.456789"] {
+                let cash: Decimal = cash.parse().unwrap();
+                let price: Decimal = price.parse().unwrap();
+                let quantity = funded_quantity(Decimal::from(1_000_000), cash, price).unwrap();
+                assert!(quantity >= Decimal::ZERO);
+                assert!(quantity * price <= cash);
+                let remaining = cash - quantity * price;
+                let next_unit = Decimal::new(1, quantity.scale()) * price;
+                assert!(remaining <= next_unit);
+            }
+        }
+        // An affordable desired quantity is preserved, without normalization.
+        assert_eq!(
+            funded_quantity(Decimal::new(1, 2), Decimal::ONE, Decimal::from(6)).unwrap(),
+            Decimal::new(1, 2)
+        );
+    }
+    #[test]
+    fn unheld_missing_open_stays_cash_until_tradable_or_replaced() {
+        for replace in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path();
+            atomic_json(&root.join("reference-input.json"), &json!({
+                "schema_version":1,"rights":null,"actions":[],"bars":[
+                    {"date":"2024-01-01","symbol":"SH600000","open":10.,"close":10.,"volume":100.},
+                    {"date":"2024-01-02","symbol":"SZ000001","open":20.,"close":20.,"volume":100.},
+                    {"date":"2024-01-03","symbol":"SH600000","open":10.,"close":10.,"volume":100.}
+                ]
+            })).unwrap();
+            atomic_json(
+                &root.join("reference-targets.json"),
+                &json!({"schema_version":1,"targets":[]}),
+            )
+            .unwrap();
+            let mut targets = vec![
+                json!({"date":"2024-01-01","effective_date":"2024-01-02","weights":{"SH600000":0.98}}),
+            ];
+            if replace {
+                targets
+                    .push(json!({"date":"2024-01-02","effective_date":"2024-01-03","weights":{}}));
+            }
+            atomic_json(
+                &root.join("allocation_report.json"),
+                &json!({"schema_version":2,"status":"completed","targets":targets}),
+            )
+            .unwrap();
+            let result = build(root).unwrap();
+            let rows = result["rows"].as_array().unwrap();
+            assert_eq!(rows[1]["cash"], 1.);
+            assert_eq!(rows[1]["positions"], json!({}));
+            assert_eq!(rows[1]["pending"], true);
+            assert_eq!(rows[2]["pending"], false);
+            if replace {
+                assert_eq!(rows[2]["cash"], 1.);
+                assert_eq!(rows[2]["positions"], json!({}));
+            } else {
+                assert_eq!(rows[2]["positions"]["SH600000"], "0.098");
+            }
+            // The same missing quote remains fatal when shares are actually held.
+            targets[0]["effective_date"] = json!("2024-01-01");
+            atomic_json(
+                &root.join("allocation_report.json"),
+                &json!({"schema_version":2,"status":"completed","targets":targets}),
+            )
+            .unwrap();
+            assert!(
+                build(root)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("reference_valuation_unknown:SH600000")
+            );
+        }
+    }
     #[test]
     fn halted_targets_remain_pending_and_dividends_stay_cash() {
         let tmp = tempfile::tempdir().unwrap();

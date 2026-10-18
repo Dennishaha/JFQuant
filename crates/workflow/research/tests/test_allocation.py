@@ -7,6 +7,21 @@ from jfquant_research.allocation import StockHistory, independent_checks
 
 
 class AllocationTests(unittest.TestCase):
+    def test_boundary_minimum_variance_is_executable_without_weight_repair(self):
+        # Correlated assets with different residual risks put many optimum weights
+        # on zero. Unscaled constraints returned about -1e-11 for this fixture,
+        # which passed residual checks but was rejected by AKQuant's long-only API.
+        rng = np.random.default_rng(0)
+        returns = rng.normal(size=(252, 1)) * .03 + rng.normal(size=(252, 50)) * np.linspace(.002, .08, 50)
+        weights, receipt = solve(config(method='minimum_variance', max_stock_weight=.1),
+                                 [f'asset{i}' for i in range(50)], returns, [0.] * 50)
+        self.assertTrue((weights >= 0).all())
+        self.assertLess(weights.min(), 1e-8)
+        self.assertLessEqual(weights.max(), .1 + 1e-6)
+        self.assertAlmostEqual(weights.sum(), .98, places=6)
+        np.testing.assert_array_equal(weights, receipt['weights'])
+        self.assertEqual(receipt['solver']['constraint_scale'], 100.)
+
     def test_equal_and_exiting_holdings_turnover(self):
         w,r=solve(config(),['a','b'],[],[.2,.3])
         np.testing.assert_allclose(w,[.49,.49],atol=1e-12)

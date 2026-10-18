@@ -133,6 +133,8 @@ def _backtest(request, cancelled, emit):
             self.last_target = {}
 
         def publish_target(self, date, weights, receipt, snapshot):
+            if any(weight < 0 for weight in weights.values()):
+                raise ValueError("allocation_execution_negative_weight")
             receipt.update(date=date,effective_date=next_date.get(date),actual_snapshot=snapshot)
             if next_date.get(date) is not None:
                 self.cancel_all_orders()

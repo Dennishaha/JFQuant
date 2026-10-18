@@ -37,7 +37,13 @@ fn boundary_clause(text: &str, date: Date, starting: bool) -> bool {
         format!("{}年{}月{}日", date.year(), date.month(), date.day()),
     ];
     let markers: &[&str] = if starting {
-        &["开市起停牌", "停牌一天"]
+        &[
+            "开市起停牌",
+            "开市起开始停牌",
+            "开市时起停牌",
+            "开市时起开始停牌",
+            "停牌一天",
+        ]
     } else {
         &["开市起复牌", "复牌之日起", "复牌后"]
     };
@@ -144,6 +150,32 @@ pub(super) fn replay(
 mod tests {
     use super::*;
     use crate::corporate_actions::evidence::{CaptureRequest, DocumentSpec, capture_with};
+    #[test]
+    fn confirmed_opening_wording_variants_keep_tentative_boundaries_rejected() {
+        let day = "2025-05-26".parse().unwrap();
+        for marker in [
+            "开市起停牌",
+            "开市起开始停牌",
+            "开市时起停牌",
+            "开市时起开始停牌",
+        ] {
+            assert!(boundary_clause(
+                &format!("公司股票自2025年5月26日（星期一）{marker}"),
+                day,
+                true
+            ));
+            assert!(!boundary_clause(
+                &format!("若获批准，公司股票拟于2025年5月26日（星期一）{marker}"),
+                day,
+                true
+            ));
+            assert!(!boundary_clause(
+                &format!("公司股票自2025年5月26日预计{marker}"),
+                day,
+                true
+            ));
+        }
+    }
     #[test]
     fn tentative_resumption_is_not_a_verified_boundary() {
         let day = "2025-05-09".parse().unwrap();

@@ -17,9 +17,25 @@ def _backtest(request, cancelled, emit):
     validate_config(allocation)
     output = Path(request["output"])
     allocation_input = json.loads(Path(request["allocation_input"]).read_text())
+    required = {"schema_version", "config", "stock_exposure", "calendar", "prices", "missing_prices", "admission", "prediction_provenance", "reference_range"}
+    if not required.issubset(allocation_input) or type(allocation_input["schema_version"]) is not int or allocation_input["schema_version"] != 2:
+        raise ValueError("unsupported_allocation_input_format")
+    if allocation_input["config"] != allocation or not isinstance(allocation_input["admission"], dict) or not isinstance(allocation_input["missing_prices"], dict):
+        raise ValueError("allocation_input_contract_mismatch")
+    if allocation["method"] == "mean_variance" and not isinstance(allocation_input["prediction_provenance"], dict):
+        raise ValueError("allocation_prediction_provenance_required")
+    stock_exposure = allocation_input["stock_exposure"]
     decisions, targets = [], []
+    journal_path = output / "allocation-decisions.jsonl"
+    journal_path.write_text("")
+    journal_count = 0
     def save_allocation(status, error=None):
-        artifact = {"schema_version":1,"status":status,"error":error,"config":allocation,"input_sha256":digest(allocation_input),"decisions":decisions,"targets":targets}
+        nonlocal journal_count
+        with journal_path.open("a") as journal:
+            for decision,target in zip(decisions[journal_count:],targets[journal_count:]):
+                journal.write(json.dumps(dict(decision=decision,target=target),allow_nan=False)+"\n")
+                journal_count += 1
+        artifact = {"schema_version":2,"status":status,"error":error,"config":allocation,"input_sha256":digest(allocation_input),"decision_count":len(decisions),"journal":"allocation-decisions.jsonl","decisions":decisions if status != "running" else [],"targets":targets if status != "running" else []}
         path = output / "allocation_report.json"
         partial = path.with_suffix(".partial")
         partial.write_text(json.dumps(artifact, allow_nan=False))
@@ -35,13 +51,19 @@ def _backtest(request, cancelled, emit):
     by_date = {str(date): dict(zip(frame["symbol"], frame["score"])) for date, frame in signals.groupby("date", sort=True)}
     for date in request.get("signal_dates", []):
         by_date.setdefault(str(date), {})
-    history = StockHistory(allocation_input["calendar"], allocation_input["prices"], by_date, request["rebalance_days"], allocation, allocation_input.get("prediction_provenance"))
+    history = StockHistory(allocation_input["calendar"], allocation_input["prices"], by_date, request["rebalance_days"], allocation, allocation_input["prediction_provenance"], allocation_input["missing_prices"], allocation_input["admission"])
     calendar = allocation_input["calendar"]
     combined = None
     if request.get("combined_input"):
         from .combined import CombinedAllocator
         payload = json.loads(Path(request["combined_input"]).read_text())
-        combined = CombinedAllocator(payload["plan"],payload["sources"],calendar,cancelled)
+        combined = CombinedAllocator(payload["plan"],payload["sources"],calendar,cancelled,stock_exposure)
+    issues = [] if combined is not None else history.prepare(calendar, allocation_input["reference_range"]["start"], request["top_n"], cancelled, request["formal_start"])
+    admission_report = dict(schema_version=1,status="blocked" if issues else "ready",issues=issues,candidate_dates={d:r for d,(_,r) in history.candidate_cache.items()})
+    (output / "allocation-admission.json").write_text(json.dumps(admission_report,allow_nan=False))
+    if issues:
+        save_allocation("failed", "allocation_data_admission_failed")
+        raise ValueError(f"allocation_data_admission_failed: {issues[0]['date']}: {issues[0]['error']}; see allocation-admission.json")
     next_date = {a:b for a,b in zip(calendar,calendar[1:])}
     warmup_targets, warmup_decisions = [], []
     pool = request.get("pool", {}).get("intervals", {})
@@ -53,18 +75,19 @@ def _backtest(request, cancelled, emit):
             if date < reference_start or date >= request["formal_start"] or date not in by_date:
                 continue
             if warmup_clock % request["rebalance_days"] == 0:
-                ranking = sorted(by_date[date], key=lambda s:(-by_date[date][s],s))[:request["top_n"]]
+                scores, eligibility = history.candidates(date,by_date[date])
+                ranking = sorted(scores, key=lambda s:(-scores[s],s))[:request["top_n"]]
                 warmup_config = dict(allocation)
                 warmup_config["max_turnover"] = None  # Reference targets have no actual-account turnover contract.
                 risk=[];expected=None;bounds=None;calibration=None;receipt=None
                 if ranking:
                     if allocation["method"] != "equal":risk,bounds = history.risk(date,ranking)
-                    if allocation["method"] == "mean_variance":expected,calibration = history.calibrate(date,ranking,by_date[date])
-                    values,receipt = solve(warmup_config,ranking,risk,[0.]*len(ranking),expected,cancelled=cancelled)
+                    if allocation["method"] == "mean_variance":expected,calibration = history.calibrate(date,ranking,scores)
+                    values,receipt = solve(warmup_config,ranking,risk,[0.]*len(ranking),expected,cancelled=cancelled,stock_exposure=stock_exposure)
                     weights=dict(zip(ranking,values.tolist()))
                 else:weights={}
                 warmup_targets.append(dict(date=date,effective_date=next_date.get(date),weights=weights))
-                warmup_decisions.append(dict(date=date,effective_date=next_date.get(date),solver=receipt,risk_history=bounds,calibration=calibration,kind="reference_warmup"))
+                warmup_decisions.append(dict(date=date,effective_date=next_date.get(date),solver=receipt,risk_history=bounds,calibration=calibration,eligibility=eligibility,kind="reference_warmup"))
                 last_warmup_target = weights
             elif request.get("pool_exit_policy") == "next_tradable_day" and pool:
                 kept = {s:w for s,w in last_warmup_target.items() if any(r["start"] <= date <= r["end"] for r in pool.get(s,[]))}
@@ -150,7 +173,8 @@ def _backtest(request, cancelled, emit):
                 return
             if combined is not None or self.clock % request["rebalance_days"] == 0:
                 # Model scores may all be negative: ranking, not sign, selects long holdings.
-                ranking = sorted(((s,v) for s,v in by_date[date].items() if s in members), key=lambda item: (-item[1], item[0]))[:request["top_n"]]
+                scores, eligibility = history.candidates(date,by_date[date]) if combined is None else ({},None)
+                ranking = sorted(((s,v) for s,v in scores.items() if s in members), key=lambda item: (-item[1], item[0]))[:request["top_n"]]
                 snapshot = json.loads(self.ctx.jfquant_decision_snapshot())
                 if snapshot["equity"] <= 0 or any(q < 0 for q in snapshot["positions"].values()):
                     raise ValueError("allocation_account_snapshot_invalid")
@@ -180,15 +204,15 @@ def _backtest(request, cancelled, emit):
                     if config["method"] != "equal":
                         risk, bounds = history.risk(date, names)
                     if config["method"] == "mean_variance":
-                        expected, calibration = history.calibrate(date, names, by_date[date])
-                    values, receipt = solve(config, names, risk, [current.get(s,0.) for s in names], expected, cancelled=cancelled)
+                        expected, calibration = history.calibrate(date, names, scores)
+                    values, receipt = solve(config, names, risk, [current.get(s,0.) for s in names], expected, cancelled=cancelled, stock_exposure=stock_exposure)
                     weights = dict(zip(names, values.tolist()))
                 else:
                     weights = {}
                     if config["max_turnover"] is not None and exits > allocation["max_turnover"] + TOL:
                         raise ValueError("allocation_infeasible: liquidation turnover")
                     receipt = {"schema_version":1,"method":config["method"],"names":[],"weights":[],"status":"analytic","constraints":{"turnover":0.}}
-                receipt.update(exiting_turnover=exits, risk_history=bounds, calibration=calibration)
+                receipt.update(exiting_turnover=exits, risk_history=bounds, calibration=calibration, eligibility=eligibility)
                 receipt["constraints"]["turnover"] += exits
                 self.publish_target(date,weights,receipt,snapshot)
             self.clock += 1
@@ -266,7 +290,7 @@ def backtest(request, cancelled, emit):
         path = output / "allocation_report.json"
         try:
             artifact = json.loads(path.read_text()) if path.exists() else {
-                "schema_version": 1, "config": request["allocation"], "decisions": [], "targets": []}
+                "schema_version": 2, "config": request["allocation"], "decisions": [], "targets": []}
             artifact.update(status="failed", error=str(error))
             partial = path.with_suffix(".partial")
             partial.write_text(json.dumps(artifact, allow_nan=False))

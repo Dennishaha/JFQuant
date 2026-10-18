@@ -1269,7 +1269,7 @@ fn service_client_tasks_appear_in_egui_can_be_cancelled_and_share_research_resul
         })
         .unwrap();
     h.wait_for(|app| !app.state.busy() && app.state.platform.runs.iter().any(|r| r.id == task));
-    assert_eq!(h.app.state.platform.template.schema_version, 11);
+    assert_eq!(h.app.state.platform.template.schema_version, 12);
     h.app.state.panel = Panel::Research;
     h.click("执行年度研究");
     h.wait_for(|app| !app.state.busy() && app.state.platform.details.get("aggregate").is_some());
@@ -2118,4 +2118,22 @@ fn history_editor_submits_shared_draft_without_network_or_model_changes() {
         serde_json::to_value(&h.app.state.platform.template).unwrap(),
         original
     );
+}
+
+#[test]
+fn allocation_controls_do_not_silently_clamp_existing_valid_advanced_parameters() {
+    let (mut h, _tmp) = platform_harness(Panel::Research);
+    let c = &mut h.app.state.platform.template.config.allocation;
+    c.method = analytics_workflow::allocation::AllocationMethod::MeanVariance;
+    c.max_stock_weight = 0.005;
+    c.max_strategy_weight = 0.02;
+    c.risk_aversion = Some(1e9);
+    c.calibration_min_pairs = 15000;
+    c.validate().unwrap();
+    let before = c.clone();
+    h.click("优化配置与多策略统一账户");
+    for _ in 0..3 {
+        h.frame(vec![]);
+    }
+    assert_eq!(h.app.state.platform.template.config.allocation, before);
 }

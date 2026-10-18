@@ -354,27 +354,14 @@ pub(super) fn simulate(
         };
         benchmark_returns.insert(date.to_string(), r);
     }
-    let mut allocation_prices = BTreeMap::<String, BTreeMap<String, f64>>::new();
-    if request.config.allocation.method != crate::allocation::AllocationMethod::Equal {
-        for id in &symbols {
-            let prices = dataset.research_field(id, "open", true)?;
-            let volume = dataset.research_raw_volume(id, true)?;
-            let mut observed = BTreeMap::new();
-            for (day, date) in dataset
-                .calendar
-                .iter()
-                .enumerate()
-                .filter(|(_, d)| **d <= end)
-            {
-                if volume.get(day).is_some_and(|v| v > 0.)
-                    && let Some(value) = prices.get(day).filter(|v| v.is_finite() && *v > 0.)
-                {
-                    observed.insert(date.to_string(), value);
-                }
-            }
-            allocation_prices.insert(id.clone(), observed);
-        }
-    }
+    let admission = super::allocation_admission::build(
+        request,
+        dataset,
+        Some(book),
+        pool,
+        signals.iter().map(|s| s.0).min().unwrap_or(start),
+        end,
+    )?;
     let prediction_manifest: serde_json::Value =
         serde_json::from_slice(&fs::read(request.output.join("prediction_manifest.json"))?)?;
     let training_root = if frozen["independent"].is_object() {
@@ -404,8 +391,8 @@ pub(super) fn simulate(
     save(
         request.output.join("allocation-input.json"),
         &serde_json::json!({
-            "schema_version":1,"calendar":dataset.calendar.iter().filter(|d|**d<=end).collect::<Vec<_>>(),
-            "prices":allocation_prices,"config":request.config.allocation,"horizon":request.config.rebalance_days,
+            "schema_version":2,"calendar":dataset.calendar.iter().filter(|d|**d<=end).collect::<Vec<_>>(),
+            "stock_exposure":crate::allocation::STOCK_EXPOSURE,"admission":admission,"prices":admission["prices"],"missing_prices":admission["missing_prices"],"config":request.config.allocation,"horizon":request.config.rebalance_days,
             "formal_range":range,"reference_range":reference_range,"prediction_start":prediction_start,"market_sha256":frozen["market_content_sha256"],
             "folds":frozen["resolved_folds"],"event_sha256":frozen["corporate_action_sha256"],
             "prediction_provenance":{"models":prediction_folds,"strategy_contract":strategy_contract}

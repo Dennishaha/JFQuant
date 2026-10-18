@@ -60,7 +60,7 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub mod combined;
 
 /// Current strict integer-share research result format.
-pub const RESEARCH_SCHEMA_VERSION: u32 = 21;
+pub const RESEARCH_SCHEMA_VERSION: u32 = 22;
 
 /// A result cannot be interpreted using the current research contract.
 #[derive(Debug, thiserror::Error)]
@@ -1351,4 +1351,5 @@ pub fn preview_samples_with_policy(
     )
 }
 
+mod allocation_admission;
 mod allocation_readiness;

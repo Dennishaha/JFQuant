@@ -508,7 +508,7 @@ fn split_profiles_are_reusable_portable_and_reject_flat_or_conflicting_templates
     let mut t = ResearchTemplate::builtin_csi300().unwrap();
     t.write(&root.join("workflow.json")).unwrap();
     let d: Value = serde_json::from_slice(&fs::read(root.join("workflow.json")).unwrap()).unwrap();
-    assert_eq!(d["schema_version"], 11);
+    assert_eq!(d["schema_version"], 12);
     for k in [
         "config",
         "factor_ids",
@@ -801,4 +801,41 @@ fn legacy_fit_entry_ignores_a_future_unused_test_window() {
             .all(|p| p.phase == "train" || p.phase == "validation")
     );
     assert!(w.resolve(&run.output).join("fold-0000/model.txt").is_file());
+}
+
+#[test]
+fn allocation_protocol_requires_current_template_and_all_new_fields_without_runtime_repair() {
+    let current = serde_json::to_value(ResearchTemplate::default()).unwrap();
+    for mutation in [
+        "old_version",
+        "missing_version",
+        "missing_candidate_policy",
+        "missing_solver_tolerance",
+    ] {
+        let mut value = current.clone();
+        match mutation {
+            "old_version" => value["schema_version"] = 11.into(),
+            "missing_version" => {
+                value.as_object_mut().unwrap().remove("schema_version");
+            }
+            "missing_candidate_policy" => {
+                value["config"]["allocation"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("candidate_policy");
+            }
+            _ => {
+                value["config"]["allocation"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("solver_tolerance");
+            }
+        }
+        let rejected = match serde_json::from_value::<ResearchTemplate>(value.clone()) {
+            Ok(t) => t.validate().is_err(),
+            Err(_) => true,
+        };
+        assert!(rejected, "{mutation}");
+        assert_ne!(value, current);
+    }
 }

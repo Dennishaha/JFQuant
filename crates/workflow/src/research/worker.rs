@@ -15,7 +15,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 // A fresh signed macOS runtime can spend over a minute validating native extensions.
 // Startup remains cancellable every 100 ms; an unresponsive process is still retired.
 const STARTUP_TIMEOUT_SECONDS: u64 = 180;
@@ -272,7 +272,7 @@ impl Drop for Session {
     fn drop(&mut self) {
         let _ = writeln!(
             self.input,
-            "{{\"version\":3,\"operation\":\"shutdown\",\"signature\":\"{}\"}}",
+            "{{\"version\":4,\"operation\":\"shutdown\",\"signature\":\"{}\"}}",
             runtime_signature()
         );
         let _ = self.input.flush();

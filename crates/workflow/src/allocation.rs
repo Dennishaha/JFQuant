@@ -2,6 +2,20 @@
 use crate::Result;
 use serde::{Deserialize, Serialize};
 
+/// Single authority for stock target exposure, also sent to the Python worker.
+pub const STOCK_EXPOSURE: f64 = 0.98;
+
+/// Auditable candidate admission, evaluated before ranking using realized prices only.
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidatePolicy {
+    /// Preserve the candidate universe; missing optimizer history blocks execution.
+    #[default]
+    Unfiltered,
+    /// Admit only candidates with the complete configured risk window.
+    CompleteRiskWindow,
+}
+
 /// Allocation objective; all methods use the same independent constraint checks.
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -20,6 +34,10 @@ pub enum AllocationMethod {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AllocationConfig {
+    /// Explicit candidate admission; use the same policy for method comparisons.
+    pub candidate_policy: CandidatePolicy,
+    /// CLARABEL feasibility and absolute/relative gap tolerances.
+    pub solver_tolerance: f64,
     /// First historical sample prediction date; null uses the schedule start.
     #[serde(deserialize_with = "explicit_option")]
     pub prediction_start: Option<analytics_core::Date>,
@@ -61,6 +79,8 @@ where
 impl Default for AllocationConfig {
     fn default() -> Self {
         Self {
+            candidate_policy: CandidatePolicy::Unfiltered,
+            solver_tolerance: 1e-9,
             prediction_start: None,
             reference_start: None,
             execution_start: None,
@@ -91,6 +111,8 @@ impl AllocationConfig {
             return Err("allocation_warmup_order_invalid".into());
         }
         if !(2..=10000).contains(&self.risk_window)
+            || !self.solver_tolerance.is_finite()
+            || !(1e-12..=1e-6).contains(&self.solver_tolerance)
             || !(2..=10000).contains(&self.calibration_window)
             || self.calibration_min_days < 2
             || self.calibration_min_days > self.calibration_window
@@ -113,8 +135,10 @@ impl AllocationConfig {
     /// Reject structurally impossible stock targets before expensive work.
     pub fn validate_count(&self, count: usize) -> Result<()> {
         self.validate()?;
-        if count > 0 && count as f64 * self.max_stock_weight < 0.98 - 1e-6 {
-            return Err("allocation_infeasible: candidate count * cap < 0.98".into());
+        if count > 0 && count as f64 * self.max_stock_weight < STOCK_EXPOSURE - 1e-6 {
+            return Err(
+                format!("allocation_infeasible: candidate count * cap < {STOCK_EXPOSURE}").into(),
+            );
         }
         Ok(())
     }
@@ -134,8 +158,8 @@ pub fn component_signatures() -> serde_json::Value {
     let numerical = include_bytes!("../research/jfquant_research/allocation.py");
     let dependencies = include_bytes!("../research/requirements.lock");
     serde_json::json!({
-        "calibration":digest(&[b"percentile-equal-date-intercept-ols-v1", numerical, include_bytes!("research/backtest/allocation_readiness.rs"), dependencies]),
-        "optimization":digest(&[b"allocation-constrained-original-output-v1", numerical, include_bytes!("../research/jfquant_research/combined.py"), include_bytes!("allocation.rs"), include_bytes!("research/backtest/combined.rs"), dependencies]),
+        "calibration":digest(&[b"percentile-equal-date-intercept-ols-v1", numerical, include_bytes!("research/backtest/allocation_readiness.rs"), include_bytes!("research/backtest/allocation_admission.rs"), dependencies]),
+        "optimization":digest(&[b"allocation-constrained-original-output-v1", numerical, include_bytes!("../research/jfquant_research/combined.py"), include_bytes!("allocation.rs"), include_bytes!("research/backtest/allocation_admission.rs"), include_bytes!("research/backtest/combined.rs"), dependencies]),
         "execution":digest(&[include_bytes!("allocation_reference.rs"), include_bytes!("research/backtest/akquant.rs"), include_bytes!("../research/jfquant_research/backtest.py"), include_bytes!("../research/akquant-source.lock.json"), include_bytes!("research/worker.rs"), include_bytes!("research/backtest/account.rs"), dependencies])
     })
 }
@@ -148,6 +172,8 @@ const ARTIFACT_FILES: &[&str] = &[
     "research-request.json",
     "reference-targets.json",
     "reference-event-checks.json",
+    "allocation-admission.json",
+    "allocation-decisions.jsonl",
 ];
 fn file_hash(path: &std::path::Path) -> Result<String> {
     use sha2::{Digest, Sha256};
@@ -170,7 +196,7 @@ pub fn publish_artifacts(root: &std::path::Path) -> Result<()> {
     }
     crate::atomic_json(
         &root.join("allocation-manifest.json"),
-        &serde_json::json!({"schema_version":1,"files":hashes}),
+        &serde_json::json!({"schema_version":2,"files":hashes}),
     )?;
     verify_artifacts(root)
 }
@@ -181,7 +207,7 @@ pub fn verify_artifacts(root: &std::path::Path) -> Result<()> {
         Ok(serde_json::from_slice(&std::fs::read(root.join(name))?)?)
     };
     let manifest = read("allocation-manifest.json")?;
-    if manifest["schema_version"] != 1 {
+    if manifest["schema_version"] != 2 {
         return Err("allocation_manifest_format".into());
     }
     for name in ARTIFACT_FILES {
@@ -201,6 +227,10 @@ pub fn verify_artifacts(root: &std::path::Path) -> Result<()> {
         None
     };
     let input = read("allocation-input.json")?;
+    if input["schema_version"] != 2 || input["stock_exposure"].as_f64() != Some(STOCK_EXPOSURE) {
+        return Err("allocation_input_contract_invalid".into());
+    }
+    let journal = std::fs::read_to_string(root.join("allocation-decisions.jsonl"))?;
     let calendar: Vec<analytics_core::Date> = serde_json::from_value(input["calendar"].clone())?;
     if calendar.is_empty() || calendar.windows(2).any(|w| w[0] >= w[1]) {
         return Err("allocation_calendar_invalid".into());
@@ -211,7 +241,7 @@ pub fn verify_artifacts(root: &std::path::Path) -> Result<()> {
     if input["config"] != report["config"] {
         return Err("allocation_config_changed".into());
     }
-    if report["schema_version"] != 1 || report["status"] != "completed" {
+    if report["schema_version"] != 2 || report["status"] != "completed" {
         return Err("allocation_report_incomplete".into());
     }
     let targets = report["targets"]
@@ -220,6 +250,18 @@ pub fn verify_artifacts(root: &std::path::Path) -> Result<()> {
     let decisions = report["decisions"]
         .as_array()
         .ok_or("allocation_decisions_missing")?;
+    let journal: Vec<Value> = journal
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<std::result::Result<_, _>>()?;
+    if journal.len() != decisions.len()
+        || journal
+            .iter()
+            .zip(decisions.iter().zip(targets))
+            .any(|(r, (d, t))| r["decision"] != *d || r["target"] != *t)
+    {
+        return Err("allocation_decision_journal_mismatch".into());
+    }
     if targets.len() != decisions.len() {
         return Err("allocation_decision_target_count".into());
     }
@@ -272,6 +314,12 @@ pub fn verify_artifacts(root: &std::path::Path) -> Result<()> {
             let score: analytics_core::Date = serde_json::from_value(record["score_date"].clone())?;
             let realized: analytics_core::Date =
                 serde_json::from_value(record["return_end"].clone())?;
+            if record["used"] == false {
+                if realized > date {
+                    return Err("allocation_calibration_time_contract_invalid".into());
+                }
+                continue;
+            }
             let cutoff: analytics_core::Date =
                 serde_json::from_value(record["model"]["fit_cutoff"].clone())?;
             if cutoff >= score || realized > date {
@@ -281,6 +329,9 @@ pub fn verify_artifacts(root: &std::path::Path) -> Result<()> {
         let weights = target["weights"]
             .as_object()
             .ok_or("allocation_weights_missing")?;
+        if combined_input.is_none() && decision["instruction_kind"] != "pool_exit" {
+            verify_candidate_receipt(&input, decision, &config, date)?;
+        }
         let mut sum = 0.;
         for (s, v) in weights {
             analytics_core::pool::validate_instrument(s)?;
@@ -291,11 +342,11 @@ pub fn verify_artifacts(root: &std::path::Path) -> Result<()> {
             sum += w;
         }
         let combined = decision.get("capital_kind").is_some();
-        if sum > 0.98 + 1e-6
+        if sum > crate::allocation::STOCK_EXPOSURE + 1e-6
             || (!combined
                 && decision["instruction_kind"] != "pool_exit"
                 && !weights.is_empty()
-                && (sum - 0.98).abs() > 1e-6)
+                && (sum - crate::allocation::STOCK_EXPOSURE).abs() > 1e-6)
         {
             return Err("allocation_budget_invalid".into());
         }
@@ -482,6 +533,57 @@ fn verify_combined_net(
     Ok(())
 }
 
+fn verify_candidate_receipt(
+    input: &serde_json::Value,
+    decision: &serde_json::Value,
+    config: &AllocationConfig,
+    date: analytics_core::Date,
+) -> Result<()> {
+    if decision["eligibility"]["policy"] != serde_json::to_value(config.candidate_policy)?
+        || decision["eligibility"]["as_of"] != date.to_string()
+    {
+        return Err("allocation_candidate_receipt_invalid".into());
+    }
+    if config.candidate_policy != CandidatePolicy::CompleteRiskWindow {
+        return Ok(());
+    }
+    let allowed = input["admission"]["eligibility"][date.to_string()]["eligible"]
+        .as_array()
+        .ok_or("allocation_eligible_dates_missing")?;
+    let calendar: Vec<analytics_core::Date> = serde_json::from_value(input["calendar"].clone())?;
+    let day = calendar
+        .binary_search(&date)
+        .map_err(|_| "allocation_candidate_date_invalid")?;
+    let h = input["horizon"]
+        .as_u64()
+        .ok_or("allocation_horizon_missing")? as usize;
+    let start = day
+        .checked_sub(config.risk_window + h)
+        .ok_or("allocation_candidate_warmup_missing")?;
+    for symbol in decision["names"]
+        .as_array()
+        .ok_or("allocation_candidate_names_missing")?
+    {
+        if !allowed.contains(symbol) {
+            return Err("allocation_candidate_not_eligible".into());
+        }
+        let symbol = symbol
+            .as_str()
+            .ok_or("allocation_candidate_identity_invalid")?;
+        for i in start..start + config.risk_window {
+            for endpoint in [i + 1, i + 1 + h] {
+                if input["prices"][symbol][calendar[endpoint].to_string()]
+                    .as_f64()
+                    .is_none_or(|v| !v.is_finite() || v <= 0.)
+                {
+                    return Err("allocation_candidate_history_incomplete".into());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Bounded presentation data; complete evidence remains in the named task artifacts.
 pub fn display(root: &std::path::Path) -> Result<serde_json::Value> {
     use serde_json::{Value, json};
@@ -496,7 +598,7 @@ pub fn display(root: &std::path::Path) -> Result<serde_json::Value> {
         .as_array()
         .ok_or("reference_rows_missing")?;
     Ok(
-        json!({"config":report["config"],"decision_count":decisions.len(),"display_limit":100,"decisions":decisions.iter().rev().take(100).map(|d|json!({"date":d["date"],"status":d["status"],"capital_kind":d["capital_kind"],"names":d["names"],"weights":d["weights"],"actual_equity_cny":d["actual_snapshot"]["equity"],"actual_positions":d["actual_snapshot"]["positions"],"actual_marks":d["actual_snapshot"]["marks"],"mapping":d["mapping"],"reference_nav":d["reference_nav"],"risk_contributions":d["risk_contributions"],"risk_budget_deviation":d["risk_budget_deviation"],"warnings":d["warnings"],"constraints":d["constraints"],"underlying_symbols":d["underlying_symbols"],"underlying_weights":d["underlying_weights"]})).collect::<Vec<_>>(),"reference_rows":rows.iter().rev().take(100).map(|r|json!({"date":r["date"],"nav":r["nav"],"cash":r["cash"],"locked_value":r["locked_value"],"pending":r["pending"]})).collect::<Vec<_>>(),"reference_basis":"fractional zero-fee reference, not realized account profit","files":["allocation_report.json","reference-account.json","allocation-manifest.json"]}),
+        json!({"config":report["config"],"decision_count":decisions.len(),"display_limit":100,"decisions":decisions.iter().rev().take(100).map(|d|json!({"date":d["date"],"status":d["status"],"capital_kind":d["capital_kind"],"names":d["names"],"weights":d["weights"],"actual_equity_cny":d["actual_snapshot"]["equity"],"actual_positions":d["actual_snapshot"]["positions"],"actual_marks":d["actual_snapshot"]["marks"],"mapping":d["mapping"],"reference_nav":d["reference_nav"],"eligibility":d["eligibility"],"risk_contributions":d["risk_contributions"],"risk_budget_deviation":d["risk_budget_deviation"],"warnings":d["warnings"],"constraints":d["constraints"],"underlying_symbols":d["underlying_symbols"],"underlying_weights":d["underlying_weights"]})).collect::<Vec<_>>(),"reference_rows":rows.iter().rev().take(100).map(|r|json!({"date":r["date"],"nav":r["nav"],"cash":r["cash"],"locked_value":r["locked_value"],"pending":r["pending"]})).collect::<Vec<_>>(),"reference_basis":"fractional zero-fee reference, not realized account profit","files":["allocation_report.json","reference-account.json","allocation-manifest.json"]}),
     )
 }
 

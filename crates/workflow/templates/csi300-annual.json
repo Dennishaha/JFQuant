@@ -111,7 +111,7 @@
   },
   "initial_cash_cny": 1000000.0,
   "dividend_withholding_rate": 0.0,
-  "schema_version": 11,
+  "schema_version": 12,
   "id": "csi300-annual",
   "name": "沪深300默认年度流程",
   "factors": "factors/gtja191.json",
@@ -146,6 +146,8 @@
     "calibration_min_pairs": 30,
     "prediction_start": null,
     "reference_start": null,
-    "execution_start": null
+    "execution_start": null,
+    "candidate_policy": "unfiltered",
+    "solver_tolerance": 1e-09
   }
 }

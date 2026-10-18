@@ -4,8 +4,9 @@ from .allocation import solve, independent_checks, TOL
 
 
 class CombinedAllocator:
-    def __init__(self, plan, sources, calendar, cancelled):
+    def __init__(self, plan, sources, calendar, cancelled, stock_exposure):
         self.plan, self.sources, self.calendar, self.cancelled = plan, sources, calendar, cancelled
+        self.stock_exposure = stock_exposure
         self.indices = {d:i for i,d in enumerate(calendar)}
         self.names = [s['id'] for s in sources]
         self.rows = [{r['date']:r for r in s['reference']['rows']} for s in sources]
@@ -59,10 +60,10 @@ class CombinedAllocator:
             if c['method']!='equal':
                 returns,bounds=self.history(date)
                 if c['method']=='mean_variance':expected=np.mean(returns,axis=0)
-            self.capital,receipt=solve(c,self.names,returns,previous,expected,mapping,self.cancelled)
+            self.capital,receipt=solve(c,self.names,returns,previous,expected,mapping,self.cancelled,stock_exposure=self.stock_exposure)
             capital_kind='optimized'
         else:
-            receipt=dict(schema_version=1,method=c['method'],names=self.names,weights=self.capital.tolist(),status='capital_drift',constraints=independent_checks(self.capital,1.,1.,previous,c['max_turnover'],mapping,c['max_stock_weight']))
+            receipt=dict(schema_version=1,method=c['method'],names=self.names,weights=self.capital.tolist(),status='capital_drift',constraints=independent_checks(self.capital,1.,1.,previous,c['max_turnover'],mapping,c['max_stock_weight'],self.stock_exposure))
             capital_kind='drifted'
         weights=mapping@self.capital
         receipt.update(capital_kind=capital_kind,risk_history=bounds,underlying_symbols=symbols,mapping=mapping.tolist(),underlying_weights=weights.tolist(),reference_nav=nav.tolist())

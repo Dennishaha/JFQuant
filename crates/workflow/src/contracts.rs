@@ -18,8 +18,7 @@ pub struct ResearchTemplate {
     pub factor_set: analytics_core::research_quality::FactorSet,
     /// Training source trust, separate from sample completeness.
     pub price_basis: analytics_core::research_quality::PriceBasis,
-    /// Resolved template schema, currently 11; absence is unsupported.
-    #[serde(default = "missing_template_version")]
+    /// Resolved template schema, currently 12; absence is unsupported.
     pub schema_version: u32,
     /// Immutable pool version, or `builtin:<catalogue index ID>` bound to the selected market.
     pub pool_version: String,
@@ -50,9 +49,6 @@ pub struct ResearchTemplate {
     /// Explicit fixed research dividend tax convention.
     pub dividend_withholding_rate: f64,
 }
-fn missing_template_version() -> u32 {
-    0
-}
 impl Default for ResearchTemplate {
     fn default() -> Self {
         let config = ResearchConfig {
@@ -67,7 +63,7 @@ impl Default for ResearchTemplate {
             ..ResearchConfig::default()
         };
         Self {
-            schema_version: 11,
+            schema_version: 12,
             factor_set: Default::default(),
             price_basis: Default::default(),
             pool_version: "builtin:csi500".into(),
@@ -184,7 +180,7 @@ impl ResearchTemplate {
     }
     /// Validate before saving or starting a task.
     pub fn validate(&self) -> Result<()> {
-        if self.schema_version != 11
+        if self.schema_version != 12
             || self.id.trim().is_empty()
             || self.formula_version != self.resolved_formula_version()?
             || self.name.trim().is_empty()

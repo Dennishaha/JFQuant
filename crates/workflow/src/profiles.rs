@@ -141,11 +141,11 @@ impl TargetProfile {
 impl WorkflowDocument {
     /// Resolve shared profiles into the single common request used by App and CLI.
     pub fn resolve(self, f: FactorProfile, u: TargetProfile) -> Result<ResearchTemplate> {
-        if self.schema_version != 11 {
+        if self.schema_version != 12 {
             return Err("unsupported_workflow_template_format".into());
         }
         let mut t = ResearchTemplate {
-            schema_version: 11,
+            schema_version: 12,
             id: self.id,
             name: self.name,
             schedule: self.schedule,
@@ -215,7 +215,7 @@ impl WorkflowDocument {
         persist(&parent.join(&fp), &f)?;
         persist(&parent.join(&up), &u)?;
         let d = Self {
-            schema_version: 11,
+            schema_version: 12,
             id: t.id.clone(),
             name: t.name.clone(),
             factors: fp,

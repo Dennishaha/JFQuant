@@ -179,7 +179,19 @@ pub(super) fn prepare(
         .calendar
         .partition_point(|d| *d < history_start)
         .saturating_sub(request.warmup_sessions());
-    let relevant_start = dataset.calendar[history_index];
+    let allocation_index = dataset
+        .calendar
+        .partition_point(|d| *d < execution_start)
+        .saturating_sub(request.config.allocation.risk_window + request.config.rebalance_days);
+    let relevant_start = dataset.calendar[if !request.train_only
+        && (request.config.allocation.method != crate::allocation::AllocationMethod::Equal
+            || request.config.allocation.candidate_policy
+                == crate::allocation::CandidatePolicy::CompleteRiskWindow)
+    {
+        history_index.min(allocation_index)
+    } else {
+        history_index
+    }];
     dataset.restrict_reads(DateRange {
         start: relevant_start,
         end: needed_end,
@@ -232,16 +244,47 @@ pub(super) fn prepare(
         .min(dataset.calendar.len() - 1);
     let mut admission_issues = Vec::<String>::new();
     if !request.train_only {
-        let allocation = allocation_readiness::report(
+        let mut allocation = allocation_readiness::report(
             &request.config.allocation,
             request.config.top_n,
             request.config.rebalance_days,
             &dataset.calendar,
             &folds,
         )?;
+        let admission = allocation_admission::build(
+            request,
+            &dataset,
+            action_book.as_ref(),
+            &pool,
+            folds[0].actual.test.start,
+            needed_end,
+        )?;
+        let prediction_dates = dataset
+            .calendar
+            .iter()
+            .copied()
+            .filter(|d| folds.iter().any(|f| f.actual.test.contains(*d)))
+            .collect::<Vec<_>>();
+        let reference = request.config.allocation.reference_start.unwrap_or(
+            request
+                .config
+                .allocation
+                .execution_start
+                .unwrap_or(execution_start),
+        );
+        let issues =
+            allocation_admission::preflight(request, &admission, &prediction_dates, reference)?;
+        allocation["candidate_admission"] = serde_json::json!({"policy":request.config.allocation.candidate_policy,"eligibility_sha256":admission["eligibility_sha256"],"issues":issues});
+        if !issues.is_empty() {
+            allocation["ready"] = false.into();
+        }
+        save(
+            request.output.join("allocation-eligibility.json"),
+            &admission,
+        )?;
         if allocation["ready"] != true {
             admission_issues
-                .push("allocation warmup incomplete; see allocation-readiness.json".into());
+                .push("allocation warmup or candidate admission incomplete; see allocation-readiness.json".into());
         }
         save(
             request.output.join("allocation-readiness.json"),

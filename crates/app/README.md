@@ -198,3 +198,6 @@ build/distribution commands remain the packaging commands above.
 新建小股票池可能因默认单股上限10%不可行，必须显式修改上限；不自动放宽。UI不持有DuckDB、LightGBM或优化器句柄。历史配置先使用CLI离线迁移，App不自动转换旧协议。
 
 验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-desktop`及`bash crates/app/packaging/package-macos.sh`；另一台Apple Silicon/macOS14设备的实机验收仍需实际执行。
+
+
+Allocation editing now provides method and candidate-policy selectors, stock/strategy cap sliders, optional turnover, risk/calibration windows and explicit mean-variance λ controls. Advanced JSON remains available for full configuration including warmup dates and numerical tolerance. Small Top N/cap conflicts show the required count immediately and offer an explicit cap-setting action. Method comparisons render a horizontal metrics table. The shared service 40 provides eligibility diagnostics before training and prediction admission before matching; App does not implement a separate optimizer. Current templates are format 12 and combined plans format 2.

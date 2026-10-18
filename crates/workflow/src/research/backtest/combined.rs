@@ -25,7 +25,7 @@ impl CombinedPortfolioPlan {
         self.range.validate()?;
         self.execution.allocation.validate()?;
         self.execution.market_rules.validate()?;
-        if self.schema_version != 1
+        if self.schema_version != 2
             || !(2..=20).contains(&self.sources.len())
             || self.sources.iter().collect::<BTreeSet<_>>().len() != self.sources.len()
             || !(1..=252).contains(&self.execution.rebalance_days)
@@ -345,7 +345,7 @@ mod tests {
             sources.push(run.id);
         }
         let plan = CombinedPortfolioPlan {
-            schema_version: 1,
+            schema_version: 2,
             sources,
             range: DateRange {
                 start: "2010-01-02".parse().unwrap(),
@@ -407,7 +407,7 @@ mod tests {
         fs::write(root.join("allocation-manifest.json"), manifest).unwrap();
         let nested = Job::Run {
             plan: CombinedPortfolioPlan {
-                schema_version: 1,
+                schema_version: 2,
                 sources: vec![
                     run.id,
                     match &request {

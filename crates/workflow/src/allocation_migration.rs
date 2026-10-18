@@ -75,38 +75,50 @@ fn allocation() -> Result<Value> {
 }
 fn convert(v: &Value) -> Result<Option<Value>> {
     let mut n = v.clone();
-    if v["schema_version"] == 10 && v.get("factors").is_some() && v.get("schedule").is_some() {
-        n["schema_version"] = 11.into();
-        n["allocation"] = allocation()?;
-    } else if v["schema_version"] == 10
-        && v.get("config").is_some()
-        && v.get("formula_version").is_some()
-    {
-        n["schema_version"] = 11.into();
-        n["config"]["allocation"] = allocation()?;
-    } else if v["schema_version"] == 2
-        && v.get("execution").is_some()
-        && v.get("training").is_some()
-    {
-        n["schema_version"] = 3.into();
-        n["execution"]["allocation"] = allocation()?;
-    } else if v["schema_version"] == 11 && v.get("factors").is_some() && v.get("schedule").is_some()
-    {
+    let workflow = v.get("factors").is_some() && v.get("schedule").is_some();
+    let template = v.get("config").is_some() && v.get("formula_version").is_some();
+    let backtest = v.get("execution").is_some() && v.get("training").is_some();
+    let combined = v.get("execution").is_some() && v.get("sources").is_some();
+    if (workflow || template) && matches!(v["schema_version"].as_u64(), Some(10 | 11)) {
+        n["schema_version"] = 12.into();
+        let c = if workflow {
+            &mut n["allocation"]
+        } else {
+            &mut n["config"]["allocation"]
+        };
+        if v["schema_version"] == 10 {
+            *c = allocation()?;
+        } else {
+            c["candidate_policy"] = "unfiltered".into();
+            c["solver_tolerance"] = 1e-10.into();
+        }
+    } else if backtest && matches!(v["schema_version"].as_u64(), Some(2 | 3)) {
+        n["schema_version"] = 4.into();
+        if v["schema_version"] == 2 {
+            n["execution"]["allocation"] = allocation()?;
+        } else {
+            n["execution"]["allocation"]["candidate_policy"] = "unfiltered".into();
+            n["execution"]["allocation"]["solver_tolerance"] = 1e-10.into();
+        }
+    } else if combined && v["schema_version"] == 1 {
+        n["schema_version"] = 2.into();
+        n["execution"]["allocation"]["candidate_policy"] = "unfiltered".into();
+        n["execution"]["allocation"]["solver_tolerance"] = 1e-10.into();
+    } else if workflow && v["schema_version"] == 12 {
         let d: crate::profiles::WorkflowDocument = serde_json::from_value(v.clone())?;
         d.allocation.validate_count(d.top_n)?;
         return Ok(None);
-    } else if v["schema_version"] == 11
-        && v.get("config").is_some()
-        && v.get("formula_version").is_some()
-    {
+    } else if template && v["schema_version"] == 12 {
         let t: crate::ResearchTemplate = serde_json::from_value(v.clone())?;
         t.validate()?;
         return Ok(None);
-    } else if v["schema_version"] == 3
-        && v.get("execution").is_some()
-        && v.get("training").is_some()
-    {
+    } else if backtest && v["schema_version"] == 4 {
         let p: crate::research::backtest::independent::BacktestPlan =
+            serde_json::from_value(v.clone())?;
+        p.validate()?;
+        return Ok(None);
+    } else if combined && v["schema_version"] == 2 {
+        let p: crate::research::backtest::combined::CombinedPortfolioPlan =
             serde_json::from_value(v.clone())?;
         p.validate()?;
         return Ok(None);
@@ -126,6 +138,10 @@ fn convert(v: &Value) -> Result<Option<Value>> {
     } else if n.get("formula_version").is_some() {
         let t: crate::ResearchTemplate = serde_json::from_value(n.clone())?;
         t.validate()?;
+    } else if combined {
+        let p: crate::research::backtest::combined::CombinedPortfolioPlan =
+            serde_json::from_value(n.clone())?;
+        p.validate()?;
     } else {
         let p: crate::research::backtest::independent::BacktestPlan =
             serde_json::from_value(n.clone())?;
@@ -248,6 +264,8 @@ fn plan(root: &Path, external: &[PathBuf]) -> Result<Journal> {
                         | "independent"
                         | "preview_research"
                         | "evaluate_factors"
+                        | "combined"
+                        | "compare_allocations"
                 )
             } else if p.join("data_audit.json").is_file() {
                 let audit: Value = serde_json::from_slice(&fs::read(p.join("data_audit.json"))?)?;
@@ -273,15 +291,25 @@ fn plan(root: &Path, external: &[PathBuf]) -> Result<Journal> {
     Ok(j)
 }
 fn journal_path(root: &Path) -> PathBuf {
-    root.join(".jfquant/allocation-migration.json")
+    root.join(".jfquant/allocation-admission-migration.json")
 }
 /// Block service startup on an interrupted offline conversion.
 pub(crate) fn require_complete(root: &Path) -> Result<()> {
-    let p = journal_path(root);
+    let old = root.join(".jfquant/allocation-migration.json");
     let mut explicit = BTreeMap::new();
+    if old.is_file() {
+        let j: Journal = serde_json::from_slice(&fs::read(old)?)?;
+        if (!j.complete || j.rolling_back) && !j.rolled_back {
+            return Err(
+                "previous_allocation_migration_incomplete: finish with the previous binary".into(),
+            );
+        }
+        explicit = j.owned_configs;
+    }
+    let p = journal_path(root);
     if p.exists() {
         let j: Journal = serde_json::from_slice(&fs::read(p)?)?;
-        explicit = j.owned_configs.clone();
+        explicit.extend(j.owned_configs.clone());
         if (!j.complete || j.rolling_back) && !j.rolled_back {
             return Err(
                 "allocation_migration_incomplete: resume workspace migrate-allocation --apply"
@@ -488,6 +516,29 @@ mod tests {
             serde_json::from_slice::<Value>(&fs::read(config).unwrap()).unwrap(),
             old
         );
+    }
+    #[test]
+    fn format_eleven_migration_preserves_strict_candidates_and_old_solver_tolerance() {
+        let mut old = serde_json::to_value(crate::ResearchTemplate::default()).unwrap();
+        old["schema_version"] = 11.into();
+        old["config"]["allocation"]
+            .as_object_mut()
+            .unwrap()
+            .remove("candidate_policy");
+        old["config"]["allocation"]
+            .as_object_mut()
+            .unwrap()
+            .remove("solver_tolerance");
+        assert!(serde_json::from_value::<crate::ResearchTemplate>(old.clone()).is_err());
+        let next = convert(&old).unwrap().unwrap();
+        let t: crate::ResearchTemplate = serde_json::from_value(next).unwrap();
+        t.validate().unwrap();
+        assert_eq!(t.schema_version, 12);
+        assert_eq!(
+            t.config.allocation.candidate_policy,
+            crate::allocation::CandidatePolicy::Unfiltered
+        );
+        assert_eq!(t.config.allocation.solver_tolerance, 1e-10);
     }
     #[test]
     fn unknown_config_is_blocked_and_new_tasks_block_rollback() {

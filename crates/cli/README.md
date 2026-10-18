@@ -364,3 +364,14 @@ jfquant --workspace "$JFQUANT_WORKSPACE" research verify --task COMPLETED_UUID
 日期必须为市场交易日；来源任务覆盖完整预热和执行区间，禁止递归组合。compare-allocations检查相同预测、市场、事件、区间、周期和账户规则，并要求等权基线。任务仍由jobs wait/results及现有导出操作读取。显式离线迁移使用workspace migrate-allocation，详见workflow README。
 
 迁移外部工作流时，其工作区外的factors/target引用也须逐份通过`--config`列入清单；缺失引用、未知格式和绝对profile引用会阻断。迁移同时归档已登记研究任务、旧因子缓存及工作区runs下具有研究审计标记的历史目录，保留证据采集任务。
+
+
+## Allocation admission (service 40)
+
+Current template/workflow format 12, backtest plan 4, combined plan 2 and results 22 require explicit `candidate_policy` and `solver_tolerance`. For price-history-qualified optimization choose `candidate_policy: "complete_risk_window"`; to preserve strict original candidates choose `"unfiltered"`. New tolerances default to `1e-9`. `research check` reports per-date eligible-count failures before training; generated-prediction admission catches remaining gaps before native matching. Do not lower Top N or the risk window automatically.
+
+For `research replay-predictions --allocation allocation.json`, use the same complete allocation JSON (obtain it from a current template's `allocation`, or App's advanced editor). Equal baseline runs must explicitly use the same qualification policy and risk window as optimized runs; `research compare-allocations --tasks ...` rejects different candidate hashes or constraints. `allocation-admission.json` and `allocation-decisions.jsonl` are part of exported task evidence.
+
+`workspace migrate-allocation` previews the new revision; `--apply --config /absolute/plan.json` explicitly upgrades old registered/selected documents without enabling qualification. Old migration backups remain separate; no service startup converts old files.
+
+正常命令不自动补齐旧配置字段或转换旧协议。本地转换只通过显式离线workspace migrate-allocation --apply执行，取得独占锁并保留事务与备份；当前无待迁内容时只登记完成状态，重复运行不变更资料。

@@ -124,3 +124,12 @@ DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow frozen_sources_net_into_o
 ```
 
 首次启动已签名的macOS运行时可能触发原生扩展校验；worker就绪限时180秒，每100毫秒检查取消。超时、协议或依赖校验失败仍回收进程，不更换优化方法。
+
+
+### Candidate and label admission
+
+Worker protocol 4 consumes allocation input format 2, including Rust's `stock_exposure`. Explicit `candidate_policy=complete_risk_window` checks as-of endpoint completeness before Top N; `unfiltered` retains strict historical-input failures. Early Rust admission writes `allocation-eligibility.json`; Python validates generated scores and all scheduled risk/calibration inputs before starting AKQuant, saving `allocation-admission.json` on success or failure. Known suspended calibration labels are disclosed and excluded without changing original percentiles; unknown gaps block. Qualification never reads a later endpoint to decide an earlier candidate.
+
+`solver_tolerance` defaults to `1e-9`, with objective scale 1000 and original-output constraint checks at `1e-6`. These parameters and warnings are in signed receipts. `allocation-decisions.jsonl` appends each decision/target once, and format-2 reports aggregate once at termination. Cancellation and failed writes cannot publish a completed report. Tests include a native minimum-variance run selecting the next qualified stock, a blocked run that never starts AKQuant, flat expected returns, future-price mutations and journal equality.
+
+Worker拒绝非格式2或缺少必需字段的allocation-input.json；不通过get/default补入admission、missing_prices或prediction_provenance。均值方差要求显式样本外预测来源。旧输入拒绝回归同时验证不会启动AKQuant或修改输入文件。

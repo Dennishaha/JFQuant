@@ -255,7 +255,11 @@ pub(super) fn show_results(ui: &mut egui::Ui, value: &Value) {
             for issue in a["issues"].as_array().into_iter().flatten() {
                 ui.label(issue.as_str().unwrap_or(""));
             }
-            ui.small("候选数量、配对样本和收益端点还需按已生成预测检查；不会自动推迟正式起点。");
+            ui.label(format!("候选资格政策：{}",a["candidate_admission"]["policy"]));
+            for issue in a["candidate_admission"]["issues"].as_array().into_iter().flatten() {
+                ui.label(format!("{} 合格{}只，要求Top N={}，排除{}只；完整原因见allocation-eligibility.json",issue["date"],issue["eligible_count"],issue["required_top_n"],issue["excluded_count"]));
+            }
+            ui.small("价格资格已按决策日检查；生成预测后再次核验配对样本和收益端点，不会自动推迟正式起点。");
         });
     }
     if value["execution"]["allocation_display"].is_object() {
@@ -285,19 +289,40 @@ pub(super) fn show_results(ui: &mut egui::Ui, value: &Value) {
         ui.collapsing(
             "优化方法对照（相同输入、含实际费用）",
             |ui| {
-                for r in value["runs"].as_array().into_iter().flatten() {
-                    ui.label(format!(
-                        "{} 收益{} 回撤{} 夏普{} 换手{} 拒单{} 集中度{} 引擎秒数{}",
-                        r["method"],
-                        r["aggregate"]["total_return"],
-                        r["aggregate"]["max_drawdown"],
-                        r["aggregate"]["sharpe"],
-                        r["aggregate"]["mean_daily_turnover"],
-                        r["aggregate"]["blocked_orders"],
-                        r["mean_target_hhi"],
-                        r["timing"]["engine_seconds"]
-                    ));
-                }
+                egui::ScrollArea::horizontal().show(ui, |ui| {
+                    egui::Grid::new("allocation-comparison-grid")
+                        .striped(true)
+                        .show(ui, |ui| {
+                            for label in [
+                                "方法",
+                                "收益",
+                                "回撤",
+                                "夏普",
+                                "换手",
+                                "拒单",
+                                "集中度",
+                                "引擎秒数",
+                            ] {
+                                ui.strong(label);
+                            }
+                            ui.end_row();
+                            for r in value["runs"].as_array().into_iter().flatten() {
+                                for item in [
+                                    &r["method"],
+                                    &r["aggregate"]["total_return"],
+                                    &r["aggregate"]["max_drawdown"],
+                                    &r["aggregate"]["sharpe"],
+                                    &r["aggregate"]["mean_daily_turnover"],
+                                    &r["aggregate"]["blocked_orders"],
+                                    &r["mean_target_hhi"],
+                                    &r["timing"]["engine_seconds"],
+                                ] {
+                                    ui.label(item.to_string());
+                                }
+                                ui.end_row();
+                            }
+                        });
+                });
             },
         );
     }

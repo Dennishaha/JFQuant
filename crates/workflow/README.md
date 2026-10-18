@@ -332,3 +332,38 @@ python3 crates/workflow/checks/architecture.py
 外部工作流的工作区外profile引用必须同时在显式迁移文件清单中；正常启动检查注册配置的引用和格式。未列明的外部引用不会被扫描或隐式补迁。迁移归档还包括旧.factor-cache及带research_signature/formula_version审计标记的历史研究目录，证据采集产物保留。
 
 股票层与策略层的H均取各自调仓周期。H大于1时，最近252个完整H日收益允许重叠，代表252个收益起始交易日，不代表252个独立观测。
+
+
+## Allocation admission revision
+
+Current contracts: service 40, research worker 4, research result 22, workflow/template 12, independent backtest plan 4, combined plan 2, allocation input/report/manifest 2. Normal readers reject previous formats; `workspace migrate-allocation` explicitly upgrades template/workflow 10–11, backtest plan 2–3 and combined plan 1. Revision transactions use `.jfquant/allocation-admission-migration.json`; the previous migration journal and backups remain intact. An unfinished previous-generation transaction must first finish with its original binary. Migration preserves existing methods, windows and caps, sets `candidate_policy="unfiltered"` and preserves the old numerical tolerance (`1e-10` for format 11/plan 3); new configurations use `1e-9`. No default migration enables filtering or changes Top N.
+
+`AllocationConfig.candidate_policy` is explicit: `unfiltered` preserves candidates and fails on missing optimizer input; `complete_risk_window` checks complete realized H-day endpoint history **before** score ranking. It applies to stock strategies and can also be selected for their equal-weight comparison baseline. Eligibility is computed separately for every decision date using endpoints no later than that date. It never alters factor/training membership, shortens the risk window, fills prices, reduces Top N or relaxes caps. Insufficient eligible candidates fail before training when identifiable from the pool, or after predictions before opening the actual account. Empty source signals retain liquidation semantics. Combined capital allocation consumes frozen source stock qualifications and does not filter source strategies.
+
+`allocation-eligibility.json` records early per-date identities, excluded endpoint dates, reason (`verified_suspension` versus `unknown_price_or_tradeability`) and hashes. The frozen `allocation-input.json` includes that evidence, its hash and the Rust-owned `STOCK_EXPOSURE`; Python has no independent exposure literal. `allocation-admission.json` records actual prediction-based checks and all failing scheduled dates before matching. Method comparison requires identical eligibility hashes, policy, window and account constraints.
+
+Calibration percentiles are defined on the scoring day's qualified cross section. Once labels mature, known suspension endpoints are excluded **without reranking** and recorded per date; unknown label prices still block. Each used date retains equal total regression weight. Dates below the configured pair threshold are disclosed and omitted; the minimum number of valid dates is still required. Neither future endpoints nor later eligibility determine the earlier ranking.
+
+CLARABEL uses explicit `solver_tolerance` (new default `1e-9`, allowed `1e-12`–`1e-6`) for feasibility and absolute/relative gaps, with fixed objective scale 1000 for numerical conditioning. Parameters, solver state, iterations and objective value are recorded and signed. Independent constraint tolerance remains `1e-6`; an inaccurate status remains a warning and does not establish objective optimality. Closed-form and flat-return regression cases cover both `1e-10` and `1e-9`.
+
+Decisions append once to `allocation-decisions.jsonl`; the running report contains counts, and completion/failure writes the full report once. Rust verifies the journal against targets and decisions, qualified identities and endpoint prices against input, then the existing account ledger. There is no quadratic cumulative rewriting of the full decision history.
+
+```mermaid
+flowchart LR
+  P[Point-in-time prices and pool] --> E[Per-date qualification before training]
+  E --> S[Frozen OOS scores / qualified Top N]
+  S --> A[All scheduled risk and calibration input checks]
+  A --> O[Allocation and native account]
+  O --> J[Append decision journal]
+  J --> V[Rust qualification / receipt / ledger verification]
+```
+
+Acceptance commands (generated fixtures stay under target):
+```sh
+DUCKDB_DOWNLOAD_LIB=1 cargo test --workspace
+DUCKDB_DOWNLOAD_LIB=1 cargo clippy --workspace --all-targets -- -D warnings
+PYTHONPATH=crates/workflow/research target/collector-build/python/bin/python3 -B -m unittest discover -s crates/workflow/research/tests
+python3 crates/workflow/checks/architecture.py
+```
+
+正常入口不补齐缺失的新协议字段：模板必须显式携带格式12，worker必须收到格式2的优化输入及显式的missing_prices、admission、prediction_provenance字段；旧格式与字段缺失均在账户启动前拒绝。当前标准流水线训练描述符4与独立训练目录5分别由两个现行入口生成，均严格验证当前嵌入合同，并不接受旧版本模型协议。旧配置解析和转换仅存在于显式离线迁移模块。

@@ -32,13 +32,21 @@ pub(super) fn report(
     {
         issues.push("prediction/reference/execution ranges must use frozen trading dates in order and be covered by the prediction schedule");
     }
-    let needs_risk = c.method != AllocationMethod::Equal;
+    let needs_risk = c.method != AllocationMethod::Equal
+        || c.candidate_policy == crate::allocation::CandidatePolicy::CompleteRiskWindow;
     let needs_calibration = c.method == AllocationMethod::MeanVariance;
     let risk_ready = needs_risk
         .then(|| calendar.get(c.risk_window + h).copied())
         .flatten();
     let calibration_ready = if needs_calibration {
         index(prediction)
+            .map(|i| {
+                if c.candidate_policy == crate::allocation::CandidatePolicy::CompleteRiskWindow {
+                    i.max(c.risk_window + h)
+                } else {
+                    i
+                }
+            })
             .and_then(|i| calendar.get(i + c.calibration_min_days + h))
             .copied()
     } else {

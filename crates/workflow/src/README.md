@@ -85,3 +85,6 @@ Regression compares the optimized sets against the original observation-by-obser
 `allocation` defines strict shared config, independent weight/time verification and signed artifact manifests. `allocation_reference` maintains a separate fractional event-aware account. `allocation_migration` is the sole legacy reader for this upgrade, with offline preview/apply/resume/rollback. `allocation_comparison` checks frozen same-input completed methods. Multi-strategy orchestration lives beside research execution in `research/backtest/combined.rs`; App/CLI dispatch the same WorkflowRequest variants. Current protocol: service39 / worker3 / result21 / template11 / independent-backtest-plan3.
 
 `research/backtest/allocation_readiness.rs`在训练前检查冻结日历上的预测、参考账、正式账户边界，输出最早就绪日期下界；`allocation.rs`独立验证下一开盘生效、求解/目标一致性和账户换手。迁移模块覆盖中断归档和中断回滚恢复，未知注册格式阻断服务启动。
+
+
+`research/backtest/allocation_admission.rs` builds date-local endpoint qualification before training without changing the training pool. `allocation.rs` owns `STOCK_EXPOSURE`, strict candidate policy/tolerance config, target and append-journal verification; the worker consumes that single exposure contract. `allocation_migration.rs` is the only reader of previous allocation formats, with a separate admission-revision transaction journal. See the workflow README for formats, diagnostics and acceptance commands.

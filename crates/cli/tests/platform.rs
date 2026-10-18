@@ -1560,7 +1560,7 @@ fn independent_fit_models_preview_and_new_pool_backtest_share_service() {
         })
         .unwrap();
     let plan = BacktestPlan {
-        schema_version: 3,
+        schema_version: 4,
         training: training.parse().unwrap(),
         models: ModelSelection::Rolling,
         pool_version: pool.id,

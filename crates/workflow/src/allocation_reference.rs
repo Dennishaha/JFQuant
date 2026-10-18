@@ -36,7 +36,7 @@ pub fn build(root: &Path) -> Result<Value> {
     let input: Value = serde_json::from_slice(&fs::read(root.join("reference-input.json"))?)?;
     let report: Value = serde_json::from_slice(&fs::read(root.join("allocation_report.json"))?)?;
     if input["schema_version"] != 1
-        || report["schema_version"] != 1
+        || report["schema_version"] != 2
         || report["status"] != "completed"
     {
         return Err("reference_input_incomplete".into());
@@ -225,7 +225,7 @@ mod tests {
             &json!({"schema_version":1,"targets":[]}),
         )
         .unwrap();
-        atomic_json(&root.join("allocation_report.json"),&json!({"schema_version":1,"status":"completed","targets":[{"date":"2024-01-01","effective_date":"2024-01-02","weights":{"SH600000":0.98}}]})).unwrap();
+        atomic_json(&root.join("allocation_report.json"),&json!({"schema_version":2,"status":"completed","targets":[{"date":"2024-01-01","effective_date":"2024-01-02","weights":{"SH600000":0.98}}]})).unwrap();
         let r = build(root).unwrap();
         let rows = r["rows"].as_array().unwrap();
         assert_eq!(rows[1]["pending"], true);
@@ -265,7 +265,7 @@ mod tests {
         .unwrap();
         atomic_json(
             &p.join("allocation_report.json"),
-            &json!({"schema_version":1,"status":"completed","targets":[
+            &json!({"schema_version":2,"status":"completed","targets":[
                 {"date":"2024-01-01","effective_date":"2024-01-02","weights":{"SH600000":0.98}},
                 {"date":"2024-01-02","effective_date":"2024-01-03","weights":{"SZ000001":0.98}}
             ]}),
@@ -343,7 +343,7 @@ mod rights_tests {
                 &json!({"schema_version":1,"targets":[]}),
             )
             .unwrap();
-            atomic_json(&p.join("allocation_report.json"),&json!({"schema_version":1,"status":"completed","targets":[{"date":"2024-01-01","effective_date":"2024-01-02","weights":{"SH600000":0.98}}]})).unwrap();
+            atomic_json(&p.join("allocation_report.json"),&json!({"schema_version":2,"status":"completed","targets":[{"date":"2024-01-01","effective_date":"2024-01-02","weights":{"SH600000":0.98}}]})).unwrap();
             let result = build(p);
             if policy == InsufficientCash::Stop {
                 assert!(result.is_err());

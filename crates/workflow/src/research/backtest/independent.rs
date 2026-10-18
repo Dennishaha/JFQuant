@@ -286,7 +286,7 @@ pub enum ModelSelection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BacktestPlan {
-    /// Current version, 2.
+    /// Current independent backtest plan version, 4.
     pub schema_version: u32,
     /// One completed training task.
     pub training: uuid::Uuid,
@@ -316,7 +316,7 @@ impl BacktestPlan {
     pub fn validate(&self) -> Result<()> {
         self.range.validate()?;
         self.quality_policy.validate()?;
-        if self.schema_version != 3
+        if self.schema_version != 4
             || self.pool_version.is_empty()
             || self.market.is_empty()
             || self.actions.is_empty()
@@ -455,7 +455,8 @@ fn sign_catalogue(c: &ModelCatalogue) -> Result<String> {
     crate::signature(&v)
 }
 
-/// Load verified new or provable legacy training models without opening training data.
+/// Load current fit-only catalogues (5) or signed pipeline descriptors (4).
+/// Both are current producer formats; descriptor adaptation never upgrades old versions.
 pub fn catalogue(source: &Path) -> Result<ModelCatalogue> {
     let v: Value = serde_json::from_slice(&fs::read(source.join("training.json"))?)?;
     let c: ModelCatalogue = if v["schema_version"] == 5 {

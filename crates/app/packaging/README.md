@@ -76,3 +76,6 @@ Company-event execution extends the existing private native patch. Build inputs 
 Research lock adds skfolio 1.9.4 and exact hashes for scikit-learn, CVXPY-base, CLARABEL and their dependencies. The existing Python Mach-O audit applies to every added extension; licenses are collected with other Python packages. The reviewed native patch adds finalized-context `jfquant_decision_snapshot` and its hash is bound by akquant-source.lock.json. Rebuild with `bash crates/app/packaging/build-collector.sh`; then run `bash crates/app/packaging/package-macos.sh`. Do not copy a running bundle or commit generated wheels/native libraries.
 
 AKQuant生成源码的Cargo.toml显式声明独立workspace，确保干净解压后可复现构建；构建脚本与补丁共同进入source lock。原生上下文快照用于收盘横截面决策，撤单从回调投影中移除后再创建替换订单。
+
+
+Allocation admission revision packages worker protocol 4 and current App/CLI service 40. Refresh bundled `jfquant_research` when rebuilding; the Rust runtime hash checks all Python modules. No native dependency change is required for this revision. Offline acceptance must also exercise qualified minimum-variance selection, pre-matching blocking, solver tolerance receipts and the append-only decision journal.

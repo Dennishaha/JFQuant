@@ -34,7 +34,7 @@ pub fn snapshot(w: &Workspace, tasks: &[Uuid]) -> Result<Value> {
                 serde_json::from_slice(&fs::read(root.join("prediction_manifest.json"))?)?;
             json!({"sha256":prediction["sha256"],"kind":"stock"})
         };
-        let key = json!({"predictions":predictions,"market":result["execution"]["market_content_sha256"],"events":result["execution"]["corporate_action_sha256"],"range":input["formal_range"],"rebalance_days":request["config"]["rebalance_days"],"top_n":request["config"]["top_n"],"rules":request["market_rules"],"cash":request["initial_cash_cny"],"pool":request["pool"],"exit":request["pool_exit_policy"],"rights":request["rights_policy"],"events_policy":request["corporate_event_policy"]});
+        let key = json!({"candidate_policy":request["config"]["allocation"]["candidate_policy"],"eligible_dates_sha256":input["admission"]["eligibility_sha256"],"risk_window":request["config"]["allocation"]["risk_window"],"max_stock_weight":request["config"]["allocation"]["max_stock_weight"],"max_strategy_weight":request["config"]["allocation"]["max_strategy_weight"],"max_turnover":request["config"]["allocation"]["max_turnover"],"predictions":predictions,"market":result["execution"]["market_content_sha256"],"events":result["execution"]["corporate_action_sha256"],"range":input["formal_range"],"rebalance_days":request["config"]["rebalance_days"],"top_n":request["config"]["top_n"],"rules":request["market_rules"],"cash":request["initial_cash_cny"],"pool":request["pool"],"exit":request["pool_exit_policy"],"rights":request["rights_policy"],"events_policy":request["corporate_event_policy"]});
         if identity.as_ref().is_some_and(|v| v != &key) {
             return Err("allocation_comparison_inputs_differ".into());
         }

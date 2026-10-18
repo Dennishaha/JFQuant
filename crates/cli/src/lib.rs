@@ -1454,7 +1454,7 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
             ResearchCommand::CompareAllocations {tasks} => workflow(WorkflowRequest::CompareAllocations {tasks}),
             ResearchCommand::CombinedPlan {sources,start,end} => {
                 let t=analytics_workflow::ResearchTemplate::default();
-                let plan=analytics_workflow::research::backtest::combined::CombinedPortfolioPlan {schema_version:1,sources,range:analytics_core::DateRange{start:start.parse().map_err(invalid)?,end:end.parse().map_err(invalid)?},execution:t.execution_settings()};
+                let plan=analytics_workflow::research::backtest::combined::CombinedPortfolioPlan {schema_version:2,sources,range:analytics_core::DateRange{start:start.parse().map_err(invalid)?,end:end.parse().map_err(invalid)?},execution:t.execution_settings()};
                 plan.validate().map_err(invalid)?;return serde_json::to_value(plan).map_err(invalid);
             },
             ResearchCommand::Combined {plan,check} => {
@@ -1618,7 +1618,7 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
                 },
                 TemplateCommand::ModelBacktest {template,training,market,actions,start,end,output}=> {
                     let t=ResearchTemplate::read(&resolve(&client.root,&template)).map_err(invalid)?;
-                    let plan=analytics_workflow::research::backtest::independent::BacktestPlan {schema_version:3,training,models:Default::default(),pool_version:t.pool_version.clone(),range:analytics_core::DateRange {start,end},market,actions,benchmark:t.benchmark.clone(),quality_policy:t.quality_policy.clone(),execution:t.execution_settings(),event_check_policy:t.event_check_policy};
+                    let plan=analytics_workflow::research::backtest::independent::BacktestPlan {schema_version:4,training,models:Default::default(),pool_version:t.pool_version.clone(),range:analytics_core::DateRange {start,end},market,actions,benchmark:t.benchmark.clone(),quality_policy:t.quality_policy.clone(),execution:t.execution_settings(),event_check_policy:t.event_check_policy};
                     plan.validate().map_err(invalid)?;
                     fs::write(resolve(&client.root,&output),serde_json::to_vec_pretty(&plan).map_err(invalid)?).map_err(invalid)?;
                     Ok(json!({"output":output,"plan":plan}))

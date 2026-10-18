@@ -2,12 +2,12 @@
 import hashlib
 import json
 from pathlib import Path
+from bisect import bisect_left, bisect_right
 
 import numpy as np
 import pandas as pd
 
 TOL = 1e-6
-EXPOSURE = 0.98
 METHODS = {"equal", "minimum_variance", "risk_budgeting", "mean_variance"}
 
 
@@ -21,9 +21,11 @@ def digest(value):
 
 
 def validate_config(config):
-    fields = {"prediction_start", "reference_start", "execution_start", "method", "risk_window", "max_stock_weight", "max_strategy_weight", "max_turnover", "risk_aversion", "calibration_window", "calibration_min_days", "calibration_min_pairs"}
+    fields = {"candidate_policy", "solver_tolerance", "prediction_start", "reference_start", "execution_start", "method", "risk_window", "max_stock_weight", "max_strategy_weight", "max_turnover", "risk_aversion", "calibration_window", "calibration_min_days", "calibration_min_pairs"}
     if set(config) != fields or config["method"] not in METHODS:
         raise ValueError("invalid_allocation_config: fields/method")
+    if config["candidate_policy"] not in ("unfiltered", "complete_risk_window") or not np.isfinite(config["solver_tolerance"]) or not 1e-12 <= config["solver_tolerance"] <= 1e-6:
+        raise ValueError("invalid_allocation_config: candidate policy/solver tolerance")
     for name in ("risk_window", "calibration_window"):
         if type(config[name]) is not int or not 2 <= config[name] <= 10000:
             raise ValueError(f"invalid_allocation_config: {name}")
@@ -39,13 +41,13 @@ def validate_config(config):
         raise ValueError("invalid_allocation_config: risk_aversion required")
 
 
-def independent_checks(weights, exposure, cap, previous, max_turnover, mapping=None, stock_cap=None):
+def independent_checks(weights, exposure, cap, previous, max_turnover, mapping=None, stock_cap=None, stock_exposure=None):
     """Validate original solver output, including unselected and exiting positions."""
     w = np.asarray(weights, dtype=float)
     if w.ndim != 1 or not np.isfinite(w).all() or (w < -TOL).any() or (w > cap + TOL).any() or abs(w.sum() - exposure) > TOL:
         raise ValueError("allocation_constraint_failed: budget/weights")
     stock = w if mapping is None else np.asarray(mapping) @ w
-    if mapping is not None and ((stock < -TOL).any() or (stock > stock_cap + TOL).any() or stock.sum() > EXPOSURE + TOL):
+    if mapping is not None and ((stock < -TOL).any() or (stock > stock_cap + TOL).any() or stock.sum() > stock_exposure + TOL):
         raise ValueError("allocation_constraint_failed: underlying_stock_cap")
     previous = np.asarray(previous, dtype=float)
     if previous.shape != stock.shape or not np.isfinite(previous).all():
@@ -56,13 +58,15 @@ def independent_checks(weights, exposure, cap, previous, max_turnover, mapping=N
     return {"budget_residual": float(abs(w.sum() - exposure)), "turnover": turnover, "stock_exposure": float(stock.sum())}
 
 
-def solve(config, names, returns, previous, expected=None, mapping=None, cancelled=None):
+def solve(config, names, returns, previous, expected=None, mapping=None, cancelled=None, stock_exposure=None):
     """Use skfolio estimators; verify every output independently without clipping."""
     validate_config(config)
     if cancelled is not None:
         check_cancel(cancelled)
+    if stock_exposure is None or not np.isfinite(stock_exposure) or not 0 < stock_exposure <= 1:
+        raise ValueError("allocation_stock_exposure_missing")
     strategy = mapping is not None
-    exposure = 1. if strategy else EXPOSURE
+    exposure = 1. if strategy else stock_exposure
     cap = config["max_strategy_weight" if strategy else "max_stock_weight"]
     n = len(names)
     if len(set(names)) != n or not n or n * cap < exposure - TOL:
@@ -92,11 +96,11 @@ def solve(config, names, returns, previous, expected=None, mapping=None, cancell
             stock = w if mapping is None else mapping @ w
             result = []
             if strategy:
-                result.extend([stock >= 0, stock <= config["max_stock_weight"], cp.sum(stock) <= EXPOSURE])
+                result.extend([stock >= 0, stock <= config["max_stock_weight"], cp.sum(stock) <= stock_exposure])
             if config["max_turnover"] is not None:
                 result.append(cp.norm1(stock - previous) <= config["max_turnover"])
             return result
-        kwargs = dict(prior_estimator=prior, min_weights=0., max_weights=cap, budget=exposure, solver="CLARABEL", solver_params={"tol_gap_abs":1e-10,"tol_feas":1e-10,"tol_gap_rel":1e-10,"max_iter":200}, add_constraints=constraints, save_problem=True, raise_on_failure=True)
+        kwargs = dict(prior_estimator=prior, min_weights=0., max_weights=cap, budget=exposure, solver="CLARABEL", solver_params={"tol_gap_abs":config["solver_tolerance"],"tol_feas":config["solver_tolerance"],"tol_gap_rel":config["solver_tolerance"],"max_iter":200}, scale_objective=1000., add_constraints=constraints, save_problem=True, raise_on_failure=True)
         if config["method"] == "risk_budgeting":
             kwargs.pop("budget")
             kwargs["max_weights"] = cap / exposure
@@ -110,9 +114,9 @@ def solve(config, names, returns, previous, expected=None, mapping=None, cancell
         status = problem.status
         if status not in ("optimal", "optimal_inaccurate"):
             raise ValueError(f"allocation_solver_status: {status}")
-        solver_stats = {"solver": problem.solver_stats.solver_name, "iterations": problem.solver_stats.num_iters}
+        solver_stats = {"solver": problem.solver_stats.solver_name, "iterations": problem.solver_stats.num_iters, "tolerance":config["solver_tolerance"], "objective_scale":1000., "objective_value":float(problem.value)}
         covariance = np.asarray(model.prior_estimator_.return_distribution_.covariance)
-    residuals = independent_checks(w, exposure, cap, previous, config["max_turnover"], mapping, config["max_stock_weight"])
+    residuals = independent_checks(w, exposure, cap, previous, config["max_turnover"], mapping, config["max_stock_weight"], stock_exposure)
     risk = None
     if covariance is not None:
         variance = float(w @ covariance @ w)
@@ -121,7 +125,7 @@ def solve(config, names, returns, previous, expected=None, mapping=None, cancell
         risk = (w * (covariance @ w) / variance).tolist()
     if cancelled is not None:
         check_cancel(cancelled)
-    receipt = {"schema_version": 1, "method": config["method"], "names": list(names), "weights": w.tolist(), "status": status, "solver": solver_stats, "risk_contributions": risk, "risk_budget_deviation":None if risk is None or config["method"] != "risk_budgeting" else [v-1./n for v in risk], "warnings":["solver returned optimal_inaccurate; independent residuals passed"] if status=="optimal_inaccurate" else [], "constraints": residuals, "expected_returns": None if expected is None else np.asarray(expected).tolist(), "input_sha256": digest({"config": config, "names": names, "returns": history.tolist(), "previous": np.asarray(previous).tolist(), "mapping": None if mapping is None else mapping.tolist(), "expected": None if expected is None else np.asarray(expected).tolist()})}
+    receipt = {"schema_version": 1, "method": config["method"], "names": list(names), "weights": w.tolist(), "status": status, "solver": solver_stats, "risk_contributions": risk, "risk_budget_deviation":None if risk is None or config["method"] != "risk_budgeting" else [v-1./n for v in risk], "warnings":["solver returned optimal_inaccurate; independent residuals passed"] if status=="optimal_inaccurate" else [], "constraints": residuals, "expected_returns": None if expected is None else np.asarray(expected).tolist(), "input_sha256": digest({"config": config, "stock_exposure":stock_exposure, "names": names, "returns": history.tolist(), "previous": np.asarray(previous).tolist(), "mapping": None if mapping is None else mapping.tolist(), "expected": None if expected is None else np.asarray(expected).tolist()})}
     return w, receipt
 
 
@@ -134,13 +138,74 @@ def percentiles(scores):
 
 class StockHistory:
     """Exact market-calendar indexing; no compression over missing security rows."""
-    def __init__(self, calendar, prices, signals, horizon, config, provenance=None):
+    def __init__(self, calendar, prices, signals, horizon, config, provenance=None, missing=None, admission=None):
         self.calendar = list(calendar)
         if len(set(calendar)) != len(calendar) or sorted(calendar) != list(calendar) or horizon < 1:
             raise ValueError("allocation_calendar_invalid")
         self.index = {d: i for i, d in enumerate(calendar)}
         self.prices, self.signals, self.horizon, self.config = prices, signals, horizon, config
         self.provenance = provenance
+        self.missing = missing or {}
+        self.admission = admission
+        self.bad = {}
+        self.candidate_cache = {}
+
+    def candidates(self, date, scores):
+        """As-of history eligibility precedes ranking. No future endpoint is inspected."""
+        if date in self.candidate_cache:
+            return self.candidate_cache[date]
+        excluded, eligible = {}, {}
+        end = self.index[date] - self.horizon
+        start = end - self.config["risk_window"] + 1
+        for symbol in sorted(scores):
+            if self.config["candidate_policy"] == "unfiltered":
+                eligible[symbol] = scores[symbol]
+                continue
+            if start < 1:
+                excluded[symbol] = {"reason":"insufficient_calendar_history"}
+                continue
+            if symbol not in self.bad:
+                observed = self.prices.get(symbol, {})
+                self.bad[symbol] = [i for i,d in enumerate(self.calendar) if d not in observed or not np.isfinite(observed[d]) or observed[d] <= 0]
+            bad = self.bad[symbol]
+            gaps = set()
+            for a,b in ((start,end),(start+self.horizon,self.index[date])):
+                gaps.update(bad[bisect_left(bad,a):bisect_right(bad,b)])
+            if gaps:
+                dates = [self.calendar[i] for i in sorted(gaps)]
+                excluded[symbol] = {"reason":self.missing.get(symbol,{}).get(dates[0],"unknown_price_or_tradeability"),"first_missing_date":dates[0],"missing_endpoints":dates}
+            else:
+                eligible[symbol] = scores[symbol]
+        if self.admission is not None and self.config["candidate_policy"] == "complete_risk_window":
+            row = self.admission["eligibility"].get(date)
+            if row is None or sorted(eligible) != sorted(set(scores).intersection(row["eligible"])):
+                raise ValueError("allocation_eligibility_receipt_mismatch")
+        receipt = dict(policy=self.config["candidate_policy"],as_of=date,candidate_count=len(scores),eligible_count=len(eligible),eligible_sha256=digest(sorted(eligible)),excluded_count=len(excluded),excluded=excluded,excluded_sha256=digest(excluded))
+        self.candidate_cache[date] = eligible, receipt
+        return eligible, receipt
+
+    def prepare(self, dates, reference_start, top_n, cancelled, formal_start=None):
+        """Validate every scheduled prediction-based input before starting the account."""
+        issues, clock, formal = [], 0, False
+        formal_start = formal_start or reference_start
+        for date in dates:
+            check_cancel(cancelled)
+            if date < reference_start or date not in self.signals:
+                continue
+            if date >= formal_start and not formal:
+                clock, formal = 0, True
+            if clock % self.horizon == 0:
+                scores, admission = self.candidates(date,self.signals[date])
+                names = sorted(scores,key=lambda s:(-scores[s],s))[:top_n]
+                try:
+                    if self.config["candidate_policy"] == "complete_risk_window" and self.signals[date] and len(names) < top_n:
+                        raise ValueError("allocation_eligible_candidates_insufficient")
+                    if names and self.config["method"] != "equal": self.risk(date,names)
+                    if names and self.config["method"] == "mean_variance": self.calibrate(date,names,scores)
+                except ValueError as error:
+                    issues.append(dict(date=date,error=str(error),admission=admission))
+            clock += 1
+        return issues
 
     def label(self, signal_index, symbol):
         lo, hi = signal_index + 1, signal_index + 1 + self.horizon
@@ -170,12 +235,24 @@ class StockHistory:
             signal = self.signals.get(self.calendar[i], {})
             if not signal:
                 continue
+            signal, eligibility = self.candidates(self.calendar[i], signal)
             names = sorted(signal)
+            if not names:
+                continue
             ranks = percentiles([signal[s] for s in names])
-            pairs = [(r, self.label(i, s)) for r, s in zip(ranks, names)]
-            if any(y is None for _, y in pairs):
-                raise ValueError(f"allocation_calibration_label_gap: {self.calendar[i]}")
+            pairs, excluded = [], {}
+            for r,s in zip(ranks,names):
+                y = self.label(i,s)
+                if y is not None:
+                    pairs.append((r,y))
+                    continue
+                endpoints = (self.calendar[i+1],self.calendar[i+1+self.horizon])
+                reasons = [self.missing.get(s,{}).get(d,"unknown_price_or_tradeability") for d in endpoints if self.prices.get(s,{}).get(d) is None]
+                if not reasons or any(reason != "verified_suspension" for reason in reasons):
+                    raise ValueError(f"allocation_calibration_label_gap: {self.calendar[i]}:{s}")
+                excluded[s] = dict(reason="verified_suspension",endpoints=list(endpoints))
             if len(pairs) < self.config["calibration_min_pairs"]:
+                records.append(dict(score_date=self.calendar[i],return_start=self.calendar[i+1],return_end=self.calendar[i+1+self.horizon],pairs=len(pairs),used=False,excluded=excluded,eligibility=eligibility))
                 continue
             used.append(self.calendar[i])
             model = None
@@ -184,7 +261,7 @@ class StockHistory:
                 if len(candidates) != 1 or candidates[0]["fit_cutoff"] >= self.calendar[i]:
                     raise ValueError("allocation_calibration_prediction_not_out_of_sample")
                 model = candidates[0]
-            records.append(dict(score_date=self.calendar[i], return_start=self.calendar[i+1], return_end=self.calendar[i+1+self.horizon], pairs=len(pairs), model=model))
+            records.append(dict(score_date=self.calendar[i], return_start=self.calendar[i+1], return_end=self.calendar[i+1+self.horizon], pairs=len(pairs), model=model, used=True, excluded=excluded, excluded_sha256=digest(excluded), eligibility=eligibility))
             for r, y in pairs:
                 xx.append(r); yy.append(y); ww.append(1. / len(pairs))
         if len(used) < self.config["calibration_min_days"]:

@@ -919,19 +919,17 @@ fn all_panels_render_under_light_and_dark_themes() {
 }
 
 #[test]
-fn quarantined_factor_is_visible_disabled_and_excluded_from_bulk_selection() {
+fn interpreted_factors_and_alpha030_are_selectable_and_included_in_bulk_selection() {
     let mut h = Harness::new(Panel::Factor);
     h.click("清空");
     h.app.state.factor.filter = "alpha_054".into();
     h.click("全选筛选结果");
-    assert!(h.app.state.factor.selected.is_empty());
+    assert!(h.app.state.factor.selected.contains("alpha_054"));
     h.app.state.factor.filter.clear();
     h.click("全选筛选结果");
-    assert_eq!(h.app.state.factor.selected.len(), 178);
-    assert!(!h.app.state.factor.selected.contains("alpha_030"));
-    for id in analytics_factor::audit::quarantined_ids() {
-        assert!(!h.app.state.factor.selected.contains(&id));
-    }
+    assert_eq!(h.app.state.factor.selected.len(), 191);
+    assert!(h.app.state.factor.selected.contains("alpha_030"));
+    assert!(analytics_factor::audit::quarantined_ids().is_empty());
 }
 
 fn platform_harness(panel: Panel) -> (Harness, tempfile::TempDir) {
@@ -1442,6 +1440,48 @@ fn data_collection_controls_preserve_provider_and_prevent_duplicate_submissions(
         matches!(command,WorkerCommand::ExecuteWorkflow{request,..} if matches!(&*request,analytics_workflow::WorkflowRequest::CollectMarket{request,..} if request.provider==analytics_storage::collector::Provider::Hithink && request.adjustment_source==analytics_storage::adjustment::AdjustmentSource::HithinkForward))
     );
     h.click("采集日线并发布新版本");
+    assert!(h.commands.try_recv().is_err());
+}
+
+#[test]
+fn three_factor_capture_defaults_to_observed_dates_and_uses_the_shared_worker() {
+    let (mut h, _tmp) = platform_harness(Panel::Dataset);
+    h.ctx.all_styles_mut(|s| s.animation_time = 0.0);
+    h.app.state.platform.market = "market-three-factor-fixture".into();
+    h.app.state.platform.three_factor_inputs = "template.json".into();
+    h.click("自算市场三因子");
+    h.click("采集三因子历史数据");
+    let command = h
+        .commands
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .unwrap();
+    assert!(matches!(command,WorkerCommand::ExecuteWorkflow {request,..}
+        if matches!(&*request,analytics_workflow::WorkflowRequest::CollectThreeFactorInputs {market,inputs,availability:analytics_storage::three_factor::acquire::Availability::ObservedOn,resume:None}
+            if market=="market-three-factor-fixture" && inputs==std::path::Path::new("template.json"))));
+    h.click("采集三因子历史数据");
+    assert!(h.commands.try_recv().is_err());
+}
+#[test]
+fn three_factor_controls_submit_the_shared_worker_and_prevent_duplicate_submissions() {
+    let (mut h, _tmp) = platform_harness(Panel::Dataset);
+    h.ctx.all_styles_mut(|s| s.animation_time = 0.0);
+    h.click("自算市场三因子");
+    h.click("计算三因子并保存新版本");
+    assert!(h.commands.try_recv().is_err());
+    h.app.state.platform.market = "market-three-factor-fixture".into();
+    h.app.state.platform.three_factor_inputs = "historical-facts.json".into();
+    let market = h.app.state.platform.market.clone();
+    h.click("计算三因子并保存新版本");
+    let command = h
+        .commands
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .unwrap();
+    assert!(
+        matches!(command, WorkerCommand::ExecuteWorkflow {request,..}
+        if matches!(&*request,analytics_workflow::WorkflowRequest::BuildThreeFactors {market: m, inputs}
+            if m == &market && inputs == std::path::Path::new("historical-facts.json")))
+    );
+    h.click("计算三因子并保存新版本");
     assert!(h.commands.try_recv().is_err());
 }
 

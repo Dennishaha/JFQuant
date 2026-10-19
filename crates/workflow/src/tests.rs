@@ -9,7 +9,16 @@ fn context() -> TaskContext {
 #[test]
 fn recipes_validate_order_version_and_parameter_signatures() {
     let mut recipe = ResearchTemplate::builtin().unwrap();
-    assert_eq!(recipe.config.factor_ids.len(), 178);
+    assert_eq!(recipe.config.factor_ids.len(), 190);
+    let full = profiles::FactorProfile::read(std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/templates/factors/gtja191-full.json"
+    )))
+    .unwrap();
+    let mut full_recipe = recipe.clone();
+    full.apply(&mut full_recipe).unwrap();
+    assert_eq!(full_recipe.config.factor_ids.len(), 191);
+    assert!(full_recipe.config.factor_ids.contains(&"alpha_030".into()));
     let initial = signature(&recipe).unwrap();
     recipe.config.top_n = 30;
     assert_ne!(signature(&recipe).unwrap(), initial);

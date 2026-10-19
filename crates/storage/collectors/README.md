@@ -1,5 +1,10 @@
 # 数据采集边界
 
+三因子新增`collector::collect_fundamentals`和固定`fundamentals`操作，沿用分片监督、
+取消、恢复及完整发布。Rust从原始字节核对证券、参数、哈希、日期与普通股权益。
+服务协议43、采集协议16；原始文件、口径及复现命令见
+[三因子采集组件](../src/three_factor/acquire/README.md)。
+
 本组件保存内置 Python 通达信 SDK、独立巨潮公告解析、离线公司行动核对和可重建依赖。HiThink 在 [Rust 客户端](../src/hithink.rs) 中直接访问 REST，不依赖 Python、Node、官方 CLI 或 marketdb。凭据使用 JFQuant 用户目录的私有文件，不放在工作区。
 
 ## 接口与数据流
@@ -19,7 +24,7 @@ flowchart LR
 
 `collector::{collect,collect_quotes,collect_actions,collect_reference,collect_announcements}` 使用同一 `CollectionRequest`。默认 `Provider::Hithink`；通达信 `Tdxaidata` 是备用；`Cninfo` 仅支持公告。自动 workflow 按角色尝试来源，显式任务不切源。切换行情来源重取整个证券历史，不混合不同来源的字段。
 
-`collect_coefficients` 仅支持通达信独立 ForwardFactor。HiThink `AdjustmentSource::HithinkForward` 对应 `AdjustmentBasis::SupplierForward`，不是系数序列。巨潮请求使用 `AdjustmentSource::None`。服务协议36、Python JSON Lines协议15、来源策略2；旧任务和旧来源配置需重建，不改写或删除用户旧文件。
+`collect_coefficients` 仅支持通达信独立 ForwardFactor。HiThink `AdjustmentSource::HithinkForward` 对应 `AdjustmentBasis::SupplierForward`，不是系数序列。巨潮请求使用 `AdjustmentSource::None`。服务协议43、Python JSON Lines协议16、来源策略2；旧任务和旧来源配置需重建，不改写或删除用户旧文件。
 
 ## HiThink 数据与价格口径
 

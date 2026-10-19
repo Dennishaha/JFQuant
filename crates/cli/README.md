@@ -1,6 +1,46 @@
-当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议38、采集协议15、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
+## BigQuant 本地接入
+
+`data bigquant configure --key-stdin`保存私有凭据；同参数fetch/extract会校验并复用本地输出，下载前校验表白名单与最大cell额度；`check`验证HTTP认证，`schema TABLE`读取字段；`quota --python PATH`与`fetch --python PATH --request JSON --output JSON`验证实际Flight取数。`extract`同参数提供固定年报、股本/证券目录连续段、价格字段和明确停牌投影，每页最多50000行；fetch最多10000行。命令同步运行且不启动研究服务。数据为带哈希候选证据，不自动注册。[安装、格式、离线整理和验收](../storage/src/bigquant/README.md)。
+
+`market-extract --python PATH --request JSON --output JSON`读取全市场日频充分统计量；
+`market-issues`同参数读取最后源日全部成员诊断。`market-build --input JSON --output NEW_DIR
+--suspension strict|confirmed-unchanged-factor`离线构造标准三因子文件，MKT使用前日总市值加权，
+未减RF，SMB/HML仍为null。`market-publish --market VERSION --artifact DIR --output NEW_DIR`
+重放产物并登记新的行情版本；需工作区租约。方法版本、停牌引用条件、格式3及验收见
+[全市场MKT接口](../storage/src/bigquant/README.md#全市场-mkt-构造与发布)。
+
+`size-value-extract/size-value-audit/size-value-returns/size-value-build/size-value-publish`
+分别采集 PIT 年度分组输入、核验普通股权益、读取六组收益、离线重放并登记含 SMB/HML 的
+新行情。`--plan` 显式冻结可得年报政策和日频股本修订风险；输出拒绝覆盖。
+[格式4/5、计划格式及复现命令](../storage/src/bigquant/README.md#pit-年度分组与-smbhml)。
+
+当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议43、采集协议16、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
 
 # analytics-cli / jfquant
+
+`data three-factor-inputs --market VERSION --inputs template.json`采集历史股本和年度权益，
+模板声明历史股票范围并将shares/book_equity留空。默认observed-on保守处理未知修订；
+`--availability provider-dates`显式采用供应商历史日期假设，`--resume TASK_UUID`恢复
+同配置检查点。jobs wait结果details.artifact为输入文件，须连同fundamentals.json和raw
+目录交给`data three-factors`。[字段与完整命令](../storage/src/three_factor/acquire/README.md)。
+
+## 自算日频三因子
+
+当前服务43、BuildRequest格式2；provider_history必须显式填写。CLI将默认的时间口径
+写入请求，服务拒绝缺失availability的旧请求。旧格式仅本地离线迁移，产品入口不转换。
+
+```sh
+DUCKDB_DOWNLOAD_LIB=1 cargo build -p analytics-cli --bin jfquant
+target/debug/jfquant --workspace "$JFQUANT_WORKSPACE" data three-factors \
+  --market "$JFQUANT_MARKET_VERSION" --inputs /absolute/path/to/historical-facts.json
+target/debug/jfquant --workspace "$JFQUANT_WORKSPACE" jobs wait TASK_UUID --timeout 60
+```
+
+命令提交共享后台任务，发布包含MKT/SMB/HML的新行情版本。历史事实格式、单位、披露
+版本及缺失规则见[三因子组件](../storage/src/three_factor/README.md)。目前需提供真实历史
+股本、年报权益和股票范围文件；没有自动取得全市场历史事实。任务详情的 `ready` 与
+完整/不完整日期数区分成功保存和数据齐备。App与CLI需更新至相同服务协议。
+验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli --test platform three_factor`。
 
 ## MSCI 官方收盘采集
 
@@ -86,7 +126,7 @@ jfquant data refresh --template workflow.json --market MARKET_ID --workers 3 --r
 DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli
 ```
 
-服务协议31；升级时先等待或取消旧版本任务，再停止旧服务。旧协议客户端不能连接新协议服务。采集协议15，当前公司行动发布格式10／修订5；特征顺序和公式版本未改变。
+服务协议43；升级时先等待或取消旧版本任务，再停止旧服务。旧协议客户端不能连接新协议服务。采集协议16，当前公司行动发布格式10／修订5；特征顺序和公式版本未改变。
 
 分区位于不同本地工作区时，可用`--sources-manifest sources.json`汇总覆盖，或`--reuse-shards-manifest sources.json`复用；JSON数组元素为当前工作区任务UUID字符串，或`{"workspace":"/absolute/workspace","task_id":"UUID"}`。只读验证原生任务、同一不可变基础数据/窗口/基准及证券子集；不修改来源工作区。尚有分区待检查的证券不被误列为缺失。复用仍由采集器重新验证全部身份及哈希。
 
@@ -105,7 +145,7 @@ DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli
 
 ## 单因子有效性批量测试
 
-`jfquant --workspace /path/to/workspace factors evaluate --request evaluation.json` 提交服务协议38
+`jfquant --workspace /path/to/workspace factors evaluate --request evaluation.json` 提交服务协议43
 的独立测试任务，后续沿用jobs查询、取消和结果读取。请求示例（路径相对工作区）：
 
 ```json
@@ -167,7 +207,7 @@ Preview返回异步任务ID，沿用jobs wait/results/cancel，结果明确为�
 
 ## 独立模型训练与 B 股票池回测
 
-新命令使用服务协议31；保留原 `research train/backtest/run` 的配置与执行方式。
+新命令使用服务协议43；保留原 `research train/backtest/run` 的配置与执行方式。
 新训练计划格式1没有测试日期；回测计划独立指定 B、日期和行情。
 App研究页“独立训练与跨池回测”可导入、编辑和导出相同 JSON。
 
@@ -244,7 +284,7 @@ Use `evidence_only` to avoid research transition assumptions. Old plans are reje
 
 ## 停牌证据与行情补录
 
-服务协议31，行动修订5／格式10；旧协议客户端不可连接。`data evidence import-status --actions VERSION --task CAPTURE` 只导入认证GP29状态，不重新协调公司行动。公告区间通过原有 `data evidence draft --actions VERSION --request review.json [--task TASK]` 和 `data revise-actions` 发布，review.suspensions包含 instrument/start/resume/reason/start_evidence/resume_evidence，证据字段为 document_id/quote/unit。
+服务协议43，行动修订5／格式10；旧协议客户端不可连接。`data evidence import-status --actions VERSION --task CAPTURE` 只导入认证GP29状态，不重新协调公司行动。公告区间通过原有 `data evidence draft --actions VERSION --request review.json [--task TASK]` 和 `data revise-actions` 发布，review.suspensions包含 instrument/start/resume/reason/start_evidence/resume_evidence，证据字段为 document_id/quote/unit。
 
 `data evidence draft --market VERSION --request repair.json [--task TASK]` 预览同一行情修订；`data revise-market --market VERSION --request repair.json` 重核验并原子发布。repair 格式1：base_path（工作区相对行情目录）、base_sha256（原目录哈希）、selections，每项含 source_path、source_sha256（补采行情父目录含原文收据的完整树哈希）、instrument、dates、fields。字段为 open/high/low/close/volume/amount；研究和执行都必须可用。候选来源须为登记的原生行情版本，无隐式切源。新版本重新计算完整研究上下文，模型复用仍按原合同。
 
@@ -366,7 +406,7 @@ jfquant --workspace "$JFQUANT_WORKSPACE" research verify --task COMPLETED_UUID
 迁移外部工作流时，其工作区外的factors/target引用也须逐份通过`--config`列入清单；缺失引用、未知格式和绝对profile引用会阻断。迁移同时归档已登记研究任务、旧因子缓存及工作区runs下具有研究审计标记的历史目录，保留证据采集任务。
 
 
-## Allocation admission (service 40)
+## Allocation admission (service 43)
 
 Current template/workflow format 12, backtest plan 4, combined plan 2 and results 22 require explicit `candidate_policy` and `solver_tolerance`. For price-history-qualified optimization choose `candidate_policy: "complete_risk_window"`; to preserve strict original candidates choose `"unfiltered"`. New tolerances default to `1e-9`. `research check` reports per-date eligible-count failures before training; generated-prediction admission catches remaining gaps before native matching. Do not lower Top N or the risk window automatically.
 

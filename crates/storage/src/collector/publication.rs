@@ -33,6 +33,37 @@ pub(super) fn finish_collection(
         )?;
         return Err(invalid("incomplete collection"));
     }
+    if operation == "fundamentals" {
+        let mut instruments = BTreeMap::new();
+        let mut evidence = completion_receipts;
+        for (id, sha) in &receipts {
+            let name = format!("{id}-actions-structured.json");
+            let msg: Value = serde_json::from_slice(&fs::read(staging.join("raw").join(&name))?)
+                .map_err(invalid)?;
+            evidence.extend(verify_selected_receipts(
+                request,
+                staging,
+                &msg["evidence"],
+            )?);
+            evidence.insert(name, sha.clone());
+            instruments.insert(
+                id.clone(),
+                crate::three_factor::acquire::normalize(request, staging, id, &msg)?,
+            );
+        }
+        evidence.insert(
+            "complete-sources-structured.json".into(),
+            hash(&staging.join("raw/complete-sources-structured.json"))?,
+        );
+        let path = staging.join("fundamentals.json");
+        save(
+            &path,
+            &json!({"schema_version":1,"normalization":crate::three_factor::acquire::VERSION,
+            "request":request,"instruments":instruments,"evidence_sha256":evidence,"collector":complete,
+            "revision_vintage_verified":false}),
+        )?;
+        return Ok(path);
+    }
     if matches!(operation, "calendar" | "members") {
         let id = request
             .instruments

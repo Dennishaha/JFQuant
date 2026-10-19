@@ -1,10 +1,22 @@
-当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务版本见 workflow::service::PROTOCOL_VERSION、采集协议15、来源策略2；接口、价格口径、构建和验收见[采集组件](collectors/README.md)。
+## BigQuant
+
+新增本机私有凭据、Rust HTTP认证/schema及官方SDK Flight限量候选采集，支持固定历史投影和缓存离线核验、Parquet整理。该入口独立于行情collector；未验证的财报不发布为三因子事实。[传输、字段、命令与验收](src/bigquant/README.md)。
+
+`bigquant::market` 联结五张已验权限表，构造全市场 A 股 MKT（前日总市值加权，未减RF），
+按显式停牌策略保留估值影响数量；SMB/HML保留null。格式3证据、不可变产物与重放验收见
+[全市场MKT接口](src/bigquant/README.md#全市场-mkt-构造与发布)。
+
+`bigquant::size_value` 与 `size_value_factors` 使用 PIT 每股指标消去共同分母以核验普通股权益，
+按六月 2×3 分组计算 SMB/HML，保留无可得年报的排除清单及逐日缺失。格式4/5证据、
+不可变构造包、政策与股本修订风险见[PIT 年度分组接口](src/bigquant/README.md#pit-年度分组与-smbhml)。
+
+当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务版本见 workflow::service::PROTOCOL_VERSION、采集协议16、来源策略2；接口、价格口径、构建和验收见[采集组件](collectors/README.md)。
 
 ## 当前采集契约（2026-10-15）
 
 HiThink 为默认主源，由 Rust 直接调用 REST；通达信备用，维持内置 Python `tdxaidata==1.2.2`；巨潮公告使用独立 `cninfo` 来源。旧来源依赖、配置、权限检查及历史兼容入口已移除；旧数据不迁移、不删除，重新配置来源并采集。
 
-公共来源为 `hithink|tdxaidata|cninfo`，复权选项为 `hithink-forward|tdx-forward|none`。服务版本见 workflow::service::PROTOCOL_VERSION、采集协议15、来源策略2；HiThink 行情格式6，通达信格式5与 Qlib 读取保留。HiThink 训练选择供应商口径（`price_basis=provider`），前复权 OHLC、原始股数及人民币成交额、VWAP null；回测使用原价。训练缓存与 manifest 冻结口径、来源和证据哈希，特征顺序及公式版本保持。
+公共来源为 `hithink|tdxaidata|cninfo`，复权选项为 `hithink-forward|tdx-forward|none`。服务版本见 workflow::service::PROTOCOL_VERSION、采集协议16、来源策略2；HiThink 行情格式6，通达信格式5与 Qlib 读取保留。HiThink 训练选择供应商口径（`price_basis=provider`），前复权 OHLC、原始股数及人民币成交额、VWAP null；回测使用原价。训练缓存与 manifest 冻结口径、来源和证据哈希，特征顺序及公式版本保持。
 
 接口、凭据、覆盖范围与复现命令见[采集组件](collectors/README.md)。当前成分不能回填历史，下载成功不代表研究或账户资料完整。
 
@@ -130,7 +142,7 @@ flowchart LR
 
 ## 任务、协议与旧产物
 
-服务版本见 workflow::service::PROTOCOL_VERSION、Python采集协议15、来源策略2。协议或生产者签名不匹配的检查点不能恢复；旧来源数据、凭据和任务记录保留在用户工作区，但不进入新采集或研究。废弃任务重新采集，缺失事件字段通过巨潮证据修订。
+服务版本见 workflow::service::PROTOCOL_VERSION、Python采集协议16、来源策略2。协议或生产者签名不匹配的检查点不能恢复；旧来源数据、凭据和任务记录保留在用户工作区，但不进入新采集或研究。废弃任务重新采集，缺失事件字段通过巨潮证据修订。
 
 传输经过受监管进程，取消时kill并wait；超时、业务错误、身份/覆盖不足或证据篡改不得发布完整版本。HiThink完整窗口刷新与分段重叠校验、通达信单证券恢复和巨潮分页证据分别验收，不以拼接不同来源字段补齐行情。
 
@@ -250,7 +262,7 @@ CNY 价格指数。HiThink 接受确切供应商代码（或转换明确的 SH/S
 `DailyDataset::index_config` 从所选快照解析定义，不读取可编辑目录。
 验收：`cargo test -p analytics-storage runtime_index`；TDX fixture 见 `collectors/tests/test_tdx.py`。
 
-本次指数接入格式已收敛：AdjustmentRecord 仅接受格式4（`index_input` 必填，普通证券及内置目录指数显式为 null，自定义指数冻结完整合同）；SourceMap 仅接受格式2，指数无可下单证券身份；CollectionRequest 必须显式包含 `index_inputs`（可为空对象）。正常读取不升级旧版本、不猜测缺失字段。旧快照只作历史留存，显式离线转换后必须以新内容哈希重新登记，原始响应及采集器身份不得改写成当前版本。服务协议38、采集协议15拒绝旧检查点；格式更新不等于来源准入通过。
+本次指数接入格式已收敛：AdjustmentRecord 仅接受格式4（`index_input` 必填，普通证券及内置目录指数显式为 null，自定义指数冻结完整合同）；SourceMap 仅接受格式2，指数无可下单证券身份；CollectionRequest 必须显式包含 `index_inputs`（可为空对象）。正常读取不升级旧版本、不猜测缺失字段。旧快照只作历史留存，显式离线转换后必须以新内容哈希重新登记，原始响应及采集器身份不得改写成当前版本。服务协议43、采集协议16拒绝旧检查点；格式更新不等于来源准入通过。
 
 ## 历史成员原文核验
 
@@ -272,3 +284,58 @@ CNY 价格指数。HiThink 接受确切供应商代码（或转换明确的 SH/S
 验收：`cargo test -p analytics-storage membership_history --lib`。依赖锁复现：`uv pip compile crates/storage/collectors/requirements.in --python-version 3.12 --python-platform aarch64-apple-darwin --generate-hashes -o crates/storage/collectors/requirements.lock`。
 
 停牌边界的逐字段审阅接受正式公告中含义相同的“开市起停牌”“开市起开始停牌”“开市时起停牌”“开市时起开始停牌”措辞。仍要求完整证券身份、精确原文、公告日不晚于边界日及独立复牌证据；“若/拟于/预计/最晚”等条件或预计日期不能证明边界。原始公告、哈希和审阅收据保持可回放，未增加旧格式解析。复现：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-storage confirmed_opening_wording_variants --lib`。
+
+配股实施日程可使用“起始日至结束日…配股缴款…全天停牌”的同一表格行证明起始日；不得把结束日、相邻正常交易行或预计安排当作起始日。独立发行结果公告的“某日起复牌”可证明复牌边界，盘中或临时停牌仍拒绝。只新增有界交易状态，不生成成交价或风险收益端点。复现：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-storage rights_subscription_full_day_schedule --lib`。
+
+CNINFO目录机构标识另接受精确的`GD`加6位数字格式（如招商蛇口001979的`GD014107`）；机构键不推导交易所，仍核验规范证券代码、交易所、A股目录唯一身份和查询响应的机构绑定。其他未知格式拒绝。复现：`PYTHONPATH=crates/storage/collectors target/collector-build/python/bin/python3 -B -m unittest discover -s crates/storage/collectors/tests -p test_announcements.py`。
+
+## Alpha030外部三因子输入
+
+`three_factor::{ThreeFactorReturns,Observation,path,FIELDS}`读取日频快照根目录的
+`three_factor_returns.json`；单文件Parquet行情使用其父目录。该文件可选，只有选择
+Alpha030等实际依赖MKT/SMB/HML的因子时读取；默认GTJA191 v5研究组为190项。
+DailyDataset在所属worker内缓存按交易日对齐的列，供原生日频/Qlib研究读取；
+Parquet因子页和原管道使用相同格式。三因子不按复权锚点或股数/成交额比例缩放。
+
+格式1示例（仅说明结构；下列示例不是可用于真实研究的数据）：
+
+```json
+{
+  "schema_version": 1,
+  "source": "填写真实供应商、发布记录及数据修订",
+  "market": "填写因子所属市场及股票范围",
+  "return_basis": "填写市场因子定义及无风险收益处理",
+  "unit": "decimal",
+  "observations": [
+    {"trade_date":"2024-01-02","mkt":0.01,"smb":-0.002,"hml":null}
+  ]
+}
+```
+
+`source/market/return_basis`必填；unit只接受decimal（0.01=1%）。日期严格递增且唯一，
+数值必须有限，null和缺日保持null，超出当前日历范围的记录不参与对齐。
+读取时不填0、不前向填充、不从价量猜测三因子。Alpha030响应仍为股票简单收益，
+不会自动因MKT来源是MKT-RF而减去无风险收益，来源口径必须由研究者明确。
+源文件的内容和元数据进入因子页、原生年度分片及独立研究输入签名；来源改变必须重算。
+将输入放入快照后再注册/冻结版本；不要修改已登记的不可变数据版本。
+
+验收：`cargo test -p analytics-storage three_factor`；集成：
+`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow alpha030`，覆盖日期/单位/null、
+缺源、损坏、原生年度执行及来源元数据导致缓存失效。
+
+### 本地构造三因子
+
+BuildRequest只接受格式2，provider_history必须显式填null或对象；没有格式1读取或
+自动补字段入口。既有本地文件离线迁移，派生行情重新构造和登记，原始证据保持原字节。
+
+`three_factor::build::{BuildRequest,calculate,BuildReport}` 使用选定的原生/Qlib行情与
+显式历史股票范围、股本、年报权益构造 `jfquant-cn-ff3-june-2x3-v2`，输出可直接供
+Alpha030读取的同一格式。六月分组、滞后权重、披露版本、缺失传播和输入字段详见
+[三因子组件](src/three_factor/README.md)。可通过`data three-factor-inputs`采集通达信
+逐日股本与年度权益，时间假设和修订边界见[采集说明](src/three_factor/acquire/README.md)。
+全市场历史目录和原始财报修订版本仍未认证。行情补录视图上的三因子使用
+`DailyDataset::three_factor_path()`，年度缓存冻结相同文件。
+
+CLI `data three-factors --market VERSION --inputs FILE` 和 App“数据更新与版本 → 自算市场三因子”
+共用worker，生成独立行情版本和来源/输入/分组/缺失记录。任务详情列出 `ready` 和
+完整/不完整日期数量。验收：`cargo test -p analytics-storage three_factor --lib`。

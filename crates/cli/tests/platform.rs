@@ -69,6 +69,116 @@ impl Drop for Sandbox {
     }
 }
 #[test]
+fn three_factor_capture_cli_exposes_temporal_policy_and_validates_before_network() {
+    let s = Sandbox::new();
+    let help = s.cli(&["data", "three-factor-inputs", "--help"]);
+    assert!(help.status.success());
+    let text = String::from_utf8(help.stdout).unwrap();
+    assert!(
+        text.contains("observed-on")
+            && text.contains("provider-dates")
+            && text.contains("--resume")
+    );
+    let error = s.cli(&[
+        "data",
+        "three-factor-inputs",
+        "--market",
+        "missing-market",
+        "--inputs",
+        "missing-template.json",
+    ]);
+    assert!(!error.status.success());
+    let response: Value = serde_json::from_slice(&error.stdout).unwrap();
+    assert!(response["error"]["message"].is_string());
+    assert!(
+        !s.client
+            .root
+            .join(".jfquant/staging")
+            .read_dir()
+            .is_ok_and(|mut d| d.next().is_some())
+    );
+}
+#[test]
+fn three_factor_cli_builds_hand_calculated_returns_and_publishes_a_new_version() {
+    // Deliberately synthetic prices/fundamentals, with independent hand-calculated expected returns.
+    let s = Sandbox::new();
+    let w = Workspace::open(&s.client.root).unwrap();
+    let root = w.resolve("data/ff3-fixture/market");
+    std::fs::create_dir_all(root.join("calendars")).unwrap();
+    std::fs::write(
+        root.join("calendars/day.txt"),
+        "2022-12-30\n2023-06-30\n2023-07-03\n",
+    )
+    .unwrap();
+    std::fs::write(root.parent().unwrap().join("jfquant_source.json"),
+        serde_json::to_vec(&json!({"generator":"JFQuant analytics-workflow synthetic-demo-v1","synthetic_fixture":true})).unwrap()).unwrap();
+    let mut intervals = serde_json::Map::new();
+    let mut shares = vec![];
+    let mut books = vec![];
+    for i in 1..=12 {
+        let id = format!("SH{:06}", 600000 + i);
+        let dir = root.join("features").join(id.to_lowercase());
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, values) in [
+            ("close", vec![100_f32, 100., 100. + i as f32]),
+            ("factor", vec![10.; 3]),
+        ] {
+            std::fs::write(
+                dir.join(format!("{name}.day.bin")),
+                std::iter::once(0_f32)
+                    .chain(values)
+                    .flat_map(f32::to_le_bytes)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        }
+        intervals.insert(
+            id.clone(),
+            json!([{"start":"2022-12-30","end":"2023-07-03"}]),
+        );
+        shares.push(json!({"instrument":id,"effective_date":"2022-01-01","published_on":"2022-01-01","total_shares":i}));
+        books.push(json!({"instrument":id,"period_end":"2022-12-31","published_on":"2023-04-01","book_equity_cny":10*i*(((i-1)%6)/2+1)}));
+    }
+    let base = w.register(&root).unwrap();
+    let request = json!({"schema_version":analytics_storage::three_factor::build::SCHEMA_VERSION,"construction_version":analytics_storage::three_factor::build::VERSION,"provider_history":null,
+        "sources":{"universe":"synthetic fixture","shares":"synthetic fixture","book_equity":"synthetic fixture"},
+        "market":"synthetic twelve stocks","range":{"start":"2023-07-03","end":"2023-07-03"},
+        "price_basis":"provider","market_basis":"market_return",
+        "universe":{"coverage":{"start":"2022-12-30","end":"2023-07-03"},"intervals":intervals},
+        "shares":shares,"book_equity":books,"risk_free":[]});
+    std::fs::write(
+        w.resolve("facts.json"),
+        serde_json::to_vec(&request).unwrap(),
+    )
+    .unwrap();
+    let task = s.json(&[
+        "data",
+        "three-factors",
+        "--market",
+        &base.id,
+        "--inputs",
+        "facts.json",
+    ]);
+    let result = s.json(&[
+        "jobs",
+        "wait",
+        task["task_id"].as_str().unwrap(),
+        "--timeout",
+        "30",
+    ]);
+    assert_eq!(result["record"]["status"], "succeeded", "{result}");
+    assert_eq!(result["results"]["details"]["ready"], true);
+    assert_eq!(result["results"]["details"]["complete_observations"], 1);
+    let derived = result["results"]["data"]["path"].as_str().unwrap();
+    let dataset = analytics_storage::daily::DailyDataset::open(w.resolve(derived)).unwrap();
+    assert!((dataset.field("SH600001", "mkt").unwrap().get(2).unwrap() - 1. / 12.).abs() < 1e-13);
+    assert!(
+        !root
+            .join(analytics_storage::three_factor::FILE_NAME)
+            .exists()
+    );
+}
+#[test]
 fn supported_older_actions_expose_unknown_structured_fields_through_public_inspection() {
     let s = Sandbox::new();
     let w = Workspace::open(&s.client.root).unwrap();

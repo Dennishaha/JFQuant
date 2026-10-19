@@ -87,6 +87,10 @@ def security_identity(symbol):
     # these are directory-issued opaque IDs; query rows must still match them.
     if re.fullmatch(r"DR[0-9]{7}", org):
         return org
+    # Some Shenzhen issuers (001979) have directory-issued GD keys, which
+    # do not encode a venue. Code/venue and query-row identity stay mandatory.
+    if re.fullmatch(r"GD[0-9]{6}", org):
+        return org
     if (symbol.startswith("SH") and not org.startswith("gssh")) or (
         symbol.startswith("SZ") and not org.startswith("gssz")
     ):

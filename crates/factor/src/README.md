@@ -2,7 +2,7 @@
 
 [上级：analytics-factor](../README.md) · [逐项审计](../FACTOR_AUDIT.md) · [独立夹具](../testdata/README.md) · [导出工具](../examples/README.md)
 
-本目录把 GTJA191 公式目录转换为可审计 AST，在 nullable 面板上执行。注册数量、AST 可执行数量与真实研究输入齐备数量是不同概念，不能用一个“191 全通过”掩盖隔离或缺输入。
+本目录把 GTJA191 公式目录转换为可审计 AST，在 nullable 面板上执行。191项均可执行；12项采用公开v5解释，输入齐备仍需逐任务检查，尤其Alpha030的外部三因子。
 
 ## 模块与公共接口
 
@@ -10,16 +10,16 @@
 |---|---|
 | [formulas.rs](formulas.rs) | 共同JSON目录加载器；保留191原始文本和158数据AST |
 | [parser.rs](parser.rs) | `parse_formula/input_columns`、词法/优先级/算子参数；拒绝缺窗口和非法常量 |
-| [audit.rs](audit.rs) | `quarantine_reason/quarantined_ids/entries`；原报告定位、隔离原因与验证范围 |
+| [audit.rs](audit.rs) | `quarantine_reason/quarantined_ids/interpretation_note/entries`；原报告定位、显式解释与验证范围 |
 | [lib.rs](lib.rs) | `FactorRegistry/FactorSpec/FactorExpr`、`Panel`、executor、lookback 与 recursive-state 元数据、Parquet 产物 |
 
 ```mermaid
 flowchart TD
   FORM["catalogs/gtja191.json：191 条目录公式"] --> PARSE["parser.rs：规范化、分词、AST"]
-  AUDIT["audit.rs：12 项明确隔离"] --> REG["FactorRegistry：版本与输入列"]
+  AUDIT["audit.rs：12 项显式解释"] --> REG["FactorRegistry：版本与输入列"]
   PARSE --> REG
-  REG --> READY["179 项可执行 AST"]
-  REG --> STOP["Unsupported 与隔离原因"]
+  REG --> READY["191 项可执行 AST"]
+  REG --> STOP["Unsupported保护仍拒绝非法定义"]
   READY --> META["AST 组合 lookback 与递归依赖"]
   PANEL["Panel：按证券/日期分组、null 与历史成分掩码"] --> EXEC["compute / compute_streaming"]
   META --> EXEC
@@ -27,7 +27,7 @@ flowchart TD
   COLS --> OUTPUT["Parquet 与 feature-order manifest"]
 ```
 
-真实年度研究还缺 Alpha030 的 MKT/SMB/HML，因此默认 178 项。Alpha030 在完整合成输入上可测试，不意味着公开行情包含其必要输入。
+默认年度研究190项；Alpha030可选择，并经storage的three_factor_returns.json读取真实MKT/SMB/HML。缺失数据继续进入输入/样本策略。
 
 ## 执行约定与修改边界
 
@@ -35,7 +35,7 @@ flowchart TD
 
 `compute_streaming` 共享分组索引，逐因子回调并检查取消；取消或算子错误不能被注册成部分成功。固定请求的特征顺序和公式版本必须进入产物；禁止用 BTreeMap 的排序代替用户选择顺序。
 
-修正公式时同时核对 parser 参数语义、AST 输入列、嵌套历史依赖、审计说明及独立 golden。目录中已有可解释的拼写修正保留；歧义式不自行猜测，继续 Unsupported。完整算子约定见 [组件 README](../README.md#审计结论与执行约定)。
+修正公式时同时核对 parser 参数语义、AST 输入列、嵌套历史依赖、审计说明及独立 golden。当前目录格式2的execution_formula必须显式填字符串或null；FactorSpec不补缺失的执行式或递归状态。歧义式使用目录execution_formula及审计中的显式解释，禁止静默猜测。完整算子约定见 [组件 README](../README.md#审计结论与执行约定)。
 
 ## 验收
 
@@ -47,7 +47,7 @@ cargo clippy -p analytics-factor --all-targets -- -D warnings
 cargo test --doc -p analytics-factor
 ```
 
-检查179项AST参考尾值、并列排名/舍入、空窗口、SMA递归、FILTER条件回归、多元OLS、未来值不影响过去、请求顺序、历史成分隔离及12项拒绝。独立算子参考不等于原始报告公式语义完全被认证。
+检查既有179项及新增12项直接公式参考尾值、并列排名/舍入、空窗口、SMA递归、FILTER条件回归、多元OLS、未来值不影响过去、请求顺序、历史成分隔离、12项解释、Alpha143和R/S手算边界。独立算子参考不等于原始报告公式语义完全被认证。
 
 ## 为什么需要本组件
 
@@ -59,7 +59,7 @@ cargo test --doc -p analytics-factor
 
 为什么调整：普通市场代码无需先登记身份；独立目录、审核和权威名录下载增加了研究前置负担。特殊历史代码仍需在快照内明确区间，不能将旧证券行情或权益接到另一证券。训练使用价量和标签，到账／交付资料只在实际账户执行时检查。
 
-当前格式：模板10、需求3、准入5、股票池3、公司行动5、规范行情5/HiThink6、系数3、采集7、服务14、研究结果14；快照内来源映射1、训练产物3。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
+当前服务43、研究worker4、模板12、结果22、采集16、因子目录2、GTJA191公式v5（默认190项）。具体数据格式以所属组件的序列化类型与验证器为准；正常入口拒绝旧协议及旧格式，升级仅通过显式本地迁移执行。特征顺序、公式版本和来源哈希仍随产物冻结。
 
 ```mermaid
 flowchart LR

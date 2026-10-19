@@ -12,6 +12,7 @@
 #![warn(missing_docs)]
 
 pub mod acquisition;
+pub mod bigquant;
 pub mod collector;
 pub mod corporate_actions;
 pub mod daily;
@@ -21,6 +22,7 @@ pub mod membership_history_material;
 pub mod msci;
 pub mod qlib;
 pub mod tdx_status;
+pub mod three_factor;
 pub mod trading_status;
 
 use analytics_core::{ColumnSchema, DataType, DatasetFile};

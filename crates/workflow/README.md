@@ -2,7 +2,7 @@
 
 ## MSCI 官方收盘任务
 
-`IndexOperation::CollectMsci {version, calendar_market, start, end}` 复用后台任务、取消、报告、原子发布和市场登记。提交冻结指数版本、日历市场及适配器签名，执行前重新校验。报告保留请求范围、实际范围、内部缺值和日历来源。服务协议38，原有行情格式及采集协议不变。仅采集指数收盘，不进入股票来源自动协调，不生产股票或成员历史。
+`IndexOperation::CollectMsci {version, calendar_market, start, end}` 复用后台任务、取消、报告、原子发布和市场登记。提交冻结指数版本、日历市场及适配器签名，执行前重新校验。报告保留请求范围、实际范围、内部缺值和日历来源。服务协议43，原有行情格式及采集协议不变。仅采集指数收盘，不进入股票来源自动协调，不生产股票或成员历史。
 
 验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow indices --lib`。
 
@@ -213,7 +213,7 @@ The shared adapter projects reviewed terminal/successor events, follows successo
 
 ## 数据修订与账户诊断
 
-Evidence MarketDraft 和 ReviseMarket 共用只读校验，版本1收据绑定原行情、选择、来源树哈希和可选任务。发布重算校验，不读取ready标记；后台取消后不得rename发布。ImportStatus只导入独立停牌凭据，和ReconcileActions的全量条款协调分开。行动修订5发布格式10，服务协议31。
+Evidence MarketDraft 和 ReviseMarket 共用只读校验，版本1收据绑定原行情、选择、来源树哈希和可选任务。发布重算校验，不读取ready标记；后台取消后不得rename发布。ImportStatus只导入独立停牌凭据，和ReconcileActions的全量条款协调分开。行动修订5发布格式10，服务协议43。
 
 公告／GP29状态索引每任务一次，账户估值不进入因子输入。候选缺价报告先于撮合，实际账本在首个未知估值日汇总同日持仓缺口，将后续账户状态标为等待核验；不以假价格继续认证，也不把候选数当持仓影响数。补录市场进入既有完整数据签名，因子、标签、预测按完整上下文重新校验／计算；仅账户证据变化保留可验证预测复用。
 
@@ -236,7 +236,7 @@ Acceptance: `DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow index_recipe
 
 ## 工作区指数接入
 
-`indices` 服务通过现有任务、取消和原子写入管理配置；配置格式1，服务协议38。
+`indices` 服务通过现有任务、取消和原子写入管理配置；配置格式1，服务协议43。
 `.jfquant/indices/index-<完整内容哈希>.json` 是不可变版本；重复导入返回同一版本。
 内置种子用 `builtin:<id>` 解析，用户版本不覆盖内置身份，不允许不同指数占用相同数据键或供应商路线。
 修改展示字段生成新的配置完整性版本，但不改变计算合同签名，也不改写原有数据与任务。
@@ -261,11 +261,11 @@ flowchart LR
 验收：`cargo test -p analytics-workflow indices`，包括不可变版本、展示签名、映射冲突、篡改、
 导入冻结、取消、导出及缺少成员数据。
 
-本次指数接入格式已收敛：AdjustmentRecord 仅接受格式4（`index_input` 必填，普通证券及内置目录指数显式为 null，自定义指数冻结完整合同）；SourceMap 仅接受格式2，指数无可下单证券身份；CollectionRequest 必须显式包含 `index_inputs`（可为空对象）。正常读取不升级旧版本、不猜测缺失字段。旧快照只作历史留存，显式离线转换后必须以新内容哈希重新登记，原始响应及采集器身份不得改写成当前版本。服务协议38、采集协议15拒绝旧检查点；格式更新不等于来源准入通过。
+本次指数接入格式已收敛：AdjustmentRecord 仅接受格式4（`index_input` 必填，普通证券及内置目录指数显式为 null，自定义指数冻结完整合同）；SourceMap 仅接受格式2，指数无可下单证券身份；CollectionRequest 必须显式包含 `index_inputs`（可为空对象）。正常读取不升级旧版本、不猜测缺失字段。旧快照只作历史留存，显式离线转换后必须以新内容哈希重新登记，原始响应及采集器身份不得改写成当前版本。服务协议43、采集协议16拒绝旧检查点；格式更新不等于来源准入通过。
 
 ## 指数历史成分任务
 
-`membership_history::Operation`经`IndexOperation::History`提供Draft、Preview、Publish、Import、Status、Export、Capture、Material、Compare，复用worker、取消和报告持久化。提交冻结指数、市场/日历/映射、请求及原文哈希；执行重验。服务协议38。
+`membership_history::Operation`经`IndexOperation::History`提供Draft、Preview、Publish、Import、Status、Export、Capture、Material、Compare，复用worker、取消和报告持久化。提交冻结指数、市场/日历/映射、请求及原文哈希；执行重验。服务协议43。
 
 发布选择确切连续范围，复制证据到`.jfquant/histories/history-<SHA256>/evidence/`。产物格式2包含请求、审核、规则版本、日历、映射、报告及成员区间；读取重验冻结副本及结果，不信任ready标记。导出生成history.json及相对原文；导入重验。
 
@@ -276,7 +276,7 @@ flowchart LR
 
 ### 历史补证材料任务
 
-服务协议38仅接受历史请求/报告/产物2；旧任务记录和原文保留，旧产物不能直接使用，需准备当前格式请求并重新验证发布；没有旧格式转换模块或运行时猜测。`history_material::MaterialAction`提供Inspect、Register、Extract、Review；检查只读离线，采集仅由Capture显式联网。文件、PDF与像素解码全部在worker。Inspect分别返回`material_status`、带来源/哈希的`extracted_texts`和可选缩略RGBA；Review显式生成原图区域核对收据，返回新草稿，不修改旧文件。取消不会发布历史产物。
+服务协议43仅接受历史请求/报告/产物2；旧任务记录和原文保留，旧产物不能直接使用，需准备当前格式请求并重新验证发布；没有旧格式转换模块或运行时猜测。`history_material::MaterialAction`提供Inspect、Register、Extract、Review；检查只读离线，采集仅由Capture显式联网。文件、PDF与像素解码全部在worker。Inspect分别返回`material_status`、带来源/哈希的`extracted_texts`和可选缩略RGBA；Review显式生成原图区域核对收据，返回新草稿，不修改旧文件。取消不会发布历史产物。
 
 `Compare`接收两个预览任务ID，要求相同`task_context_signature`（指数计算合同、市场、日历、身份、请求范围及规则）；证据变化仍允许比较。结果分别列解除/剩余/新增诊断、新增/失去证明日期和连续区间数量。完整冻结签名仍包含证据与修订，任何关键输入变化使旧预览失效；正式发布重新核验副本。
 
@@ -336,7 +336,51 @@ python3 crates/workflow/checks/architecture.py
 
 ## Allocation admission revision
 
-Current contracts: service 40, research worker 4, research result 22, workflow/template 12, independent backtest plan 4, combined plan 2, allocation input/report/manifest 2. Normal readers reject previous formats; `workspace migrate-allocation` explicitly upgrades template/workflow 10–11, backtest plan 2–3 and combined plan 1. Revision transactions use `.jfquant/allocation-admission-migration.json`; the previous migration journal and backups remain intact. An unfinished previous-generation transaction must first finish with its original binary. Migration preserves existing methods, windows and caps, sets `candidate_policy="unfiltered"` and preserves the old numerical tolerance (`1e-10` for format 11/plan 3); new configurations use `1e-9`. No default migration enables filtering or changes Top N.
+Current contracts: service 43, research worker 4, research result 22, workflow/template 12, independent backtest plan 4, combined plan 2, allocation input/report/manifest 2. Normal readers reject previous formats; `workspace migrate-allocation` explicitly upgrades template/workflow 10–11, backtest plan 2–3 and combined plan 1. Revision transactions use `.jfquant/allocation-admission-migration.json`; the previous migration journal and backups remain intact. An unfinished previous-generation transaction must first finish with its original binary. Migration preserves existing methods, windows and caps, sets `candidate_policy="unfiltered"` and preserves the old numerical tolerance (`1e-10` for format 11/plan 3); new configurations use `1e-9`. No default migration enables filtering or changes Top N.
+
+## 日频三因子自算
+
+BigQuant提供独立离线入口 `Workspace::publish_bigquant_market_factors(market, artifact, output)`。
+它获取工作区租约，核验基准行情、产物实现/字段/内容哈希并重算报告，复制到新目录，
+通过正常读取器核对 `three_factor_returns.json` 后登记新行情。源manifest保留原来源，
+增加原行情身份与 `bigquant_market_factor` 构造manifest；不启动研究服务。
+产物含全市场MKT（未减RF），SMB/HML保持null，`full_three_factor_ready=false`。
+`Workspace::publish_bigquant_size_value_factors` 使用同一发布事务重放 PIT 年度分组及六组收益包，
+以 `bigquant_size_value_factor` 保存构造manifest并写入含 SMB/HML 的标准文件。
+完整性取构造manifest的实际日数，缺失不补零；公开接口与验收见
+[PIT 年度分组](../storage/src/bigquant/README.md#pit-年度分组与-smbhml)。
+[固定投影、停牌规则与CLI](../storage/src/bigquant/README.md#全市场-mkt-构造与发布)。
+验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow bigquant_ --lib`。
+
+新增`WorkflowRequest::CollectThreeFactorInputs {market,inputs,availability,resume}`，
+同一worker从BuildRequest空事实模板采集通达信逐日股本、年度权益。冻结模板字节、
+行情、规范化/构造实现、采集器/依赖身份；恢复还核对口径和检查点所有者。成功后的
+details.artifact指向`inputs.json`，同目录保留`fundamentals.json`、raw回执和原模板。
+失败或取消不发布输入包。`BuildThreeFactors`在提交和执行时重放原生规范化验证，
+最终行情的`three_factor_build/`保存完整可复算输入包及时间假设manifest。
+
+默认`observed_on`不能把今天采集的版本倒填至历史；显式`provider_dates`可计算供应商
+历史日期口径，保留`revision_vintage_verified=false`。构造版本v2、服务协议43。
+不自动改变因子选择，不认证全市场或无前视财务。[字段与完整命令](../storage/src/three_factor/acquire/README.md)。
+
+`WorkflowRequest::BuildThreeFactors { market, inputs }` 由共享worker执行，CLI/App共用。
+`inputs` 为[三因子输入格式2](../storage/src/three_factor/README.md)，只接受当前格式，
+provider_history必须显式填写null或对象，采集请求availability必填；服务不补旧字段。
+旧数据仅本地离线转换并保留备份，派生行情重新计算登记，旧回执和旧签名不改写。
+路径可以是工作区相对路径
+或显式绝对路径。提交时冻结原文件字节SHA256、构造版本、实现签名和行情版本；执行前
+拒绝输入或实现改变，计算后再次核验原行情。原行情保持不变，新行情副本独立登记。
+
+新行情根目录写入 `three_factor_returns.json` 和 `three_factor_build/`：原样 `inputs.json`、
+逐年分组/逐日组合/缺失原因 `report.json`、包含原行情身份及文件哈希的 `manifest.json`。
+保留原行情来源、原始回执和合成标记；生成结果不会把自述财务事实升级为已认证的全市场
+数据。`ready` 表示所请求日期三列全部非空；任务仍可发布带null的诊断结果，并返回
+`complete_observations/incomplete_observations`。未自动修改研究因子选择。
+
+```sh
+DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow three_factor_build --lib
+DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli --test platform three_factor
+```
 
 `AllocationConfig.candidate_policy` is explicit: `unfiltered` preserves candidates and fails on missing optimizer input; `complete_risk_window` checks complete realized H-day endpoint history **before** score ranking. It applies to stock strategies and can also be selected for their equal-weight comparison baseline. Eligibility is computed separately for every decision date using endpoints no later than that date. It never alters factor/training membership, shortens the risk window, fills prices, reduces Top N or relaxes caps. Insufficient eligible candidates fail before training when identifiable from the pool, or after predictions before opening the actual account. Empty source signals retain liquidation semantics. Combined capital allocation consumes frozen source stock qualifications and does not filter source strategies.
 
@@ -373,3 +417,21 @@ python3 crates/workflow/checks/architecture.py
 Signed JSON uses serde_json's `float_roundtrip` parser: saving, reopening and copying solver weights must preserve their exact f64 values and signature, including scientific-notation boundary weights. Publication checks the persisted execution signature before the task can succeed. There is no fallback verification or rewriting of previously mismatched results; rerun them. The execution component signature includes persistence code and workspace dependency features. Reproduce: `DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow signed_floats_survive_repeated_publication --lib`.
 
 Reference buys use the largest affordable representable fractional quantity: if Decimal division rounds a cash-limited quantity above available cash, the reference account steps down one least-significant share unit and verifies affordability before trading. It never clamps negative cash, repairs optimizer weights or changes the requested target. Regression checks include `1/6`, prices `91.19` and `123.456789`, and very small balances; errors retain the failing date and cash amount.
+
+## GTJA191 v5完整定义（2026-10-18）
+
+191项均可计算；12项原歧义公式采用公开的JFQuant解释，精确执行式与原文一起进入
+FactorSpec、manifest和[因子审计](../factor/FACTOR_AUDIT.md)。默认组改为190项，
+历史178项相对顺序保持；旧v4配置/模型不会自动升级。全191项显式配置为
+`templates/factors/gtja191-full.json`，也可在界面选用Alpha030。
+
+Alpha030需要数据根目录的`three_factor_returns.json`，格式见
+[storage接口](../storage/README.md#alpha030外部三因子输入)。输入依赖规划、原生日频年度
+面板、Parquet因子页和原管道均读取同一来源，保留null和decimal单位；严格策略阻止
+缺少必要来源，允许缺失策略沿用null及样本门槛，不伪造输入。
+来源元数据和文件字节进入快照、年度分片及独立输入签名，修改来源会使缓存失效。
+
+```bash
+DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow alpha030
+DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow recipes_validate_order_version_and_parameter_signatures
+```

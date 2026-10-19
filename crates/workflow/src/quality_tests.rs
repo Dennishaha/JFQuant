@@ -466,7 +466,7 @@ fn alpha158_template_family_order_and_native_training_are_independent_from_gtja(
     let gtja = ResearchTemplate::builtin().unwrap();
     t.select_factor_set(FactorSet::Alpha158);
     assert_eq!(t.config.factor_ids.len(), 158);
-    assert_eq!(gtja.config.factor_ids.len(), 178);
+    assert_eq!(gtja.config.factor_ids.len(), 190);
     t.price_basis = PriceBasis::Provider;
     t.config.factor_ids = vec!["alpha158_001_KMID".into(), "alpha158_014_ROC5".into()];
     t.validate().unwrap();

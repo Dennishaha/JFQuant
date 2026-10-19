@@ -286,6 +286,37 @@ def session(request, report):
         shutil.rmtree(directory, ignore_errors=True)
 
 
+def fundamentals(request, report):
+    """Capture annual accounting fields and dated capital snapshots, without SDK filling.
+
+    GetGbInfoInStr's date-list mode returned Date=0 for its first entry in
+    the pinned native build. Use interval mode after loading its daily K lines.
+    Rust validates dates, call arguments, units and equity consistency from receipts.
+    """
+    start, end = request["start"], request["end"]
+    observed = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).date().isoformat()
+    if end > observed:
+        raise ValueError("tdx_future_fundamentals_range")
+    fields = ["FN004", "FN238", "FN271", "FN428", "FN429"]
+    with session(request, report) as (tqs, receipts, responses):
+        for code in request["instruments"]:
+            source_code = request_symbol(request, code)
+            tqs.get_financial_data([source_code], fields, start, end, "announce_time")
+            for year in range(int(start[:4]), int(end[:4]) + 1):
+                first, last = max(start, f"{year}-01-01"), min(end, f"{year}-12-31")
+                report("progress", message=f"历史股本 {code} {year}")
+                # Native interval shares require the corresponding local daily history.
+                tqs.get_market_data(["Close"], [source_code], "1d", first, last, -1, "none")
+                tqs.get_gb_info_by_date(source_code, first, last)
+            captured_on = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).date().isoformat()
+            report("action_shard", instrument=code, observed_on=captured_on,
+                   evidence={"provider": "tdxaidata", "sdk_version": VERSION,
+                             "sdk_receipts": receipts[:]})
+            receipts.clear()
+            responses.clear()
+    report("complete", calendar=[], universes={})
+
+
 def collect(request, report):
     """One security per supervised shard; yearly windows bound native reply sizes."""
     start, end = request["start"], request["end"]

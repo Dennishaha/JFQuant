@@ -26,7 +26,7 @@ impl PriceBasis {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FactorSet {
-    /// Audited GTJA191 v4, with the existing default 178 usable features.
+    /// GTJA191 v5: 191 executable definitions; default 190 excludes external three-factor inputs.
     #[default]
     Gtja191,
     /// Qlib's pinned default 158 definitions with JFQuant input units.

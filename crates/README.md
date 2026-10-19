@@ -22,3 +22,8 @@ DUCKDB_DOWNLOAD_LIB=1 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 Generated data, dependencies, models and distribution artifacts are never committed.
+
+The current desktop/CLI service contract is 43; collector protocol is 16 and research worker
+protocol is 4. GTJA191 v5 exposes 191 implementations with a 190-factor default; Alpha030
+requires real dated three-factor inputs. BigQuant acquisition and offline factor publication
+belong to storage/workflow. See the component READMEs for formats, coverage and acceptance.

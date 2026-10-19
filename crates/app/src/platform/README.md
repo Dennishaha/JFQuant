@@ -1,5 +1,13 @@
 # Workspace panels
 
+The three-factor area also submits CollectThreeFactorInputs with a default-off provider-date
+option and the same input file picker. Its returned artifact can feed BuildThreeFactors.
+Both tasks use the shared worker and prevent duplicate submissions; the temporal assumption
+remains explicit in the UI and published artifacts.
+
+`data` also owns the historical-facts file picker and three-factor action; it submits
+`BuildThreeFactors` to the shared workflow worker, with no financial calculation on the UI thread.
+
 The platform root contains shared editor state and request submission. Workspace,
 data, research and run-history rendering live in separate modules.
 

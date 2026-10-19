@@ -98,7 +98,7 @@ fn native(e: &FactorExpr, w: Window, out: &mut Dependencies) -> Result<()> {
             native(a, w, out)?;
             native(a, shifted(w, *n), out)?;
         }
-        Ema(a, ..) | CumulativeSum(a) => native(
+        Ema(a, ..) | CumulativeSum(a) | UpReturnProduct(a) => native(
             a,
             Window {
                 recursive: true,
@@ -130,7 +130,8 @@ fn native(e: &FactorExpr, w: Window, out: &mut Dependencies) -> Result<()> {
         | Product(a, n)
         | WeightedMean(a, n)
         | HighDay(a, n)
-        | LowDay(a, n) => native(a, rolling(w, *n), out)?,
+        | LowDay(a, n)
+        | RescaledRange(a, n) => native(a, rolling(w, *n), out)?,
         Corr(a, b, n) | Cov(a, b, n) | RegBeta(a, b, n) | RegResi(a, b, n) | SumIf(a, b, n) => {
             native(a, rolling(w, *n), out)?;
             native(b, rolling(w, *n), out)?;

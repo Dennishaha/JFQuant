@@ -24,7 +24,13 @@ impl FactorGroup {
             schema_version: 1,
             id: format!("builtin:{}", set.label()),
             name: set.label().into(),
-            description: "内置只读组；GTJA191保留完整目录，默认执行178项。".into(),
+            description: match set {
+                FactorSet::Gtja191 => {
+                    "内置只读组；191项可执行，默认190项；Alpha030需真实三因子输入后选用。"
+                }
+                FactorSet::Alpha158 => "内置只读组；固定Qlib版本的158项因子。",
+            }
+            .into(),
             profile: FactorProfile::from_template(&t),
         }
     }

@@ -1,7 +1,7 @@
 # Workflow use cases
 
 The parent dispatcher exhaustively routes WorkflowRequest variants to acquisition,
-actions, research_jobs and configuration. `catalog` owns data-admission checks;
+actions, research_jobs, configuration and the three_factor_build component. `catalog` owns data-admission checks;
 `results` interprets current artifacts. Workspace storage itself owns paths,
 atomic metadata and run-state transitions, not research policy.
 

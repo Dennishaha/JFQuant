@@ -1,5 +1,11 @@
 # CLI 进程与服务集成测试
 
+three_factor过滤另覆盖采集命令时间口径、恢复选项和联网前校验；真实源小样本验收
+保留在忽略的target目录，不提交数据或原始回执。
+
+三因子验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli --test platform three_factor`。
+12只显式合成股票的真实CLI提交/等待/发布路径与独立手算收益对照，同时检查旧行情未被修改。
+
 [上级：analytics-cli](../README.md) · [参数转换实现](../src/README.md) · [egui 对接测试](../../app/src/README.md)
 
 [platform.rs](platform.rs) 使用真实 `jfquant` 子进程和临时工作区验证公共后台。测试用 `test-support` 注入暂停，不依赖真实公网下载；数据/公司行动由本项目完整合成构造器或本地归档提供。
@@ -75,7 +81,7 @@ flowchart LR
 
 为什么调整：普通市场代码无需先登记身份；独立目录、审核和权威名录下载增加了研究前置负担。特殊历史代码仍需在快照内明确区间，不能将旧证券行情或权益接到另一证券。训练使用价量和标签，到账／交付资料只在实际账户执行时检查。
 
-当前格式：模板10、需求3、准入5、股票池3、公司行动5、规范行情5/HiThink6、系数3、采集7、服务14、研究结果14；快照内来源映射1、训练产物3。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
+当前服务43、研究worker4、模板12、结果22、采集16、因子目录2、GTJA191公式v5（默认190项）。具体数据格式以所属组件的序列化类型与验证器为准；正常入口拒绝旧协议及旧格式，升级仅通过显式本地迁移执行。特征顺序、公式版本和来源哈希仍随产物冻结。
 
 ```bash
 jfquant --workspace "$JFQUANT_WORKSPACE" research train --template recipe.json --market MARKET_ID --actions HISTORY_ACTIONS_ID

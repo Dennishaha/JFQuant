@@ -2,7 +2,11 @@
 
 仅负责固定 `tdxaidata` 原生SDK、独立巨潮实施公告和离线行动核对。HiThink由Rust直接HTTP接入。公共任务、数据校验、不可变发布由Rust负责；完整接口与命令见[采集组件](../README.md)。
 
-`__main__` 每进程一个任务，JSON Lines协议15；stdout专用于协议，原生printf和诊断进入stderr。启动及完成核对源码签名、CPython3.12.15和tdxaidata1.2.2。签名覆盖全部白名单模块，修改后必须重建包内运行时。
+`__main__` 每进程一个任务，JSON Lines协议16；stdout专用于协议，原生printf和诊断进入stderr。启动及完成核对源码签名、CPython3.12.15和tdxaidata1.2.2。签名覆盖全部白名单模块，修改后必须重建包内运行时。
+
+`tdx.fundamentals`采集FN004/FN238/FN271/FN428/FN429，逐年加载日K后读取区间股本。
+不使用实测返回Date=0的日期列表模式；action_shard传实际观察日与原生回执，数值
+规范化由Rust完成。见[规范化组件](../../src/three_factor/acquire/README.md)。
 
 `tdx.py`在SDK填充前保留原生字节及哈希。原价强制none/fill_data=False，成交量为股，万元金额转元；ForwardFactor按共同观察日归一化并与送配参考核对。Key只在私有子进程环境及0700临时SDK目录使用，结束/取消清理。
 

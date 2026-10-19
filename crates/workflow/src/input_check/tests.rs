@@ -124,6 +124,69 @@ fn unavailable_inputs_have_policy_handling_and_never_fake_a_complete_pass() {
     let qualified = execute(&r);
     assert!(!qualified.ready());
 }
+
+#[test]
+fn alpha030_uses_dated_external_returns_and_invalidates_cache_on_source_changes() {
+    use analytics_storage::three_factor::{FILE_NAME, Observation, ThreeFactorReturns};
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = fixture(dir.path(), "");
+    let mut engine = DuckDbEngine::open_in_memory().unwrap();
+    engine.export(ExportRequest {sql: "SELECT 's'||s::VARCHAR AS instrument_id,DATE '2030-01-01'+d::INTEGER AS trade_date, (20+d*0.02+s+sin(d*0.19))::DOUBLE AS open, (23+d*0.02+s)::DOUBLE AS high,(17+d*0.02+s)::DOUBLE AS low,(21+d*0.02+s+sin(d*0.23+s))::DOUBLE AS close, 100.0::DOUBLE AS volume, 2000.0::DOUBLE AS amount,true AS is_trading FROM range(1,4) a(s) CROSS JOIN range(0,140) b(d)".into(),destination:r.input.market_path.clone(),format:ExportFormat::Parquet,compression:None}).unwrap();
+    r.input.factor_set = FactorSet::Gtja191;
+    r.input.factor_ids = vec!["alpha_030".into()];
+    r.input.factor_refs = vec![FactorRef::builtin(FactorSet::Gtja191, "alpha_030")];
+    r.input.date_range = DateRange {
+        start: "2030-04-15".parse().unwrap(),
+        end: "2030-04-20".parse().unwrap(),
+    };
+    assert!(!execute(&r).ready());
+    let start: analytics_core::Date = "2030-01-01".parse().unwrap();
+    let mut data = ThreeFactorReturns {
+        schema_version: 1,
+        source: "synthetic integration fixture v1".into(),
+        market: "fixture".into(),
+        return_basis: "synthetic decimal factor returns".into(),
+        unit: "decimal".into(),
+        observations: (0..140)
+            .map(|d| Observation {
+                trade_date: start + chrono::Duration::days(d),
+                mkt: Some(0.01 * (d as f64 * 0.7).sin()),
+                smb: Some(0.008 * (d as f64 * 0.37).cos()),
+                hml: Some(0.006 * (d as f64 * 0.17 + 0.5).sin()),
+            })
+            .collect(),
+    };
+    let path = dir.path().join(FILE_NAME);
+    let write = |data: &ThreeFactorReturns| {
+        std::fs::write(&path, serde_json::to_vec(data).unwrap()).unwrap()
+    };
+    write(&data);
+    let first = execute(&r);
+    assert!(first.ready(), "{first:?}");
+    assert!(first.missing_counts.is_empty());
+    assert!(first.factors[0].finite > 0);
+    assert!(execute(&r).artifact.unwrap().cache_hit);
+    data.source = "synthetic integration fixture v2".into();
+    write(&data);
+    let changed = execute(&r);
+    assert!(changed.ready());
+    assert!(!changed.artifact.as_ref().unwrap().cache_hit);
+    assert_ne!(changed.context_hash, first.context_hash);
+    // The missing observation lies inside every requested regression/window dependency.
+    data.observations[90].hml = None;
+    write(&data);
+    let gap = execute(&r);
+    assert!(gap.missing_counts["hml"] > 0);
+    assert_eq!(gap.factors[0].finite, 0);
+    assert!(gap.warnings.iter().any(|w| w.contains("计算结果为空")));
+    r.policy.strictness = ResearchStrictness::AllowMissing;
+    let relaxed = execute(&r);
+    assert!(relaxed.ready());
+    assert_eq!(relaxed.factors[0].finite, 0);
+    data.unit = "percent".into();
+    write(&data);
+    assert!(run(&r, channel().0, cancellation()).is_err());
+}
 #[test]
 fn daily_dependencies_are_field_specific_and_preserve_historical_member_context() {
     use analytics_core::pool::PoolMembership;

@@ -16,7 +16,7 @@ struct Credential {
 }
 fn provider_name(provider: &str) -> io::Result<&str> {
     match provider {
-        "hithink" | "tdxaidata" => Ok(provider),
+        "hithink" | "tdxaidata" | "bigquant" => Ok(provider),
         _ => Err(io::Error::other("credential_provider_unsupported")),
     }
 }
@@ -96,7 +96,10 @@ fn read_at(root: &Path, provider: &str) -> io::Result<String> {
 }
 fn save_at(root: &Path, provider: &str, key: &str) -> io::Result<()> {
     provider_name(provider)?;
-    if !valid_key(key) {
+    if !valid_key(key)
+        || (provider == "bigquant"
+            && (key.matches('.').count() != 1 || key.starts_with('.') || key.ends_with('.')))
+    {
         return Err(io::Error::other("invalid source credential"));
     }
     private_directory(root, true)?;
@@ -156,6 +159,12 @@ mod tests {
         let root = temp.path().join("credentials");
         save_at(&root, "tdxaidata", "fixture-private-tdx-key").unwrap();
         save_at(&root, "hithink", "fixture-private-hithink-key").unwrap();
+        save_at(&root, "bigquant", "fixture-ak.fixture-private-sk").unwrap();
+        assert_eq!(
+            read_at(&root, "bigquant").unwrap(),
+            "fixture-ak.fixture-private-sk"
+        );
+        assert!(save_at(&root, "bigquant", "fixture-missing-secret-key").is_err());
         assert_eq!(
             read_at(&root, "tdxaidata").unwrap(),
             "fixture-private-tdx-key"
@@ -177,7 +186,7 @@ mod tests {
                 & 0o777,
             0o600
         );
-        assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 3);
     }
     #[test]
     fn malformed_permissive_linked_and_unknown_files_are_rejected_without_exposing_keys() {

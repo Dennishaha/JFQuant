@@ -20,6 +20,10 @@ pub fn source_stamp(market: &Path, universe: &Path) -> crate::Result<String> {
         Ok(())
     }
     let mut paths = vec![];
+    let three_factor = analytics_storage::three_factor::path(market);
+    if three_factor.exists() {
+        paths.push(three_factor);
+    }
     for path in [market, universe] {
         if !path.exists() {
             return Err(format!("input missing: {}", path.display()).into());

@@ -341,13 +341,19 @@ pub fn research_panel(
                         .all()
                         .filter(|s| s.id.contains(&state.platform.filter))
                     {
-                        let available = s.id != "alpha_030" && !quarantined.contains(&s.id);
+                        let available = !quarantined.contains(&s.id);
                         let mut selected =
                             state.platform.template.config.factor_ids.contains(&s.id);
                         let response = ui.add_enabled(
                             enabled && available,
                             egui::Checkbox::new(&mut selected, &s.id),
                         );
+                        if let Some(formula) = &s.execution_formula {
+                            response.clone().on_hover_text(format!(
+                                "采用显式公式解释（{}）\n执行：{}\n原文：{}",
+                                s.version, formula, s.formula
+                            ));
+                        }
                         if response.changed() {
                             if selected {
                                 state.platform.template.config.factor_ids.push(s.id.clone());
@@ -360,12 +366,10 @@ pub fn research_panel(
                                     .retain(|id| id != &s.id);
                             }
                         }
-                        if !available {
-                            ui.label(if s.id == "alpha_030" {
-                                "缺少真实MKT/SMB/HML输入"
-                            } else {
-                                "公式歧义已隔离，详见因子审计"
-                            });
+                        if s.id == "alpha_030" {
+                            ui.label("需真实MKT/SMB/HML输入；由研究输入检查验证覆盖");
+                        } else if !available {
+                            ui.label("公式歧义已隔离，详见因子审计");
                         }
                     }
                 });

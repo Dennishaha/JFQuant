@@ -504,9 +504,7 @@ fn factor_panel(
         ui.label(format!(
             "因子选择（已选 {} / {} 可用，{} 项隔离）",
             state.factor.selected.len(),
-            registry.len()
-                - registry.unsupported_ids().len()
-                - usize::from(registry.get("alpha_030").is_some()),
+            registry.len() - registry.unsupported_ids().len(),
             registry.unsupported_ids().len()
         ));
         ui.add(
@@ -520,7 +518,6 @@ fn factor_panel(
         {
             for spec in registry.all() {
                 if state.factor.matches_filter(&spec.id, &spec.formula)
-                    && spec.id != "alpha_030"
                     && !matches!(
                         spec.expression,
                         analytics_factor::FactorExpr::Unsupported { .. }
@@ -547,8 +544,7 @@ fn factor_panel(
                         continue;
                     }
                     let mut checked = state.factor.selected.contains(&spec.id);
-                    let unsupported = spec.id == "alpha_030"
-                        || matches!(
+                    let unsupported = matches!(
                             spec.expression,
                             analytics_factor::FactorExpr::Unsupported { .. }
                         );
@@ -572,7 +568,7 @@ fn factor_panel(
                     }
                     if spec.id == "alpha_030" {
                         ui.label(
-                            egui::RichText::new("缺少MKT/SMB/HML输入，暂不可选")
+                            egui::RichText::new("需要所选数据中的真实MKT/SMB/HML；运行前检查覆盖")
                                 .small()
                                 .weak(),
                         );
@@ -585,8 +581,11 @@ fn factor_panel(
                                 .weak(),
                         );
                     } else {
-                        ui.label(egui::RichText::new(&spec.formula).small().weak())
-                            .on_hover_text(&spec.formula);
+                        let display = spec.execution_formula.as_deref().unwrap_or(&spec.formula);
+                        let hover = if spec.execution_formula.is_some() {
+                            format!("采用显式公式解释（{}）\n执行：{display}\n原文：{}\n解释依据见因子审计。", spec.version, spec.formula)
+                        } else { spec.formula.clone() };
+                        ui.label(egui::RichText::new(display).small().weak()).on_hover_text(hover);
                     }
                     ui.end_row();
                 }

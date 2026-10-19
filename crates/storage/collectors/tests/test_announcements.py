@@ -50,6 +50,23 @@ class AnnouncementTests(unittest.TestCase):
                 extract_pdf_text(b"not a PDF")
             reader.assert_not_called()
 
+    def test_gd_directory_identity_preserves_code_and_venue_checks(self):
+        from jfquant_collectors.announcements import security_identity
+
+        row = {"code": "001979", "category": "A股", "orgId": "GD014107"}
+        with patch("jfquant_collectors.announcements.security_directory", return_value=[row]):
+            self.assertEqual(security_identity("SZ001979"), "GD014107")
+            for symbol in ("SH001979", "SZ001978"):
+                with self.assertRaises(ValueError):
+                    security_identity(symbol)
+        for org in ("GD14107", "GD014107-extra", "GD/014107", "gd014107"):
+            with patch(
+                "jfquant_collectors.announcements.security_directory",
+                return_value=[{**row, "orgId": org}],
+            ):
+                with self.assertRaises(ValueError):
+                    security_identity("SZ001979")
+
     def test_page_drift_requires_all_unique_ids_and_conflicts_remain_errors(self):
         def row(i):
             return {

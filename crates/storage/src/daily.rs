@@ -84,6 +84,7 @@ pub struct DailyDataset {
     field_cache: std::cell::RefCell<BTreeMap<(String, String), DailyField>>,
     bar_cache: std::cell::RefCell<BTreeMap<String, Arc<Vec<DailyBar>>>>,
     adjustment_cache: std::cell::RefCell<BTreeMap<String, AdjustmentRecord>>,
+    three_factor_override: Option<PathBuf>,
     #[cfg(test)]
     physical_reads: std::cell::Cell<usize>,
 }
@@ -348,6 +349,7 @@ impl DailyDataset {
             field_cache: Default::default(),
             bar_cache: Default::default(),
             adjustment_cache: Default::default(),
+            three_factor_override: self.three_factor_override.clone(),
             #[cfg(test)]
             physical_reads: Default::default(),
         })
@@ -475,6 +477,9 @@ impl DailyDataset {
             let mut dataset = Self::open(base)?;
             // Keep the underlying provider root; the requested view identity is frozen by the workflow.
             dataset.supplements.extend(cells);
+            if root.join(crate::three_factor::FILE_NAME).exists() {
+                dataset.three_factor_override = Some(root.join(crate::three_factor::FILE_NAME));
+            }
             return Ok(dataset);
         }
         if root.join("market_view.json").is_file() {
@@ -546,6 +551,7 @@ impl DailyDataset {
                 field_cache: Default::default(),
                 bar_cache: Default::default(),
                 adjustment_cache: Default::default(),
+                three_factor_override: None,
                 #[cfg(test)]
                 physical_reads: Default::default(),
                 calendar: m.calendar.clone(),
@@ -563,6 +569,7 @@ impl DailyDataset {
                 field_cache: Default::default(),
                 bar_cache: Default::default(),
                 adjustment_cache: Default::default(),
+                three_factor_override: None,
                 #[cfg(test)]
                 physical_reads: Default::default(),
                 calendar: q.calendar.clone(),
@@ -1292,7 +1299,27 @@ impl DailyDataset {
         }
         Ok(result)
     }
+    /// Physical three-factor input, including a sidecar on a selected supplemented market view.
+    pub fn three_factor_path(&self) -> PathBuf {
+        self.three_factor_override
+            .clone()
+            .unwrap_or_else(|| self.root.join(crate::three_factor::FILE_NAME))
+    }
     fn field_base(&self, id: &str, name: &str) -> io::Result<DailyField> {
+        if crate::three_factor::FIELDS.contains(&name) {
+            self.validate_read_key(id)?;
+            let key = ("__three_factor_returns".into(), name.into());
+            if let Some(field) = self.field_cache.borrow().get(&key) {
+                return Ok(field.clone());
+            }
+            let data = crate::three_factor::ThreeFactorReturns::read(&self.three_factor_path())?;
+            for (name, field) in data.fields(&self.calendar)? {
+                self.field_cache
+                    .borrow_mut()
+                    .insert(("__three_factor_returns".into(), name), field);
+            }
+            return Ok(self.field_cache.borrow()[&key].clone());
+        }
         if self.needs_binding(id) {
             return self.bound_field(id, name);
         }

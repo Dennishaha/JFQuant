@@ -393,6 +393,7 @@ pub(super) fn collect_with_command(
                                     | "announcements"
                                     | "calendar"
                                     | "members"
+                                    | "fundamentals"
                             ) =>
                         {
                             if !identified {

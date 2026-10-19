@@ -207,6 +207,9 @@ pub enum WorkspaceCommand {
 }
 #[derive(Debug, Subcommand)]
 pub enum DataCommand {
+    /// BigQuant local credentials, HTTP schema and bounded Flight raw acquisition.
+    #[command(subcommand)]
+    Bigquant(BigquantCommand),
     /// Capture PDFs, recover partial batches, inspect gaps and prepare reviewed requests.
     #[command(subcommand)]
     Evidence(EvidenceCommand),
@@ -228,6 +231,27 @@ pub enum DataCommand {
         market: String,
         #[arg(long)]
         coefficients: String,
+    },
+    /// Compute daily June 2x3 MKT/SMB/HML from dated shares/equity and publish a new market version.
+    ThreeFactors {
+        #[arg(long)]
+        market: String,
+        /// BuildRequest JSON with historical universe, shares, annual equity and source declarations.
+        #[arg(long)]
+        inputs: PathBuf,
+    },
+    /// Acquire dated TDX shares/annual common equity into a portable three-factor input package.
+    ThreeFactorInputs {
+        #[arg(long)]
+        market: String,
+        /// BuildRequest template with a dated universe and empty shares/book_equity arrays.
+        #[arg(long)]
+        inputs: PathBuf,
+        /// observed-on is conservative; provider-dates assumes historical source dates, with unverified revisions.
+        #[arg(long, value_enum, default_value = "observed-on")]
+        availability: ThreeFactorAvailability,
+        #[arg(long)]
+        resume: Option<Uuid>,
     },
     Scan {
         path: PathBuf,
@@ -375,6 +399,11 @@ pub enum CollectionKind {
     Actions,
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ThreeFactorAvailability {
+    ObservedOn,
+    ProviderDates,
+}
+#[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum CollectionProvider {
     Tdxaidata,
     Hithink,
@@ -385,6 +414,126 @@ pub enum CollectionAdjustment {
     TdxForward,
     HithinkForward,
     None,
+}
+/// BigQuant raw data inspection; does not start the research service or publish datasets.
+#[derive(Debug, Subcommand)]
+pub enum BigquantCommand {
+    /// Replay and register a portable MKT/SMB/HML artifact on a new local market version.
+    SizeValuePublish {
+        #[arg(long)]
+        market: String,
+        #[arg(long)]
+        artifact: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Capture six daily portfolio sufficient statistics using verified frozen annual formations.
+    SizeValueReturns {
+        #[arg(long)]
+        python: PathBuf,
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Build a portable MKT/SMB/HML artifact from frozen PIT formations and portfolio returns.
+    SizeValueBuild {
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long)]
+        returns: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Capture PIT BPS, monetary anchors and June/December market values for up to five years.
+    SizeValueExtract {
+        #[arg(long)]
+        python: PathBuf,
+        #[arg(long)]
+        request: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Audit common-equity recovery from verified annual formation evidence, offline.
+    SizeValueAudit {
+        #[arg(long, required=true, num_args=1..)]
+        input: Vec<PathBuf>,
+        #[arg(long, num_args=1..)]
+        balance_supplement: Vec<PathBuf>,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Replay and publish built market factors on an immutable copy of an existing market, offline.
+    MarketPublish {
+        #[arg(long)]
+        market: String,
+        #[arg(long)]
+        artifact: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Per-member valuation diagnostics on the last source date, with full preceding context.
+    MarketIssues {
+        #[arg(long)]
+        python: PathBuf,
+        #[arg(long)]
+        request: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Capture full-provider-universe market sufficient statistics, with strict and suspension diagnostics.
+    MarketExtract {
+        #[arg(long)]
+        python: PathBuf,
+        #[arg(long)]
+        request: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Build standard local MKT/SMB/HML sidecar from verified market evidence; unsupported factors stay null.
+    MarketBuild {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long, value_enum)]
+        suspension: BigquantSuspension,
+    },
+    Configure {
+        #[arg(long, required = true)]
+        key_stdin: bool,
+    },
+    Check,
+    Schema {
+        table: String,
+    },
+    Quota {
+        #[arg(long)]
+        python: PathBuf,
+    },
+    /// Fixed annual-PIT and lossless share/membership-run historical extracts.
+    Extract {
+        #[arg(long)]
+        python: PathBuf,
+        #[arg(long)]
+        request: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    Fetch {
+        #[arg(long)]
+        python: PathBuf,
+        #[arg(long)]
+        request: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
+}
+/// Explicit market valuation selection, recorded in the factor artifact.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum BigquantSuspension {
+    Strict,
+    ConfirmedUnchangedFactor,
 }
 #[derive(Debug, Subcommand)]
 pub enum SourceCommand {
@@ -1082,6 +1231,166 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
         analytics_storage::credentials::save_source(name, token.trim()).map_err(invalid)?;
         return Ok(json!({"credential":name,"stored":true,"storage":"private_local_file"}));
     }
+    if let Command::Data(DataCommand::Bigquant(command)) = &cli.command {
+        use analytics_storage::bigquant;
+        return match command {
+            BigquantCommand::SizeValuePublish {
+                market,
+                artifact,
+                output,
+            } => {
+                let root = analytics_workflow::service::resolve_workspace(cli.workspace.clone())?;
+                let w = analytics_workflow::Workspace::open(root).map_err(invalid)?;
+                serde_json::to_value(
+                    w.publish_bigquant_size_value_factors(market, artifact, output)
+                        .map_err(invalid)?,
+                )
+                .map_err(invalid)
+            }
+            BigquantCommand::SizeValueReturns {
+                python,
+                plan,
+                output,
+            } => {
+                let (v, cache_hit) =
+                    bigquant::size_value_factors::fetch(python, plan, output).map_err(invalid)?;
+                Ok(
+                    json!({"output":output,"cache_hit":cache_hit,"complete":v["complete"],"rows":v["payload"]["rows"].as_array().map(Vec::len),"sha256":v["sha256"]}),
+                )
+            }
+            BigquantCommand::SizeValueBuild {
+                plan,
+                returns,
+                output,
+            } => bigquant::size_value_factors::build(plan, returns, output).map_err(invalid),
+            BigquantCommand::SizeValueExtract {
+                python,
+                request,
+                output,
+            } => {
+                let request: bigquant::size_value::Request =
+                    serde_json::from_slice(&fs::read(request).map_err(invalid)?)
+                        .map_err(invalid)?;
+                let (v, cache_hit) =
+                    bigquant::size_value::fetch(python, &request, output).map_err(invalid)?;
+                Ok(
+                    json!({"output":output,"cache_hit":cache_hit,"complete":v["complete"],"rows":v["payload"]["rows"].as_array().map(Vec::len),"sha256":v["sha256"]}),
+                )
+            }
+            BigquantCommand::SizeValueAudit {
+                input,
+                balance_supplement,
+                output,
+            } => {
+                let report = bigquant::size_value::audit_supplemented(input, balance_supplement)
+                    .map_err(invalid)?;
+                let mut file = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(output)
+                    .map_err(invalid)?;
+                serde_json::to_writer_pretty(&mut file, &report).map_err(invalid)?;
+                Ok(
+                    json!({"output":output,"formations":report["formations"].as_array().map(Vec::len)}),
+                )
+            }
+            BigquantCommand::MarketPublish {
+                market,
+                artifact,
+                output,
+            } => {
+                let root = analytics_workflow::service::resolve_workspace(cli.workspace.clone())?;
+                let w = analytics_workflow::Workspace::open(root).map_err(invalid)?;
+                let data = w
+                    .publish_bigquant_market_factors(market, artifact, output)
+                    .map_err(invalid)?;
+                serde_json::to_value(data).map_err(invalid)
+            }
+            BigquantCommand::MarketIssues {
+                python,
+                request,
+                output,
+            } => {
+                let request: bigquant::market::Request =
+                    serde_json::from_slice(&fs::read(request).map_err(invalid)?)
+                        .map_err(invalid)?;
+                let (value, cache_hit) =
+                    bigquant::market::issues(python, &request, output).map_err(invalid)?;
+                Ok(
+                    json!({"output":output,"cache_hit":cache_hit,"complete":value["complete"],"rows":value["payload"]["rows"].as_array().map(Vec::len),"sha256":value["sha256"]}),
+                )
+            }
+            BigquantCommand::MarketExtract {
+                python,
+                request,
+                output,
+            } => {
+                let request: bigquant::market::Request =
+                    serde_json::from_slice(&fs::read(request).map_err(invalid)?)
+                        .map_err(invalid)?;
+                let (value, cache_hit) =
+                    bigquant::market::fetch(python, &request, output).map_err(invalid)?;
+                Ok(
+                    json!({"output":output,"cache_hit":cache_hit,"complete":value["complete"],"rows":value["payload"]["rows"].as_array().map(Vec::len),"sha256":value["sha256"]}),
+                )
+            }
+            BigquantCommand::MarketBuild {
+                input,
+                output,
+                suspension,
+            } => {
+                let policy = match suspension {
+                    BigquantSuspension::Strict => bigquant::market::SuspensionPolicy::Strict,
+                    BigquantSuspension::ConfirmedUnchangedFactor => {
+                        bigquant::market::SuspensionPolicy::ConfirmedUnchangedFactor
+                    }
+                };
+                bigquant::market::build(input, output, policy).map_err(invalid)
+            }
+            BigquantCommand::Configure { .. } => {
+                use std::io::Read;
+                let mut key = String::new();
+                std::io::stdin()
+                    .take(4096)
+                    .read_to_string(&mut key)
+                    .map_err(invalid)?;
+                analytics_storage::credentials::save_source("bigquant", key.trim())
+                    .map_err(invalid)?;
+                Ok(json!({"provider":"bigquant","stored":true,"storage":"private_local_file"}))
+            }
+            BigquantCommand::Check => bigquant::check().map_err(invalid),
+            BigquantCommand::Schema { table } => bigquant::schema(table).map_err(invalid),
+            BigquantCommand::Quota { python } => bigquant::quota(python).map_err(invalid),
+            BigquantCommand::Extract {
+                python,
+                request,
+                output,
+            } => {
+                let request: bigquant::history::Request =
+                    serde_json::from_slice(&fs::read(request).map_err(invalid)?)
+                        .map_err(invalid)?;
+                let (value, cache_hit) =
+                    bigquant::history::fetch(python, &request, output).map_err(invalid)?;
+                Ok(
+                    json!({"output":output,"cache_hit":cache_hit,"complete":value["complete"],"rows":value["payload"]["rows"].as_array().map(Vec::len),"sha256":value["sha256"],"research_admitted":false}),
+                )
+            }
+            BigquantCommand::Fetch {
+                python,
+                request,
+                output,
+            } => {
+                let request: bigquant::ReadRequest =
+                    serde_json::from_slice(&fs::read(request).map_err(invalid)?)
+                        .map_err(invalid)?;
+                let (value, cache_hit) =
+                    bigquant::fetch(python, &request, output).map_err(invalid)?;
+                Ok(
+                    json!({"output":output,"cache_hit":cache_hit,"complete":value["complete"],"rows":value["payload"]["rows"].as_array().map(Vec::len),"sha256":value["sha256"],"research_admitted":false}),
+                )
+            }
+        };
+    }
     let root = analytics_workflow::service::resolve_workspace(cli.workspace)?;
     if matches!(cli.command, Command::Service(ServiceCommand::Serve)) {
         analytics_workflow::service::serve(&root)?;
@@ -1118,6 +1427,7 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
         Command::Service(ServiceCommand::Stop) => return client.call(Rpc::Stop),
         Command::Service(ServiceCommand::Restart) => return client.call(Rpc::Restart),
         Command::Data(command) => match command {
+            DataCommand::Bigquant(_) => unreachable!("handled before connecting"),
             DataCommand::Sources(SourceCommand::List) => {
                 synchronous = true;
                 workflow(WorkflowRequest::SourceStatus {})
@@ -1212,6 +1522,16 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
                 market,
                 coefficients,
             }),
+            DataCommand::ThreeFactors { market, inputs } => {
+                workflow(WorkflowRequest::BuildThreeFactors { market, inputs })
+            }
+            DataCommand::ThreeFactorInputs { market, inputs, availability, resume } => {
+                workflow(WorkflowRequest::CollectThreeFactorInputs { market, inputs,
+                    availability:match availability {
+                        ThreeFactorAvailability::ObservedOn=>analytics_storage::three_factor::acquire::Availability::ObservedOn,
+                        ThreeFactorAvailability::ProviderDates=>analytics_storage::three_factor::acquire::Availability::ProviderDates,
+                    },resume })
+            }
             DataCommand::InspectActions {
                 actions,
                 instrument,

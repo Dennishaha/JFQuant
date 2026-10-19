@@ -129,6 +129,7 @@ pub(super) fn registry() -> FactorRegistry {
                 expression: FactorExpr::Alpha158(expression),
                 version: FORMULA_VERSION.into(),
                 formula: f.formula,
+                execution_formula: None,
             };
             (id, spec)
         })

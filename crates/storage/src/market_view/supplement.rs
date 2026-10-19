@@ -385,6 +385,34 @@ mod tests {
         assert!((data.field("SH600000", "vwap").unwrap().get(1).unwrap() - 1.).abs() < 1e-6);
         assert_eq!(data.field("SH600000", "vwap").unwrap().get(0), Some(1.));
         assert_eq!(tree_hash(&base).unwrap(), view.base_sha256);
+        // A calculated factor sidecar belongs to this view, while quotation reads retain the base root.
+        let factors = crate::three_factor::ThreeFactorReturns {
+            schema_version: 1,
+            source: "synthetic view fixture".into(),
+            market: "fixture".into(),
+            return_basis: "synthetic decimal returns".into(),
+            unit: "decimal".into(),
+            observations: vec![crate::three_factor::Observation {
+                trade_date: dates[1],
+                mkt: Some(0.01),
+                smb: Some(-0.02),
+                hml: Some(0.03),
+            }],
+        };
+        fs::write(
+            output.join(crate::three_factor::FILE_NAME),
+            serde_json::to_vec(&factors).unwrap(),
+        )
+        .unwrap();
+        let data = DailyDataset::open(&output).unwrap();
+        assert_eq!(
+            data.three_factor_path(),
+            output
+                .join(crate::three_factor::FILE_NAME)
+                .canonicalize()
+                .unwrap()
+        );
+        assert_eq!(data.field("SH600000", "mkt").unwrap().get(1), Some(0.01));
         view.selections[0].dates = vec![dates[0]];
         assert_eq!(view.validate(w).unwrap().2["ready"], false);
         view.selections[0].dates = vec![dates[1]];

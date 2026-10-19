@@ -145,6 +145,7 @@ impl FactorRef {
                     input_columns: definition.compiled.inputs.clone(),
                     version: definition.definition_hash.clone(),
                     formula: definition.formula.clone(),
+                    execution_formula: None,
                 })
             }
         }

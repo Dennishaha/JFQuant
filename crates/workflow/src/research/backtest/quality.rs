@@ -104,9 +104,18 @@ pub(crate) fn qualify_scoped(
     let mut affected_cache = BTreeMap::<u16, Vec<String>>::new();
     let mut effective = pool.clone();
     let mut decisions = vec![];
-    let fields = [
+    let mut fields = vec![
         "open", "high", "low", "close", "volume", "amount", "vwap", "factor",
     ];
+    fields.extend(
+        analytics_storage::three_factor::FIELDS
+            .into_iter()
+            .filter(|name| {
+                dependencies
+                    .values()
+                    .any(|inputs| inputs.iter().any(|input| input == name))
+            }),
+    );
     let lo = dataset.calendar.partition_point(|d| *d < range.start);
     let hi = dataset.calendar.partition_point(|d| *d <= range.end);
     for (id, windows) in &pool.intervals {
@@ -223,7 +232,7 @@ pub(crate) fn qualify_scoped(
                                 "volume" => vec!["volume", "vwap"],
                                 "amount" => vec!["amount", "vwap"],
                                 "vwap" => vec!["vwap"],
-                                _ => vec![],
+                                _ => vec![*f],
                             } {
                                 inputs.insert(input);
                             }

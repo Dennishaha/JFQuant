@@ -39,7 +39,7 @@ mod parser;
 pub mod selection;
 
 /// Pinned formula and operator interpretation; required by execution requests.
-pub const FORMULA_VERSION: &str = "gtja191-paper-2017+jfquant-audit-v4";
+pub const FORMULA_VERSION: &str = "gtja191-paper-2017+jfquant-audit-v5";
 
 /// Factor expression AST produced by the formula parser and executed by the
 /// panel executor. Window lengths are in observations (per instrument).
@@ -137,6 +137,12 @@ pub enum FactorExpr {
     Filter(Box<FactorExpr>, Box<FactorExpr>),
     /// Cumulative sum per instrument.
     CumulativeSum(Box<FactorExpr>),
+    /// Alpha143 recurrence: seed 1 at the first finite positive close; multiply
+    /// by the simple return only on an up day. Missing observations keep state.
+    UpReturnProduct(Box<FactorExpr>),
+    /// Range of cumulative deviations from a trailing-window mean divided by
+    /// its sample standard deviation (the explicit Alpha165/183 interpretation).
+    RescaledRange(Box<FactorExpr>, usize),
     /// Element-wise logical and (1.0/0.0).
     And(Box<FactorExpr>, Box<FactorExpr>),
     /// Element-wise logical or (1.0/0.0).
@@ -167,7 +173,7 @@ impl FactorExpr {
             Neg(a) | Abs(a) | Log(a) | Sign(a) | Pow(a, _) | Rank(a) | ZScore(a) | Scale(a) => {
                 a.history_requirement()
             }
-            Ema(a, ..) | CumulativeSum(a) => {
+            Ema(a, ..) | CumulativeSum(a) | UpReturnProduct(a) => {
                 let (n, _) = a.history_requirement();
                 (n, true)
             }
@@ -187,6 +193,10 @@ impl FactorExpr {
             | WeightedMean(a, n)
             | HighDay(a, n)
             | LowDay(a, n) => {
+                let (lookback, r) = a.history_requirement();
+                (lookback.saturating_add(n.saturating_sub(1) as u32), r)
+            }
+            RescaledRange(a, n) => {
                 let (lookback, r) = a.history_requirement();
                 (lookback.saturating_add(n.saturating_sub(1) as u32), r)
             }
@@ -223,6 +233,7 @@ impl FactorExpr {
 
 /// One registered builtin or custom factor: expression plus pinned source metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FactorSpec {
     /// Canonical ID such as `alpha_001`.
     pub id: String,
@@ -232,7 +243,6 @@ pub struct FactorSpec {
     /// Recursive smoothers additionally depend on all history since their seed.
     pub lookback: u32,
     /// Whether execution depends on recursive state before the finite lookback.
-    #[serde(default)]
     pub requires_recursive_state: bool,
     /// Panel input columns the expression reads.
     pub input_columns: Vec<String>,
@@ -240,6 +250,9 @@ pub struct FactorSpec {
     pub version: String,
     /// Original published formula string.
     pub formula: String,
+    /// Explicit versioned interpretation, when the source needs a documented repair.
+    #[serde(deserialize_with = "formulas::required_option")]
+    pub execution_formula: Option<String>,
 }
 
 /// One factor computation run over a panel.
@@ -496,11 +509,14 @@ impl FactorRegistry {
                     formula: format!("{}: {reason}", formula),
                 }
             } else {
-                parser::parse_formula(formula).unwrap_or_else(|error| FactorExpr::Unsupported {
-                    formula: format!("{formula}: {error}"),
-                })
+                parser::parse_formula(entry.execution_formula.as_deref().unwrap_or(formula))
+                    .unwrap_or_else(|error| FactorExpr::Unsupported {
+                        formula: format!("{formula}: {error}"),
+                    })
             };
-            let input_columns = parser::input_columns(formula);
+            let input_columns = dependencies::resolve(&expression)
+                .map(|inputs| inputs.into_keys().collect())
+                .unwrap_or_else(|_| parser::input_columns(formula));
             let (lookback, requires_recursive_state) = expression.history_requirement();
             specs.insert(
                 id.clone(),
@@ -512,6 +528,7 @@ impl FactorRegistry {
                     input_columns,
                     version: FORMULA_VERSION.into(),
                     formula: formula.to_string(),
+                    execution_formula: entry.execution_formula.clone(),
                 },
             );
         }
@@ -717,7 +734,7 @@ impl FactorExecutor for InMemoryFactorExecutor {
             "factor_ids": completed_ids,
             "rows": self.panel.instrument_id.len(),
             "factor_definitions": self.registry.manifest_definitions(&request.factor_ids)?,
-            "recursive_seed_rule":"first_finite_observation",
+            "recursive_seed_rule":"operator_specific: SMA=first_finite_input; CUMSUM=0; UPRETURNPRODUCT=1_at_first_positive_close",
             "loaded_history_start": self.panel.trade_date.iter().min(),
         }))
         .map_err(|e| FactorError::InvalidRequest(e.to_string()))?;
@@ -759,6 +776,62 @@ impl std::ops::Deref for EvaluationPanel<'_> {
     fn deref(&self) -> &Panel {
         self.panel
     }
+}
+
+fn up_return_product_values(
+    input: &[Option<f64>],
+    panel: &EvaluationPanel<'_>,
+) -> Vec<Option<f64>> {
+    let mut output = vec![None; input.len()];
+    for indices in panel.groups_by_instrument().values() {
+        let mut state: Option<f64> = None;
+        let mut previous: Option<f64> = None;
+        for &index in indices {
+            let current = input[index].filter(|v| v.is_finite() && *v > 0.0);
+            if let Some(close) = current {
+                if let Some(prior_state) = state {
+                    if let Some(prior_close) = previous {
+                        let next = if close > prior_close {
+                            prior_state * (close / prior_close - 1.0)
+                        } else {
+                            prior_state
+                        };
+                        if next.is_finite() {
+                            state = Some(next);
+                            output[index] = state;
+                        }
+                    }
+                } else {
+                    state = Some(1.0);
+                    output[index] = state;
+                }
+            }
+            // Missing rows are positions: never compare across a gap.
+            previous = current;
+        }
+    }
+    output
+}
+
+fn rescaled_range_window(values: &[Option<f64>]) -> Option<f64> {
+    let x: Vec<_> = values.iter().copied().collect::<Option<Vec<_>>>()?;
+    if x.len() < 2 {
+        return None;
+    }
+    let mean = x.iter().sum::<f64>() / x.len() as f64;
+    let mut cumulative = 0.0;
+    let mut low = f64::INFINITY;
+    let mut high = f64::NEG_INFINITY;
+    let mut square = 0.0;
+    for value in &x {
+        let deviation = value - mean;
+        cumulative += deviation;
+        low = low.min(cumulative);
+        high = high.max(cumulative);
+        square += deviation * deviation;
+    }
+    let std = (square / (x.len() - 1) as f64).sqrt();
+    (std > 0.0).then_some((high - low) / std)
 }
 
 fn evaluate(expr: &FactorExpr, panel: &EvaluationPanel<'_>) -> Result<Vec<Option<f64>>> {
@@ -1071,6 +1144,15 @@ fn evaluate(expr: &FactorExpr, panel: &EvaluationPanel<'_>) -> Result<Vec<Option
             }
             Ok(output)
         }
+        FactorExpr::UpReturnProduct(value) => {
+            Ok(up_return_product_values(&evaluate(value, panel)?, panel))
+        }
+        FactorExpr::RescaledRange(value, window) => rolling_unary(
+            &evaluate(value, panel)?,
+            panel,
+            *window,
+            rescaled_range_window,
+        ),
         FactorExpr::And(a, b) => Ok(binary(
             &evaluate(a, panel)?,
             &evaluate(b, panel)?,
@@ -1495,7 +1577,25 @@ mod tests {
     fn all_executable_factors_match_independent_numpy_operator_golden() {
         let fixture: serde_json::Value =
             serde_json::from_str(include_str!("../testdata/operator_golden.json")).unwrap();
-        assert_eq!(fixture["formula_version"], FORMULA_VERSION);
+        // Preserve every accepted v4 numeric value while extending coverage in v5.
+        assert_eq!(
+            fixture["formula_version"],
+            "gtja191-paper-2017+jfquant-audit-v4"
+        );
+        let completion: serde_json::Value =
+            serde_json::from_str(include_str!("../testdata/gtja191_completion_expected.json"))
+                .unwrap();
+        assert_eq!(completion["formula_version"], FORMULA_VERSION);
+        use sha2::Digest;
+        assert_eq!(
+            completion["input_fixture_sha256"],
+            format!(
+                "{:x}",
+                analytics_core::hash::Hex(sha2::Sha256::digest(include_bytes!(
+                    "../testdata/operator_golden.json"
+                )))
+            )
+        );
         let days = fixture["days"].as_u64().unwrap() as usize;
         let stocks = fixture["stocks"].as_u64().unwrap() as usize;
         let first = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
@@ -1520,10 +1620,16 @@ mod tests {
         };
         let registry = FactorRegistry::default();
         let panel = EvaluationPanel::new(&p);
-        let expected = fixture["expected"].as_object().unwrap();
-        assert_eq!(expected.len(), 191 - audit::quarantined_ids().len());
+        let mut expected = fixture["expected"].as_object().unwrap().clone();
+        let extra = completion["expected"].as_object().unwrap();
+        assert_eq!(expected.len(), 179);
+        assert_eq!(extra.len(), 12);
+        for (id, values) in extra {
+            assert!(expected.insert(id.clone(), values.clone()).is_none());
+        }
+        assert_eq!(expected.len(), 191);
         let mut mismatches = Vec::new();
-        for (id, tail) in expected {
+        for (id, tail) in &expected {
             let actual = evaluate(&registry.get(id).unwrap().expression, &panel).unwrap();
             let tail = tail.as_array().unwrap();
             for (i, (a, b)) in actual[actual.len() - tail.len()..]
@@ -1678,6 +1784,122 @@ mod tests {
             evaluate(&FactorExpr::Const(f64::INFINITY), &EvaluationPanel::new(&p)).unwrap()[0],
             None
         );
+    }
+    #[test]
+    fn factor_definition_protocol_requires_all_current_fields() {
+        let registry = FactorRegistry::default();
+        let spec = serde_json::to_value(registry.get("alpha_001").unwrap()).unwrap();
+        assert!(spec.as_object().unwrap().contains_key("execution_formula"));
+        assert!(spec["execution_formula"].is_null());
+        serde_json::from_value::<FactorSpec>(spec.clone()).unwrap();
+        for field in ["execution_formula", "requires_recursive_state"] {
+            let mut old = spec.clone();
+            old.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<FactorSpec>(old).is_err(),
+                "missing {field}"
+            );
+        }
+        let mut unknown = spec;
+        unknown["legacy_formula"] = serde_json::json!("CLOSE");
+        assert!(serde_json::from_value::<FactorSpec>(unknown).is_err());
+    }
+    #[test]
+    fn alpha143_seed_up_return_gap_and_instrument_state_are_hand_calculated() {
+        let first = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let close = vec![
+            None,
+            Some(100.0),
+            Some(110.0),
+            Some(99.0),
+            None,
+            Some(108.9),
+            Some(119.79),
+            Some(119.79),
+            Some(10.0),
+            Some(20.0),
+            Some(30.0),
+            Some(29.0),
+            Some(28.0),
+            Some(28.0),
+            Some(28.0),
+            Some(28.0),
+        ];
+        let p = Panel {
+            instrument_id: [vec!["A".into(); 8], vec!["B".into(); 8]].concat(),
+            trade_date: (0..2)
+                .flat_map(|_| (0..8).map(|i| first + chrono::Duration::days(i)))
+                .collect(),
+            columns: HashMap::from([("close".into(), close)]),
+        };
+        let registry = FactorRegistry::default();
+        let spec = registry.get("alpha_143").unwrap();
+        assert!(spec.requires_recursive_state);
+        assert_eq!(spec.input_columns, ["close"]);
+        let out = evaluate(&spec.expression, &EvaluationPanel::new(&p)).unwrap();
+        let expected = [
+            None,
+            Some(1.0),
+            Some(0.1),
+            Some(0.1),
+            None,
+            None,
+            Some(0.01),
+            Some(0.01),
+            Some(1.0),
+            Some(1.0),
+            Some(0.5),
+            Some(0.5),
+            Some(0.5),
+            Some(0.5),
+            Some(0.5),
+            Some(0.5),
+        ];
+        for (actual, expected) in out.iter().zip(expected) {
+            match (actual, expected) {
+                (Some(a), Some(b)) => assert!((a - b).abs() < 1e-12),
+                (None, None) => {}
+                _ => panic!("recurrence/null mismatch: {actual:?} != {expected:?}"),
+            }
+        }
+        let mut future = p.clone();
+        future.columns.get_mut("close").unwrap()[7] = Some(1000.0);
+        let changed = evaluate(&spec.expression, &EvaluationPanel::new(&future)).unwrap();
+        assert_eq!(&out[..7], &changed[..7]);
+        assert_eq!(&out[8..], &changed[8..]);
+        let compiled = operators::compile_formula("GTJA_UPRETURNPRODUCT(CLOSE)").unwrap();
+        assert!(compiled.requires_recursive_state);
+        assert!(dependencies::resolve(&spec.expression).unwrap()["close"][0].recursive);
+    }
+    #[test]
+    fn rescaled_range_has_window_local_mean_and_preserves_null_and_constant_windows() {
+        let first = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let p = Panel {
+            instrument_id: vec!["A".into(); 9],
+            trade_date: (0..9).map(|i| first + chrono::Duration::days(i)).collect(),
+            columns: HashMap::from([(
+                "close".into(),
+                vec![
+                    Some(1.0),
+                    Some(2.0),
+                    Some(3.0),
+                    Some(4.0),
+                    Some(4.0),
+                    Some(4.0),
+                    Some(4.0),
+                    None,
+                    Some(1.0),
+                ],
+            )]),
+        };
+        let expr = parser::parse_formula("RESCALEDRANGE(CLOSE,4)").unwrap();
+        let out = evaluate(&expr, &EvaluationPanel::new(&p)).unwrap();
+        assert_eq!(&out[..3], &[None, None, None]);
+        // Deviations [-1.5,-0.5,0.5,1.5], cumulative [-1.5,-2,-1.5,0].
+        assert!((out[3].unwrap() - 2.0 / (5.0_f64 / 3.0).sqrt()).abs() < 1e-12);
+        assert_eq!(&out[6..], &[None, None, None]);
+        assert_eq!(expr.history_requirement(), (4, false));
+        assert_eq!(dependencies::resolve(&expr).unwrap()["close"][0].last, 3);
     }
     #[test]
     fn nested_lookback_is_composed_and_recursive_history_is_disclosed() {

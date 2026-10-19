@@ -36,7 +36,7 @@ use std::{
     path::{Path, PathBuf},
     sync::mpsc,
 };
-pub(crate) const SUPPORTED_RESEARCH_INPUTS: [&str; 15] = [
+pub(crate) const SUPPORTED_RESEARCH_INPUTS: [&str; 18] = [
     "open",
     "high",
     "low",
@@ -52,6 +52,9 @@ pub(crate) const SUPPORTED_RESEARCH_INPUTS: [&str; 15] = [
     "dbm",
     "banchmarkindexclose",
     "banchmarkindexopen",
+    "mkt",
+    "smb",
+    "hml",
 ];
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;

@@ -177,6 +177,23 @@ fn execute_scoped(
         WorkflowRequest::ReviseMarket { market, request } => {
             crate::market_revisions::publish(w, market, request, run, context)
         }
+        WorkflowRequest::BuildThreeFactors { market, inputs } => {
+            crate::three_factor_build::publish(w, market, inputs, run, context)
+        }
+        WorkflowRequest::CollectThreeFactorInputs {
+            market,
+            inputs,
+            availability,
+            resume,
+        } => crate::three_factor_build::collect_inputs(
+            w,
+            market,
+            inputs,
+            *availability,
+            *resume,
+            run,
+            context,
+        ),
         WorkflowRequest::Evidence { request } => {
             crate::action_evidence::execute(w, request, run, context)
         }

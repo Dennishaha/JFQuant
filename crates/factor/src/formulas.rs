@@ -13,10 +13,20 @@ pub(crate) struct Definition {
     pub formula: String,
     pub syntax: String,
     pub expression: Option<super::alpha158::Expr>,
+    /// Explicit reviewed execution text; `formula` always preserves the source.
+    #[serde(deserialize_with = "required_option")]
+    pub execution_formula: Option<String>,
+}
+pub(crate) fn required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::deserialize(deserializer)
 }
 pub(crate) fn catalogue(source: &str, version: &str) -> Catalogue {
     let c: Catalogue = serde_json::from_str(source).expect("compiled builtin catalogue");
-    assert_eq!(c.schema_version, 1);
+    assert_eq!(c.schema_version, 2);
     assert_eq!(c.formula_version, version);
     c
 }

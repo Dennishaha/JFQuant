@@ -33,6 +33,22 @@ flowchart TD
 [研究worker](crates/workflow/research/README.md)。研究执行保持 Rust 因子、Python 撮合和 Rust 成交账本校验；配股使用固定原生扩展。
 架构重构不改变量化计算口径，不增加实盘。
 
+## 当前主程序版本边界
+
+App、CLI 与工作区服务统一使用协议43；采集协议16、研究worker4、研究模板12。
+正常入口拒绝旧协议和旧输入格式，历史数据升级通过显式本地迁移执行。
+版本权威定义与组件入口见[工作流组件](crates/workflow/src/README.md)。
+
+GTJA191 使用公式版本 `gtja191-paper-2017+jfquant-audit-v5`，191项均有执行实现，
+默认选择190项；Alpha030须显式选择，并由所选行情提供真实 MKT／SMB／HML。
+原始公式、显式解释、特征顺序和独立参考测试见[因子组件](crates/factor/README.md)。
+
+三因子可通过 App／CLI 共用任务采集及计算，也可由 BigQuant 固定投影构造后登记为新行情。
+因子文件使用小数收益率，MKT 未减RF；缺失输入保持null，研究前检查实际日期覆盖。
+BigQuant 的日频股本保留历史修订风险；PIT财务与XPS试用权限不代表长期免费。
+[输入、构造及发布说明](crates/storage/src/bigquant/README.md#pit-年度分组与-smbhml)。
+本机数据与审计属于工作区产物，源码提交不携带数据、凭据或SDK环境。
+
 ## 使用与构建
 
 ```bash
@@ -85,7 +101,4 @@ crates/app/packaging/package-macos.sh
 
 股票评分后支持等权、最小方差、风险预算及滚动样本外校准的均值方差；多策略引用冻结目标，通过一个AKQuant账户净额成交。98%为目标仓位，实际漂移、拒单和锁定资产单独披露。参考账允许分数股且无费用，不能代替扣费收益。
 
-当前协议39、worker3、结果21、回测计划3、模板11；正常运行拒绝旧格式。本地显式迁移与验收见[工作流组件](crates/workflow/README.md#组合优化与离线迁移)。
-
-
-股票优化现支持显式的逐日完整历史资格检查，在排序前筛选并记录排除原因；校准仅排除已确认停牌标签，未知缺价仍阻断。App 提供方法与常用约束控件。当前服务40、研究worker4、结果22、模板12；旧配置需显式离线迁移，细节及复现命令见 [workflow](crates/workflow/README.md#allocation-admission-revision)。
+股票优化支持显式的逐日完整历史资格检查，在排序前筛选并记录排除原因；校准仅排除已确认停牌标签，未知缺价仍阻断。App 提供方法与常用约束控件。研究结果22、回测计划4、模板12；旧配置需显式离线迁移，细节及复现命令见 [workflow](crates/workflow/README.md#allocation-admission-revision)。

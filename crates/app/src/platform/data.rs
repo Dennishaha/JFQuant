@@ -65,6 +65,32 @@ pub fn data_panel(
             });
         }
     });
+    ui.collapsing("自算市场三因子", |ui| {
+        ui.label("按六月分组计算每日 MKT / SMB / HML，保存为新行情版本。历史数据文件需包含股票范围、股本和财报的披露日期；缺失项会显示在任务报告中。");
+        select_data(ui, "three_factor_market", "market", &mut state.platform.market, &state.platform.datasets);
+        ui.horizontal(|ui| {
+            ui.label("历史数据或采集配置文件");
+            ui.text_edit_singleline(&mut state.platform.three_factor_inputs);
+            if ui.add_enabled(enabled, egui::Button::new("选择三因子数据文件")).clicked()
+                && let Some(path) = rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file() {
+                state.platform.three_factor_inputs = path.display().to_string();
+            }
+        });
+        ui.checkbox(&mut state.platform.three_factor_provider_dates,"采用供应商历史日期（无法核实原始修订版本）");
+        ui.label("采集配置需声明历史股票范围，股本与年度权益留空。默认按采集日确定可用时间；勾选历史日期可用于供应商历史口径研究。采集完成后，用任务报告中的数据文件计算。");
+        if ui.add_enabled(enabled && !state.platform.market.is_empty() && !state.platform.three_factor_inputs.trim().is_empty(),
+            egui::Button::new("采集三因子历史数据")).clicked() {
+            request=Some(WorkflowRequest::CollectThreeFactorInputs {market:state.platform.market.clone(),
+                inputs:state.platform.three_factor_inputs.trim().into(),
+                availability:if state.platform.three_factor_provider_dates {analytics_storage::three_factor::acquire::Availability::ProviderDates}
+                    else {analytics_storage::three_factor::acquire::Availability::ObservedOn},resume:None});
+        }
+        if ui.add_enabled(enabled && !state.platform.market.is_empty() && !state.platform.three_factor_inputs.trim().is_empty(),
+            egui::Button::new("计算三因子并保存新版本")).clicked() {
+            request = Some(WorkflowRequest::BuildThreeFactors { market: state.platform.market.clone(),
+                inputs: state.platform.three_factor_inputs.trim().into() });
+        }
+    });
     ui.collapsing("HiThink / 通达信采集", |ui| {
         ui.horizontal(|ui| {
             ui.label("独立系数版本");

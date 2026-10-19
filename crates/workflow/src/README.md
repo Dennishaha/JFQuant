@@ -1,5 +1,20 @@
 # Workflow implementation
 
+`three_factor_build` also freezes empty-facts templates, market and collector identities for
+CollectThreeFactorInputs. It acquires capital/equity on the worker, publishes a portable native
+evidence package, and replays normalization before BuildThreeFactors publishes a new market.
+Service protocol43. [Input format and acceptance](../../storage/src/three_factor/acquire/README.md).
+
+`Workspace::publish_bigquant_market_factors` synchronously leases the workspace, replays the
+immutable BigQuant artifact, preserves the base source identity, copies a new market and registers
+its standard factor sidecar. MKT is a market return without RF subtraction; SMB/HML remain null.
+See [BigQuant construction](../../storage/src/bigquant/README.md#全市场-mkt-构造与发布).
+
+`Workspace::publish_bigquant_size_value_factors` uses the same leased publication path to replay
+PIT June formations and six portfolio statistics, write SMB/HML, and register the new market.
+It preserves actual coverage and share revision risk in `bigquant_size_value_factor`.
+See [size/value contracts and acceptance](../../storage/src/bigquant/README.md#pit-年度分组与-smbhml).
+
 The crate root only exposes component APIs. Business changes belong in their
 owning component; adding a task must not add business logic to `lib.rs`.
 
@@ -8,6 +23,7 @@ owning component; adding a task must not add business logic to `lib.rs`.
 | `contracts` | Workspace requests, templates, data-version and run records |
 | `workspace` / `persistence` | Paths, exclusive lease, atomic records and terminal transitions |
 | `snapshot` | Freeze request identities before acceptance |
+| `three_factor_build` | Freeze historical facts, construct daily factors, publish a separate market version |
 | `usecases` | Acquisition, action review, configuration, research dispatch and data admission |
 | `backend` | Worker dispatch, task lifecycle and worker-local query sessions |
 | `service` | Unix transport, submission exclusivity, control requests and client bridge |
@@ -82,7 +98,7 @@ Regression compares the optimized sets against the original observation-by-obser
 
 ## Allocation modules
 
-`allocation` defines strict shared config, independent weight/time verification and signed artifact manifests. `allocation_reference` maintains a separate fractional event-aware account. `allocation_migration` is the sole legacy reader for this upgrade, with offline preview/apply/resume/rollback. `allocation_comparison` checks frozen same-input completed methods. Multi-strategy orchestration lives beside research execution in `research/backtest/combined.rs`; App/CLI dispatch the same WorkflowRequest variants. Current protocol: service39 / worker3 / result21 / template11 / independent-backtest-plan3.
+`allocation` defines strict shared config, independent weight/time verification and signed artifact manifests. `allocation_reference` maintains a separate fractional event-aware account. `allocation_migration` is the sole legacy reader for this upgrade, with offline preview/apply/resume/rollback. `allocation_comparison` checks frozen same-input completed methods. Multi-strategy orchestration lives beside research execution in `research/backtest/combined.rs`; App/CLI dispatch the same WorkflowRequest variants. Current protocol: service43 / worker4 / result22 / template12 / independent-backtest-plan4.
 
 `research/backtest/allocation_readiness.rs`在训练前检查冻结日历上的预测、参考账、正式账户边界，输出最早就绪日期下界；`allocation.rs`独立验证下一开盘生效、求解/目标一致性和账户换手。迁移模块覆盖中断归档和中断回滚恢复，未知注册格式阻断服务启动。
 

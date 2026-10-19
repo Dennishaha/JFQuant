@@ -1,8 +1,28 @@
+## BigQuant
+
+`DataCommand::Bigquant(BigquantCommand)`在连接工作区服务前处理：配置、HTTP认证/schema、Flight额度、有界候选采集及固定历史extract投影（50000行上限），下载前校验白名单/额度，同参数复用带哈希的本地文件。[完整约定及离线整理](../../storage/src/bigquant/README.md)。
+
+同一入口提供 `market-extract/market-issues/market-build/market-publish`：固定全市场充分统计量、
+最后源日全部成员诊断、离线重放构造及持租约的新行情登记。MKT未减RF；SMB/HML为空。
+格式3和停牌方法见[组件说明](../../storage/src/bigquant/README.md#全市场-mkt-构造与发布)。
+
+`SizeValueExtract/Audit/Returns/Build/Publish` 同步执行 PIT 年度分组、六组收益采集与可移植
+三因子包构造及登记。计划冻结可得年报政策和股本修订风险；不增加服务协议或兼容入口。
+[接口与验收](../../storage/src/bigquant/README.md#pit-年度分组与-smbhml)。
+
 ## 当前采集契约（2026-10-15）
+
+`DataCommand::ThreeFactorInputs`映射共享CollectThreeFactorInputs任务，明确时间口径
+并支持--resume。CLI不解析财报或计算权益；输出输入包继续交给ThreeFactors。
+见[采集契约](../../storage/src/three_factor/acquire/README.md)。
+
+`data three-factors --market VERSION --inputs FILE` 仅解析行情身份和历史事实文件路径，
+提交 `WorkflowRequest::BuildThreeFactors`；构造、输入冻结、缺失判断和发布均由共享worker
+完成。格式和运行命令见[组件说明](../README.md#自算日频三因子)。
 
 HiThink 为默认主源，由 Rust 直接调用 REST；通达信备用，维持内置 Python `tdxaidata==1.2.2`；巨潮公告使用独立 `cninfo` 来源。旧来源依赖、配置、权限检查及历史兼容入口已移除；旧数据不迁移、不删除，重新配置来源并采集。
 
-公共来源为 `hithink|tdxaidata|cninfo`，复权选项为 `hithink-forward|tdx-forward|none`。服务版本见 workflow::service::PROTOCOL_VERSION、采集协议15、来源策略2；HiThink 行情格式6，通达信格式5与 Qlib 读取保留。HiThink 训练选择供应商口径（`price_basis=provider`），前复权 OHLC、原始股数及人民币成交额、VWAP null；回测使用原价。训练缓存与 manifest 冻结口径、来源和证据哈希，特征顺序及公式版本保持。
+公共来源为 `hithink|tdxaidata|cninfo`，复权选项为 `hithink-forward|tdx-forward|none`。服务版本见 workflow::service::PROTOCOL_VERSION、采集协议16、来源策略2；HiThink 行情格式6，通达信格式5与 Qlib 读取保留。HiThink 训练选择供应商口径（`price_basis=provider`），前复权 OHLC、原始股数及人民币成交额、VWAP null；回测使用原价。训练缓存与 manifest 冻结口径、来源和证据哈希，特征顺序及公式版本保持。
 
 接口、凭据、覆盖范围与复现命令见[采集组件](../../storage/collectors/README.md)。当前成分不能回填历史，下载成功不代表研究或账户资料完整。
 
@@ -61,11 +81,11 @@ cargo clippy -p analytics-cli --all-targets -- -D warnings
 
 ## 动态股票池与 Python 采集接口
 
-当前模板schema 10、研究结果版本见 RESEARCH_SCHEMA_VERSION、服务版本见 workflow::service::PROTOCOL_VERSION；公式仍为v4。解析后配置包含 `pool_version`、`benchmark` 和 `pool_exit_policy`（磁盘保存于TargetProfile）；默认 `builtin:csi500` / `SH000905`，沪深300模板使用 `builtin:csi300` / `SH000300`。自选和集合组合引用不可变pool版本，冻结成员区间、人工日期调整及输入哈希；模型manifest和缓存签名包含这些研究输入。原schema结果明确拒绝，历史状态和日志仍可查看，不转换旧文件。
+当前模板schema 12、研究结果版本见 RESEARCH_SCHEMA_VERSION、服务协议43；GTJA191公式为v5。解析后配置包含 `pool_version`、`benchmark` 和 `pool_exit_policy`（磁盘保存于TargetProfile）；默认 `builtin:csi500` / `SH000905`，沪深300模板使用 `builtin:csi300` / `SH000300`。自选和集合组合引用不可变pool版本，冻结成员区间、人工日期调整及输入哈希；模型manifest和缓存签名包含这些研究输入。原schema结果明确拒绝，历史状态和日志仍可查看，不转换旧文件。
 
 ```mermaid
 flowchart LR
-  CLIENT["App / jfquant"] --> SERVICE["协议33公共服务"]
+  CLIENT["App / jfquant"] --> SERVICE["协议43公共服务"]
   SERVICE --> POOL["保存/预览不可变股票池"]
   SERVICE --> COLLECT["Rust HiThink REST / 监督内置Python备用采集"]
   COLLECT --> SNAPSHOT["验证后的Parquet版本与公司行动候选"]
@@ -116,7 +136,7 @@ flowchart LR
 
 为什么调整：普通市场代码无需先登记身份；独立目录、审核和权威名录下载增加了研究前置负担。特殊历史代码仍需在快照内明确区间，不能将旧证券行情或权益接到另一证券。训练使用价量和标签，到账／交付资料只在实际账户执行时检查。
 
-当前格式：模板10、需求3、准入5、股票池3、公司行动5、规范行情5/HiThink6、系数3、采集7、服务14、研究结果14；快照内来源映射1、训练产物3。工作区和任务记录1、GTJA191公式v4及默认178项顺序保持。旧格式明确拒绝，不自动转换。
+当前服务43、研究worker4、模板12、结果22、采集16、因子目录2、GTJA191公式v5（默认190项）。具体数据格式以所属组件的序列化类型与验证器为准；正常入口拒绝旧协议及旧格式，升级仅通过显式本地迁移执行。特征顺序、公式版本和来源哈希仍随产物冻结。
 
 ```bash
 jfquant --workspace "$JFQUANT_WORKSPACE" research train --template recipe.json --market MARKET_ID --actions HISTORY_ACTIONS_ID

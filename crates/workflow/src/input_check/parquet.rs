@@ -107,6 +107,47 @@ pub(crate) fn missing_inputs(
     }
     Ok(absent)
 }
+/// Attach externally obtained, source-declared Alpha030 inputs by effective date.
+pub(crate) fn attach_three_factor_inputs(
+    market: &std::path::Path,
+    registry: &FactorRegistry,
+    ids: &[String],
+    columns: &mut BTreeSet<String>,
+    panel: &mut Panel,
+) -> Result<()> {
+    use analytics_storage::three_factor::{FIELDS, ThreeFactorReturns, path};
+    if !ids.iter().filter_map(|id| registry.get(id)).any(|spec| {
+        spec.input_columns
+            .iter()
+            .any(|col| FIELDS.contains(&col.as_str()))
+    }) {
+        return Ok(());
+    }
+    let data = match ThreeFactorReturns::read(&path(market)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        result => result?,
+    };
+    let calendar: Vec<_> = panel
+        .trade_date
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let dates: HashMap<_, _> = calendar.iter().enumerate().map(|(i, d)| (*d, i)).collect();
+    for (name, field) in data.fields(&calendar)? {
+        columns.insert(name.clone());
+        panel.columns.insert(
+            name,
+            panel
+                .trade_date
+                .iter()
+                .map(|d| field.get(dates[d]))
+                .collect(),
+        );
+    }
+    Ok(())
+}
 /// Factor-page adapter: retain the original whole-file seed history and label rule.
 pub(crate) fn prepare(
     input: &EvaluationInput,
@@ -122,7 +163,7 @@ pub(crate) fn prepare(
     let input_hash = snapshot_hash(&input.market_path, &input.universe_path)?;
     let _ = progress.send(PipelineEvent::LoadingMarket);
     let mut engine = DuckDbEngine::open_in_memory()?;
-    let columns = market_columns(&mut engine, &input.market_path)?;
+    let mut columns = market_columns(&mut engine, &input.market_path)?;
     let expected = engine
         .factor_expected_members(
             &input.market_path,
@@ -157,6 +198,13 @@ pub(crate) fn prepare(
     );
     let registry =
         FactorRegistry::resolve(input.factor_set, &input.factor_refs, &input.factor_ids)?;
+    attach_three_factor_inputs(
+        &input.market_path,
+        &registry,
+        &input.factor_ids,
+        &mut columns,
+        &mut panel,
+    )?;
     let absent = missing_inputs(&registry, &input.factor_ids, &columns, &mut panel)?;
     let calendar: Vec<_> = rows
         .iter()

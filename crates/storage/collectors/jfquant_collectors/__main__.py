@@ -1,4 +1,4 @@
-"""One supervised task per process. stdout is exclusively JSON Lines protocol v14."""
+"""One supervised task per process. stdout is exclusively JSON Lines protocol v16."""
 
 import contextlib
 import hashlib
@@ -16,6 +16,7 @@ from .evidence import EvidenceCapture
 from .reconcile import replay
 from .tdx import collect as tdx_collect
 from .tdx import reference
+from .tdx import fundamentals
 
 
 def main():
@@ -70,6 +71,7 @@ def main():
             "calendar",
             "members",
             "reconcile_actions",
+            "fundamentals",
         ):
             raise ValueError("unsupported collector request")
         signature = "sha256:" + code_hash.hexdigest()
@@ -100,7 +102,8 @@ def main():
             if operation == "announcements" and request["provider"] == "cninfo":
                 execute = announcements
             elif request["provider"] == "tdxaidata":
-                execute = reference if operation in ("calendar", "members") else tdx_collect
+                execute = (fundamentals if operation == "fundamentals" else
+                           reference if operation in ("calendar", "members") else tdx_collect)
             else:
                 raise ValueError("unsupported_collector_provider")
             completed = []

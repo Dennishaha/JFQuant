@@ -117,6 +117,8 @@ impl OperatorRegistry {
                 ("SUMIF", "SumIf", vec![Series, Series, Window]),
                 ("FILTER", "Filter", vec![Series, Series]),
                 ("CUMSUM", "CumulativeSum", vec![Series]),
+                ("UPRETURNPRODUCT", "UpReturnProduct", vec![Series]),
+                ("RESCALEDRANGE", "RescaledRange", vec![Series, Window]),
                 ("AND", "And", vec![Series, Series]),
                 ("OR", "Or", vec![Series, Series]),
                 ("SEQUENCE", "Sequence", vec![Window]),
@@ -187,7 +189,10 @@ fn spec(id: String, parameters: Vec<ParameterKind>, kernel: Kernel) -> OperatorS
     let qlib = id.starts_with("QLIB_");
     let rolling = parameters.contains(&ParameterKind::Window);
     let cross = matches!(id.as_str(), "GTJA_RANK" | "GTJA_ZSCORE" | "GTJA_SCALE");
-    let recursive = matches!(id.as_str(), "GTJA_SMA" | "GTJA_CUMSUM");
+    let recursive = matches!(
+        id.as_str(),
+        "GTJA_SMA" | "GTJA_CUMSUM" | "GTJA_UPRETURNPRODUCT"
+    );
     let example = format!(
         "{}({})",
         id,
@@ -214,6 +219,12 @@ fn spec(id: String, parameters: Vec<ParameterKind>, kernel: Kernel) -> OperatorS
         "QLIB_RANK" => "滚动窗口当前值百分位排名；并列取平均名次。",
         "GTJA_SMA" => "递归SMA(X,N,M)，系数M/N，以首个有限值为种子；缺失时保留状态。",
         "GTJA_WMA" => "完整窗口，按0.9^lag归一化加权。",
+        "GTJA_UPRETURNPRODUCT" => {
+            "Alpha143：首个正收盘价种子1，仅上涨日乘简单收益；缺失输出null并保留状态，不跨缺失行比较。"
+        }
+        "GTJA_RESCALEDRANGE" => {
+            "窗口内以该窗口均值中心化，累加偏差的极差除以样本标准差；常量及缺失窗口输出null。"
+        }
         "GTJA_HIGHDAY" | "GTJA_LOWDAY" => "距窗口最新极值的观测距离，当前极值为0。",
         "QLIB_IDXMAX" | "QLIB_IDXMIN" => "窗口内首个极值的位置，从1开始；保留Qlib缺失位置语义。",
         "QLIB_CORR" => "有效配对相关系数；各输入标准差<=2e-5时为空。",

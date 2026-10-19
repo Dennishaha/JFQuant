@@ -215,7 +215,6 @@ impl ResearchTemplate {
         }
         for id in &self.config.factor_ids {
             if !seen.insert(id)
-                || id == "alpha_030"
                 || analytics_factor::audit::quarantined_ids().contains(id)
                 || registry.get(id).is_none()
             {
@@ -370,6 +369,24 @@ pub enum WorkflowRequest {
         market: String,
         /// Independent registered coefficient version.
         coefficients: String,
+    },
+    /// Construct daily MKT/SMB/HML and publish a new immutable market snapshot.
+    BuildThreeFactors {
+        /// Registered price snapshot used for returns and raw capitalization prices.
+        market: String,
+        /// Historical BuildRequest JSON; bytes are frozen at submission and retained in output.
+        inputs: PathBuf,
+    },
+    /// Acquire native historical capital/equity and produce a portable three-factor input file.
+    CollectThreeFactorInputs {
+        /// Registered price version; its calendar and identity are frozen.
+        market: String,
+        /// BuildRequest template with an explicit historical universe and empty shares/equity.
+        inputs: PathBuf,
+        /// Required temporal policy; provider_dates is an explicit historical assumption.
+        availability: analytics_storage::three_factor::acquire::Availability,
+        /// Owned checkpoint for an identical template, source, market and implementation.
+        resume: Option<Uuid>,
     },
 
     /// Workspace index configuration and explicit scoped acquisition.
@@ -574,6 +591,8 @@ impl WorkflowRequest {
             Self::CollectCoefficients { .. } => "独立复权系数采集".into(),
             Self::ReviseMarket { .. } => "行情缺口证据修订".into(),
             Self::ComposeMarket { .. } => "组合研究行情版本".into(),
+            Self::BuildThreeFactors { .. } => "计算日频三因子并发布行情版本".into(),
+            Self::CollectThreeFactorInputs { .. } => "采集三因子历史股本与年度权益".into(),
             Self::CollectQuotes { .. } => "独立行情采集".into(),
             Self::CollectMarket { .. } => "行情采集".into(),
             Self::RegisterData { .. } => "核验登记数据版本".into(),

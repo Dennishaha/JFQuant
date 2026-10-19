@@ -419,6 +419,8 @@ impl Parser {
             "ABS" => unary(FactorExpr::Abs),
             "LOG" => unary(FactorExpr::Log),
             "SIGN" => unary(FactorExpr::Sign),
+            "UPRETURNPRODUCT" => unary(FactorExpr::UpReturnProduct),
+            "RESCALEDRANGE" => rolling(FactorExpr::RescaledRange),
             "RANK" => unary(FactorExpr::Rank),
             "DELAY" => {
                 if args.len() == 1 {

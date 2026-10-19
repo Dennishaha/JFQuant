@@ -64,7 +64,9 @@ pub fn snapshot(workspace: &Workspace, request: &WorkflowRequest) -> Result<Valu
             }
             v
         }
-        WorkflowRequest::ReviseMarket { market, .. } => {
+        WorkflowRequest::ReviseMarket { market, .. }
+        | WorkflowRequest::CollectThreeFactorInputs { market, .. }
+        | WorkflowRequest::BuildThreeFactors { market, .. } => {
             vec![version_metadata(workspace, market, "market")?]
         }
         WorkflowRequest::ComposeMarket {
@@ -118,6 +120,13 @@ pub fn snapshot(workspace: &Workspace, request: &WorkflowRequest) -> Result<Valu
         _ => analytics_factor::FORMULA_VERSION,
     };
     let mut frozen = json!({"request":request,"inputs":versions,"app_version":env!("CARGO_PKG_VERSION"),"formula_version":formula_version,"pool_definition": match request { WorkflowRequest::Research{template,..}|WorkflowRequest::TrainResearch{template,..} if !template.pool_version.starts_with("builtin:") && !template.pool_version.starts_with("index:") => Some(workspace.pool(&template.pool_version)?), _ => None }});
+    if let WorkflowRequest::BuildThreeFactors { inputs, .. } = request {
+        frozen["three_factor_build"] = crate::three_factor_build::freeze(workspace, inputs)?;
+    }
+    if let WorkflowRequest::CollectThreeFactorInputs { inputs, .. } = request {
+        frozen["three_factor_acquisition"] =
+            crate::three_factor_build::freeze_acquisition(workspace, inputs)?;
+    }
     if let WorkflowRequest::Index {
         request: crate::indices::IndexOperation::History { request: operation },
     } = request

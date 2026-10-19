@@ -1555,6 +1555,20 @@ pub(super) fn input_signature(
     end: Date,
 ) -> Result<String> {
     let mut hasher = Sha256::new();
+    if members.keys().any(|id| {
+        dataset.checked_fields(id).is_some_and(|fields| {
+            fields
+                .iter()
+                .any(|f| analytics_storage::three_factor::FIELDS.contains(&f.as_str()))
+        })
+    }) {
+        let path = dataset
+            .root
+            .join(analytics_storage::three_factor::FILE_NAME);
+        if path.exists() {
+            hasher.update(fs::read(path)?);
+        }
+    }
     let symbols = members
         .keys()
         .cloned()

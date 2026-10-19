@@ -414,6 +414,9 @@ pub(super) fn prepare_year(
         "dbm",
         "banchmarkindexclose",
         "banchmarkindexopen",
+        "mkt",
+        "smb",
+        "hml",
         "__universe_member",
     ];
     for name in names {
@@ -435,7 +438,8 @@ pub(super) fn prepare_year(
         }
         let mut raw = BTreeMap::new();
         for name in [
-            "open", "high", "low", "close", "volume", "vwap", "amount", "factor",
+            "open", "high", "low", "close", "volume", "vwap", "amount", "factor", "mkt", "smb",
+            "hml",
         ] {
             raw.insert(
                 name,
@@ -490,6 +494,9 @@ pub(super) fn prepare_year(
                 dbm,
                 benchmark_close.get(day).map(|v| v / b_anchor),
                 benchmark_open.get(day).map(|v| v / b_anchor),
+                field(&raw, "mkt", day),
+                field(&raw, "smb", day),
+                field(&raw, "hml", day),
                 if dataset.calendar[day] < pool_start {
                     None
                 } else {
@@ -537,6 +544,15 @@ pub(super) fn prepare_year(
         &anchors,
         dataset.source_map(),
     ))?);
+    if inputs
+        .iter()
+        .any(|s| analytics_storage::three_factor::FIELDS.contains(s))
+    {
+        let path = dataset.three_factor_path();
+        if path.exists() {
+            fingerprint.update(fs::read(path)?);
+        }
+    }
     for (instrument, date) in panel.instrument_id.iter().zip(&panel.trade_date) {
         fingerprint.update((instrument.len() as u64).to_le_bytes());
         fingerprint.update(instrument.as_bytes());
@@ -663,7 +679,7 @@ pub(super) fn prepare_year(
     write_features(&staging.join("features.parquet"), ids, &features)?;
     save(
         staging.join("manifest.json"),
-        &serde_json::json!({"schema_version":1,"loaded_history_start":dataset.calendar[warmup],"recursive_seed_rule":"first_finite_observation","signature":shard_signature,"features":ids,"rows":meta.rows.len(),"finite_counts":meta.finite_counts,"sha256":file_hash(&staging.join("features.parquet"))?}),
+        &serde_json::json!({"schema_version":1,"loaded_history_start":dataset.calendar[warmup],"recursive_seed_rule":"operator_specific: SMA=first_finite_input; CUMSUM=0; UPRETURNPRODUCT=1_at_first_positive_close","signature":shard_signature,"features":ids,"rows":meta.rows.len(),"finite_counts":meta.finite_counts,"sha256":file_hash(&staging.join("features.parquet"))?}),
     )?;
     analytics_core::task::TaskContext::current().check()?;
     if shared.exists() {
@@ -1025,6 +1041,118 @@ mod shard_tests {
 #[cfg(test)]
 mod dependency_tests {
     use super::*;
+    #[test]
+    fn alpha030_native_year_reads_unscaled_three_factors_and_pins_source_bytes() {
+        use analytics_storage::three_factor::{FILE_NAME, Observation, ThreeFactorReturns};
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("synthetic-market");
+        fs::create_dir_all(root.join("calendars")).unwrap();
+        fs::create_dir_all(root.join("features/sh600000")).unwrap();
+        let start: Date = "2008-01-02".parse().unwrap();
+        let calendar: Vec<_> = (0..140)
+            .map(|i| start + chrono::Duration::days(i))
+            .collect();
+        fs::write(
+            root.join("calendars/day.txt"),
+            calendar
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        for field in ["open", "close", "factor"] {
+            let bytes: Vec<_> = std::iter::once(0.0_f32)
+                .chain((0..140).map(|i| {
+                    if field == "factor" {
+                        0.1
+                    } else {
+                        (20.0 + i as f64 * 0.02 + (i as f64 * 0.23).sin()) as f32
+                    }
+                }))
+                .flat_map(f32::to_le_bytes)
+                .collect();
+            fs::write(
+                root.join(format!("features/sh600000/{field}.day.bin")),
+                bytes,
+            )
+            .unwrap();
+        }
+        let dataset = DailyDataset::open(&root).unwrap();
+        let members =
+            BTreeMap::from([("SH600000".into(), vec![Membership { start: 0, end: 139 }])]);
+        let mut source = ThreeFactorReturns {
+            schema_version: 1,
+            source: "synthetic native fixture v1".into(),
+            market: "fixture".into(),
+            return_basis: "synthetic decimal factors".into(),
+            unit: "decimal".into(),
+            observations: dataset
+                .calendar
+                .iter()
+                .enumerate()
+                .map(|(d, date)| Observation {
+                    trade_date: *date,
+                    mkt: Some(0.01 * (d as f64 * 0.7).sin()),
+                    smb: Some(0.008 * (d as f64 * 0.37).cos()),
+                    hml: Some(0.006 * (d as f64 * 0.17 + 0.5).sin()),
+                })
+                .collect(),
+        };
+        let ids = vec!["alpha_030".into()];
+        let run = |name: &str| {
+            let dataset = DailyDataset::open(&root).unwrap();
+            let cache = temp.path().join("runs").join(name).join(".factor-staging");
+            fs::create_dir_all(&cache).unwrap();
+            prepare_year(
+                YearInputs {
+                    dataset: &dataset,
+                    members: &members,
+                    benchmark: "SH000905",
+                    universe_id: "csi500",
+                    pool_start: start,
+                    allow_missing: false,
+                    price_basis: analytics_core::research_quality::PriceBasis::Provider,
+                },
+                &FactorRegistry::default(),
+                &ids,
+                2008,
+                &cache,
+                "synthetic-native",
+            )
+            .unwrap();
+            let receipt: serde_json::Value =
+                serde_json::from_slice(&fs::read(cache.join("2008.receipt.json")).unwrap())
+                    .unwrap();
+            (load_year(&cache, 2008, &ids).unwrap(), receipt)
+        };
+        fs::write(root.join(FILE_NAME), serde_json::to_vec(&source).unwrap()).unwrap();
+        let symbol = members.keys().next().unwrap();
+        assert_eq!(
+            dataset.field(symbol, "mkt").unwrap().get(10),
+            source.observations[10].mkt
+        );
+        let (year, first) = run("first");
+        assert!(year.features.iter().any(|v| v.is_finite()));
+        assert_eq!(first["cache_hit"], false);
+        let (_, second) = run("second");
+        assert_eq!(second["cache_hit"], true);
+        source.source = "synthetic native fixture v2".into();
+        fs::write(root.join(FILE_NAME), serde_json::to_vec(&source).unwrap()).unwrap();
+        let (_, changed) = run("changed");
+        assert_eq!(changed["cache_hit"], false);
+        assert_ne!(first["signature"], changed["signature"]);
+        fs::remove_file(root.join(FILE_NAME)).unwrap();
+        assert_eq!(
+            DailyDataset::open(&root)
+                .unwrap()
+                .field(symbol, "mkt")
+                .err()
+                .unwrap()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+    }
     #[test]
     fn appended_labels_reuse_factors_but_anchor_warmup_and_cross_section_changes_invalidate() {
         let temp = tempfile::tempdir().unwrap();

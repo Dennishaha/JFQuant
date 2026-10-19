@@ -45,7 +45,7 @@ fn boundary_clause(text: &str, date: Date, starting: bool) -> bool {
             "停牌一天",
         ]
     } else {
-        &["开市起复牌", "复牌之日起", "复牌后"]
+        &["开市起复牌", "起复牌", "复牌之日起", "复牌后"]
     };
     text.split(['。', '；', ';']).any(|clause| {
         dates.iter().any(|date| {
@@ -55,14 +55,23 @@ fn boundary_clause(text: &str, date: Date, starting: bool) -> bool {
                 !["若", "预计", "最晚", "拟于", "计划于"]
                     .iter()
                     .any(|word| prefix.contains(word))
-                    && markers.iter().any(|marker| {
+                    && (markers.iter().any(|marker| {
                         tail.find(marker).is_some_and(|end| {
                             tail[..end].chars().count() <= 24
                                 && !["预计", "最晚", "拟", "计划"]
                                     .iter()
                                     .any(|word| tail[..end].contains(word))
                         })
-                    })
+                    }) || (starting
+                        && tail.starts_with('至')
+                        && tail.find("全天停牌").is_some_and(|end| {
+                            let row = &tail[..end];
+                            row.chars().count() <= 64
+                                && row.contains("配股缴款")
+                                && !["正常交易", "若", "预计", "最晚", "拟", "计划"]
+                                    .iter()
+                                    .any(|word| row.contains(word))
+                        })))
             })
         })
     })
@@ -150,6 +159,29 @@ pub(super) fn replay(
 mod tests {
     use super::*;
     use crate::corporate_actions::evidence::{CaptureRequest, DocumentSpec, capture_with};
+    #[test]
+    fn rights_subscription_full_day_schedule_has_an_explicit_start() {
+        let start = "2022-04-21".parse().unwrap();
+        let row = "T+1日至T+5日2022年4月21日至2022年4月27日A股配股缴款起止日期、A股配股提示性公告（5次）全天停牌";
+        assert!(boundary_clause(row, start, true));
+        assert!(!boundary_clause(row, "2022-04-27".parse().unwrap(), true));
+        assert!(!boundary_clause(&format!("预计{row}"), start, true));
+        assert!(!boundary_clause(
+            &format!("2022年4月20日正常交易{row}"),
+            "2022-04-20".parse().unwrap(),
+            true
+        ));
+        assert!(boundary_clause(
+            "东方证券A股股票自2022年4月29日起复牌",
+            "2022-04-29".parse().unwrap(),
+            false
+        ));
+        assert!(!boundary_clause(
+            "东方证券A股股票预计自2022年4月29日起复牌",
+            "2022-04-29".parse().unwrap(),
+            false
+        ));
+    }
     #[test]
     fn confirmed_opening_wording_variants_keep_tentative_boundaries_rejected() {
         let day = "2025-05-26".parse().unwrap();

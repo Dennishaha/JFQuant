@@ -234,8 +234,15 @@ pub fn run_factor_pipeline(
         &request.factor_refs,
         &request.factor_ids,
     )?;
-    let input_columns =
+    let mut input_columns =
         crate::input_check::parquet::market_columns(&mut engine, &request.market_path)?;
+    crate::input_check::parquet::attach_three_factor_inputs(
+        &request.market_path,
+        &registry,
+        &request.factor_ids,
+        &mut input_columns,
+        &mut panel,
+    )?;
     let absent = crate::input_check::parquet::missing_inputs(
         &registry,
         &request.factor_ids,
@@ -926,6 +933,10 @@ fn annotate_model_manifest(
 /// the exact data snapshot that produced them.
 pub fn snapshot_hash(market: &Path, universe: &Path) -> Result<String> {
     let mut files = Vec::new();
+    let three_factor = analytics_storage::three_factor::path(market);
+    if three_factor.exists() {
+        files.push(three_factor);
+    }
     for root in [market, universe] {
         if root.is_file() {
             files.push(root.to_path_buf());

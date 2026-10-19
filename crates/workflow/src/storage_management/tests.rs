@@ -161,6 +161,51 @@ fn storage_plans_reject_changed_bytes_new_dependencies_and_protected_config() {
     assert!(!config.deletable);
 }
 #[test]
+fn storage_unknown_formats_are_rejected_before_deletion_or_recovery() {
+    let temp = tempfile::tempdir().unwrap();
+    let w = Workspace::open(temp.path()).unwrap();
+    let root = cache(&w, "strict-format");
+    let mut inventory = scan(&w, &context()).unwrap();
+    for version in [0, 2] {
+        inventory.schema_version = version;
+        atomic_json(&w.resolve(".jfquant/storage/inventory.json"), &inventory).unwrap();
+        assert!(
+            latest(&w)
+                .unwrap_err()
+                .to_string()
+                .contains("format_or_workspace_mismatch")
+        );
+    }
+    inventory.schema_version = 1;
+    inventory.workspace = "/stale-workspace".into();
+    atomic_json(&w.resolve(".jfquant/storage/inventory.json"), &inventory).unwrap();
+    assert!(latest(&w).is_err());
+    let id = resource(&w, &root).id;
+    let mut p = saved_plan(&w, &[id]);
+    p.schema_version = 2;
+    atomic_json(
+        &w.resolve(format!(".jfquant/storage/plans/{}.json", p.id)),
+        &p,
+    )
+    .unwrap();
+    assert!(apply(&w, p.id, &context()).is_err());
+    assert!(w.resolve(root.join("features.parquet")).is_file());
+    assert!(
+        !w.resolve(format!(".jfquant/storage/transactions/{}", p.id))
+            .exists()
+    );
+    let (mut journal, txn) = crash_journal(&w, true);
+    journal.result.schema_version = 2;
+    cleanup::durable_write(&txn.join("journal.json"), &journal).unwrap();
+    assert!(
+        recover(&w)
+            .unwrap_err()
+            .to_string()
+            .contains("storage_invalid_journal")
+    );
+    assert!(txn.join("pending/0").is_file());
+}
+#[test]
 fn storage_preserves_task_summary_curve_and_signed_record_after_release() {
     let temp = tempfile::tempdir().unwrap();
     let w = Workspace::open(temp.path()).unwrap();

@@ -1,9 +1,10 @@
 # Architecture acceptance
 
-Run from the repository root with Python 3.9+:
+Run from the repository root with Python 3.9+, Cargo and Git:
 
 ```bash
 python3 crates/workflow/checks/architecture.py
+python3 -B -m unittest discover -s crates/workflow/checks -p 'test_execution_dependencies.py'
 ```
 
 The check rejects upward crate dependencies, cross-component embedded resources,
@@ -12,6 +13,16 @@ nested task workers used as query sessions. Long new or growing production
 functions produce review notices, not automatic failures. Tests are excluded.
 The function-size heuristic is deliberately approximate; a notice requires a
 responsibility review rather than arbitrary line splitting.
+
+The execution dependency receipt is owned by workflow and replaces embedding the
+workspace manifest in production Rust. It binds Cargo.lock and normalized effective
+Cargo contracts for workflow and its local dependency closure, including inherited
+requirements and selected feature declarations. Paths do not enter the receipt.
+The architecture gate runs `cargo metadata --locked --offline --no-deps` to check it;
+no registry downloads or Python packages are needed. Refresh it after dependency
+changes with `python3 crates/workflow/checks/execution_dependencies.py --write`.
+Existing signed tasks keep their frozen execution identities; no task, model or
+market manifest is migrated by this build-time dependency receipt.
 
 Run this alongside workspace nextest, Clippy, Rustdoc and formatting checks.
 

@@ -4,6 +4,7 @@ import pathlib
 import re
 import subprocess
 import sys
+from execution_dependencies import RECEIPT, generate
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 ALLOWED = {
@@ -13,6 +14,11 @@ ALLOWED = {
     'app': {'core', 'factor', 'engine', 'storage', 'workflow'},
 }
 errors = []
+try:
+    if (ROOT / RECEIPT).read_text() != generate(ROOT):
+        errors.append('workflow: execution dependency receipt is stale; run checks/execution_dependencies.py --write')
+except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
+    errors.append(f'workflow: cannot validate execution dependency receipt: {error}')
 for component, allowed in ALLOWED.items():
     manifest = (ROOT / 'crates' / component / 'Cargo.toml').read_text()
     deps = set(re.findall(r'path\s*=\s*"\.\./([^"]+)"', manifest))

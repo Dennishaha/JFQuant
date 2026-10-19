@@ -421,3 +421,5 @@ For `research replay-predictions --allocation allocation.json`, use the same com
 `storage scan / plan / apply` 返回后台任务ID，沿用 `jobs wait/results`；`storage list / history` 读取持久化快照和清理收据。
 `storage list --category models --status archived --sort size` 可按类别、任务、搜索、修改日期和状态过滤。`storage plan --resource ID` 可重复传入资源ID；预览中的 `id` 用于 `storage apply --plan ID --confirm-permanent`。
 删除不可恢复；缺少显式确认参数时拒绝执行。计划过期需重新预览；已提交但部分失败时重试相同计划，已完成计划重复调用返回原收据。服务协议44；[完整命令、格式和统计说明](../workflow/src/storage_management/README.md)。验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli storage_`。
+
+协议43→44属于服务通信升级，已有行情、模型和研究结果无需转换；更新CLI与App并结束旧服务后，由新版启动协议44服务。客户端拒绝旧服务，不尝试旧协议。首次运行 `storage scan` 创建格式1的清单；旧或未知缓存清单需重新扫描，未知清理事务不得强行升级。原有 `workspace migrate-allocation` 只处理其明确列出的旧配置，与本次通信升级无关。

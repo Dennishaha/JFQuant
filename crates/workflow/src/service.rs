@@ -306,6 +306,18 @@ struct Message {
     version: u32,
     request: Rpc,
 }
+fn decode_message(line: &str) -> Result<Message> {
+    let raw: Value =
+        serde_json::from_str(line).map_err(|e| ServiceError::new("invalid_request", e))?;
+    if raw["version"].as_u64() != Some(u64::from(PROTOCOL_VERSION)) {
+        return Err(ServiceError::new(
+            "protocol_mismatch",
+            "客户端和服务协议版本不一致，请同步更新 App、CLI 和服务",
+        ));
+    }
+    validate_submission(&raw)?;
+    serde_json::from_value(raw).map_err(|e| ServiceError::new("invalid_request", e))
+}
 #[derive(Serialize, Deserialize)]
 struct Response {
     version: u32,
@@ -797,17 +809,7 @@ pub fn serve(root: &Path) -> Result<()> {
                             .take(16 * 1024 * 1024)
                             .read_line(&mut line)
                             .map_err(failure)?;
-                        let raw: Value = serde_json::from_str(&line)
-                            .map_err(|e| ServiceError::new("invalid_request", e))?;
-                        validate_submission(&raw)?;
-                        let message: Message = serde_json::from_str(&line)
-                            .map_err(|e| ServiceError::new("invalid_request", e))?;
-                        if message.version != PROTOCOL_VERSION {
-                            return Err(ServiceError::new(
-                                "protocol_mismatch",
-                                "客户端和服务协议版本不一致",
-                            ));
-                        }
+                        let message = decode_message(&line)?;
                         if matches!(message.request, Rpc::Restart) {
                             let mut s = server.state.lock().unwrap();
                             s.last_client = Instant::now();
@@ -1444,6 +1446,21 @@ fn locate_binary() -> io::Result<PathBuf> {
 mod protocol_tests {
     use super::*;
     #[test]
+    fn only_current_protocol_is_decoded_without_downgrading_old_requests() {
+        for version in [1, 43, PROTOCOL_VERSION + 1] {
+            let raw = json!({"version":version,"request":{"method":"retired_rpc"}});
+            assert_eq!(
+                decode_message(&raw.to_string()).err().unwrap().code,
+                "protocol_mismatch"
+            );
+        }
+        let request = json!({"version":PROTOCOL_VERSION,"request":{"method":"storage_history"}});
+        assert!(matches!(
+            decode_message(&request.to_string()).unwrap().request,
+            Rpc::StorageHistory
+        ));
+    }
+    #[test]
     fn old_protocol_is_rejected_without_starting_a_replacement_service() {
         let tmp = tempfile::tempdir().unwrap();
         let workspace = Workspace::open(tmp.path()).unwrap();
@@ -1458,9 +1475,12 @@ mod protocol_tests {
                 .unwrap();
             let request: Value = serde_json::from_str(&line).unwrap();
             assert_eq!(request["version"], PROTOCOL_VERSION);
-            stream
-                .write_all(b"{\"version\":1,\"data\":{\"active\":null},\"error\":null}\n")
-                .unwrap();
+            writeln!(
+                stream,
+                "{}",
+                json!({"version":43,"data":{"active":null},"error":null})
+            )
+            .unwrap();
         });
         assert_eq!(
             client

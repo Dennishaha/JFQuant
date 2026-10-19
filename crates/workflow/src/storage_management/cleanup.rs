@@ -38,6 +38,7 @@ fn save(root: &Path, journal: &Journal) -> Result<()> {
 pub(crate) fn validate(w: &Workspace, journal: &Journal) -> Result<()> {
     if journal.schema_version != 1
         || journal.plan.schema_version != 1
+        || journal.result.schema_version != 1
         || journal.result.plan != journal.plan.id
         || crate::signature(&(
             &journal.plan.resources,
@@ -185,7 +186,11 @@ pub fn apply(w: &Workspace, id: Uuid, context: &TaskContext) -> Result<CleanupRe
         w,
         &PathBuf::from(format!(".jfquant/storage/plans/{id}.json")),
     )?)?;
-    if plan.id != id || plan.workspace != w.root() || !plan.blockers.is_empty() {
+    if plan.schema_version != 1
+        || plan.id != id
+        || plan.workspace != w.root()
+        || !plan.blockers.is_empty()
+    {
         return Err("storage_plan_blocked_or_invalid".into());
     }
     context.report("重新检查清理计划与资源引用")?;

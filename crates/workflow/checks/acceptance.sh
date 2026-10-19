@@ -5,6 +5,7 @@ root="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$root"
 export DUCKDB_DOWNLOAD_LIB=1
 python3 crates/workflow/checks/architecture.py
+python3 -B -m unittest discover -s crates/workflow/checks -p 'test_execution_dependencies.py'
 cargo fmt --all -- --check
 cargo nextest run --workspace
 cargo clippy --workspace --all-targets -- -D warnings

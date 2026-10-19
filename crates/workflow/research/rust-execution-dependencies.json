@@ -1,0 +1,11 @@
+{
+  "cargo_lock_sha256": "sha256:bdb73d310ed0c0af6c8b95f2d0f378cb0d8c0c133ee5dd7f92d1089a80d1d958",
+  "dependency_contracts_sha256": {
+    "analytics-core": "sha256:2fddc0c8e9461cebfc902a3fbcc18401e0838d7d483c5c67cd85442c343dd86d",
+    "analytics-engine": "sha256:23326b9ddb3a7047161a37ccbd5247a7d0b50533aa5a347ea128477c3192c0db",
+    "analytics-factor": "sha256:1c994c8e79bf674bceca2b663829ad5f9311ca4e214664cb5915b1dc4ea157f0",
+    "analytics-storage": "sha256:533b334d3c6592785eb3b79f06ade97e9aa6f67cd60ce85cb11c40ae99f5e763",
+    "analytics-workflow": "sha256:049a015c2d8f7091e9572fffbb6d29088f72b7e2724575b8ecd6cee2393407e7"
+  },
+  "schema_version": 1
+}

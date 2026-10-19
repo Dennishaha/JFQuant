@@ -5,6 +5,7 @@
 `scan` 盘点工作区；`plan` 根据资源 ID 计算精确删除集合和依赖阻断；`apply` 仅执行已持久化计划。
 App 与 CLI 使用 `WorkflowRequest::Storage { request: Scan | Plan | Apply }`，经过同一个服务任务槽、worker、取消和结果持久化流程。
 `Rpc::StorageInventory` 读取上次扫描的资源摘要，`Rpc::StorageHistory` 读取清理收据。服务协议44；存储清单、计划、日志、历史视图格式均为1。
+从协议43升级只需同步更新服务、App和CLI；已有数据与模型格式没有变化，无需数据转换。首次扫描生成新存储清单。未知清单、计划、事务及收据格式会明确拒绝，不自动转换或兼容旧版本；工作区移动后旧缓存清单也必须重新扫描。
 
 `types` 定义普通数据接口；`inventory` 根据现有生产者清单认领文件；`members` 限定生产者的保留文件名和清单成员；`dependencies` 解析完整性、追溯与未决引用；`cleanup` 管理事务；`history` 保存显示快照与能力状态。
 底层 `analytics_storage::filesystem` 只读元数据，不依赖 DuckDB 或 Python。查询会话在执行清理前由原 worker 关闭；原生句柄不会传给客户端。

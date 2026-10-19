@@ -13,7 +13,7 @@ flowchart LR
  A --> O[Model, predictions, events and results]
 ```
 
-Protocol 1: stdin accepts JSON Lines with `version`, `signature`, `operation` and
+Protocol 4: stdin accepts JSON Lines with `version`, `signature`, `operation` and
 operation-specific file references. Operations are `train`, `predict`, `backtest`,
 `cancel`, `shutdown`. Stdout contains only `ready`, `progress`, `complete`, `error`.
 Library output is redirected to stderr. A dedicated input reader accepts cancellation
@@ -133,3 +133,7 @@ Worker protocol 4 consumes allocation input format 2, including Rust's `stock_ex
 `solver_tolerance` defaults to `1e-9`, with objective scale 1000 and original-output constraint checks at `1e-6`. These parameters and warnings are in signed receipts. `allocation-decisions.jsonl` appends each decision/target once, and format-2 reports aggregate once at termination. Cancellation and failed writes cannot publish a completed report. Tests include a native minimum-variance run selecting the next qualified stock, a blocked run that never starts AKQuant, flat expected returns, future-price mutations and journal equality.
 
 Worker拒绝非格式2或缺少必需字段的allocation-input.json；不通过get/default补入admission、missing_prices或prediction_provenance。均值方差要求显式样本外预测来源。旧输入拒绝回归同时验证不会启动AKQuant或修改输入文件。
+
+## Rust执行依赖收据
+
+`rust-execution-dependencies.json` 是workflow拥有的构建依赖收据，绑定Cargo.lock及workflow本地依赖闭包的有效Cargo合同。生成和校验命令见[架构检查](../checks/README.md)。执行签名读取组件内收据；原始任务、模型和结果的冻结签名保持原样。

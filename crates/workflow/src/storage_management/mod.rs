@@ -45,10 +45,14 @@ pub(crate) fn owned_path(w: &Workspace, path: &Path) -> Result<PathBuf> {
     Ok(current)
 }
 pub fn latest(w: &Workspace) -> Result<StorageInventory> {
-    read(&owned_path(
+    let inventory: StorageInventory = read(&owned_path(
         w,
         Path::new(".jfquant/storage/inventory.json"),
-    )?)
+    )?)?;
+    if inventory.schema_version != 1 || inventory.workspace != w.root() {
+        return Err("storage_inventory_format_or_workspace_mismatch: 请重新扫描".into());
+    }
+    Ok(inventory)
 }
 pub fn cleanup_history(w: &Workspace) -> Result<Vec<CleanupResult>> {
     let root = owned_path(w, Path::new(".jfquant/storage/transactions"))?;

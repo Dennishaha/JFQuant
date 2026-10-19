@@ -8,6 +8,7 @@
 工作区切换及新任务响应会丢弃旧读取；清理后运行记录显示保留的摘要/曲线和已释放能力，不把历史展示标为产物完整。UI线程不遍历文件、不删除文件、不持有数据库/模型句柄。服务协议44；[后台事务与统计口径](../workflow/src/storage_management/README.md)。验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-desktop storage_`。
 
 当前 App 与 CLI 使用同一服务协议44；研究模板12、worker4、结果22。
+43→44为通信升级，既有行情、模型和结果不需要转换；更新App与CLI并结束旧服务后使用新版服务。UI不协商或降级到旧协议；存储清单首次扫描创建，未知清单格式需重新扫描。
 GTJA191 v5 默认190项，191项均可选择；Alpha030依赖所选行情的实际三因子覆盖，
 输入检查与正式研究沿用同一读取、缺失传播及来源签名。
 BigQuant 发布后登记的新行情可由现有数据选择器选用，完整性以产物报告为准。
@@ -110,7 +111,7 @@ Packaged CLI acceptance also invokes `research verify --task <UUID>` after the t
 界面同时显示库中最新修订和组内固定修订。保存组或应用到研究后，训练、报告和旧模型均使用冻结定义。
 归档因子及删除组保留历史；原始158/191仍只读。
 
-因子库读写通过协议29共享服务，UI异步同步；计算和预览通过worker任务，支持取消。
+因子库读写通过协议44共享服务，UI异步同步；计算和预览通过worker任务，支持取消。
 验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-desktop`。
 
 ## 独立训练与跨池回测
@@ -126,7 +127,7 @@ Packaged CLI acceptance also invokes `research verify --task <UUID>` after the t
 
 A/B可重叠，横截面计算互相隔离；B不参与验证或早停。首日没有合法模型则拒绝回测。
 账户跨模型连续运行；报告显示曾见/未见标的及同一账户贡献，预测可独立重放。
-旧“年度研究/仅训练/已有模型回测”入口保持原配置语义。服务协议44，结果20仅读取当前格式。
+旧“年度研究/仅训练/已有模型回测”入口保持原配置语义。服务协议44，结果22仅读取当前格式。
 
 ```bash
 DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-desktop independent_training_and_backtest_editors

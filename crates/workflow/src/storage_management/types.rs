@@ -7,9 +7,35 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum StorageRequest {
-    Scan,
+    Scan { level: ScanLevel, threads: usize },
     Plan { resources: Vec<String> },
     Apply { plan: Uuid },
+}
+/// Capacity inspection does not imply dependency verification.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanLevel {
+    #[default]
+    Overview,
+    Resources,
+}
+pub fn default_threads() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get().min(4))
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanSnapshot {
+    pub schema_version: u32,
+    pub workspace: PathBuf,
+    pub scan_id: Uuid,
+    pub level: ScanLevel,
+    pub phase: String,
+    pub started_at: String,
+    pub updated_at: String,
+    pub elapsed_ms: u64,
+    pub finished: bool,
+    pub complete: bool,
+    pub diagnostics: Vec<String>,
+    pub progress: analytics_storage::filesystem::WalkProgress,
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
@@ -83,6 +109,11 @@ pub struct StorageResource {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageInventory {
+    pub scan_id: Uuid,
+    pub level: ScanLevel,
+    pub dependencies_checked: bool,
+    pub stale: bool,
+    pub directories: BTreeMap<PathBuf, analytics_storage::filesystem::DirectoryUsage>,
     pub schema_version: u32,
     pub scanned_at: String,
     pub workspace: PathBuf,
@@ -91,7 +122,7 @@ pub struct StorageInventory {
     pub available_bytes: Option<u64>,
     pub total: SpaceUsage,
     pub categories: BTreeMap<ResourceCategory, SpaceUsage>,
-    pub reclaimable_allocated_bytes_estimate: u64,
+    pub reclaimable_allocated_bytes_estimate: Option<u64>,
     pub resources: Vec<StorageResource>,
     pub references: Vec<ResourceReference>,
     pub external_references: Vec<PathBuf>,

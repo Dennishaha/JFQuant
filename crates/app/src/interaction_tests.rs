@@ -20,9 +20,9 @@ fn storage_page_scan_button_submits_shared_task_without_selecting_original_data(
     let w = analytics_workflow::Workspace::open(temp.path()).unwrap();
     let mut h = Harness::new(Panel::Storage);
     h.app.state.platform.workspace = Some(w);
-    h.click("扫描工作区空间");
+    h.click("刷新占用");
     assert!(
-        matches!(h.commands.try_recv().unwrap(),WorkerCommand::ExecuteWorkflow{request,..} if matches!(*request,analytics_workflow::WorkflowRequest::Storage{request:analytics_workflow::storage_management::StorageRequest::Scan}))
+        matches!(h.commands.try_recv().unwrap(),WorkerCommand::ExecuteWorkflow{request,..} if matches!(*request,analytics_workflow::WorkflowRequest::Storage{request:analytics_workflow::storage_management::StorageRequest::Scan{level:analytics_workflow::storage_management::ScanLevel::Overview,..}}))
     );
     assert!(h.app.state.busy());
 }

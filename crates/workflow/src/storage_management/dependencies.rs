@@ -176,6 +176,15 @@ pub(crate) fn discover(r: &mut Registry<'_>, context: &TaskContext) -> Result<()
             }
         }
     }
+    let mut by_task = BTreeMap::<String, Vec<String>>::new();
+    for resource in r.resources.values() {
+        if let Some(task) = resource.task {
+            by_task
+                .entry(task.to_string())
+                .or_default()
+                .push(resource.id.clone());
+        }
+    }
     // Completed request snapshots are provenance; active requests pin their actual inputs.
     for (root, run) in r.runs.clone() {
         if super::inventory::management_run(&run) {
@@ -190,12 +199,10 @@ pub(crate) fn discover(r: &mut Registry<'_>, context: &TaskContext) -> Result<()
         let mut values = vec![];
         strings(&run.request, &mut values);
         for value in values {
-            let targets: Vec<_> = r
-                .resources
-                .values()
-                .filter(|v| v.name == value || v.task.is_some_and(|t| value == t.to_string()))
-                .map(|v| v.id.clone())
-                .collect();
+            let mut targets = r.names.get(&value).cloned().unwrap_or_default();
+            targets.extend(by_task.get(&value).into_iter().flatten().cloned());
+            targets.sort();
+            targets.dedup();
             for source in &sources {
                 for target in &targets {
                     r.reference(
@@ -255,9 +262,11 @@ fn unresolved_metadata(r: &mut Registry<'_>, context: &TaskContext) -> Result<()
             f.owners.is_empty()
                 && !r.metadata.contains_key(&f.path)
                 && f.path.extension().is_some_and(|e| e == "json")
-                && !f.path.starts_with(".jfquant/storage")
-                && !r.runs.iter().any(|(root, run)| {
-                    super::inventory::management_run(run) && f.path.starts_with(root)
+                && !super::inventory::volatile(r, &f.path)
+                && !f.path.ancestors().any(|root| {
+                    r.runs
+                        .get(root)
+                        .is_some_and(super::inventory::management_run)
                 })
         })
         .map(|f| f.path.clone())
@@ -271,12 +280,7 @@ fn unresolved_metadata(r: &mut Registry<'_>, context: &TaskContext) -> Result<()
         let mut values = vec![];
         strings(&value, &mut values);
         for value in values {
-            let mut targets: Vec<_> = r
-                .resources
-                .values()
-                .filter(|v| v.name == value)
-                .map(|v| v.id.clone())
-                .collect();
+            let mut targets = r.names.get(&value).cloned().unwrap_or_default();
             if value.contains('/') {
                 let p = Path::new(&value);
                 let p = p.strip_prefix(r.w.root()).unwrap_or(p);
@@ -333,6 +337,12 @@ pub(crate) fn build_plan(
     }
     if !inventory.complete {
         blockers.push("扫描不完整，需先处理扫描诊断".into());
+        blockers.extend(
+            inventory
+                .diagnostics
+                .iter()
+                .map(|d| format!("扫描诊断：{d}")),
+        );
     }
     let mut resources = vec![];
     for id in &selected {

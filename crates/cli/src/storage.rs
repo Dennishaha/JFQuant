@@ -5,7 +5,12 @@ use analytics_workflow::storage_management::{StorageInventory, StorageRequest};
 #[derive(Debug, Subcommand)]
 pub enum StorageCommand {
     /// Submit a metadata-only workspace scan; inspect using jobs wait/results.
-    Scan,
+    Scan {
+        #[arg(long, value_enum, default_value = "overview")]
+        level: ScanLevelArg,
+        #[arg(long, default_value_t = analytics_workflow::storage_management::default_threads() as u8, value_parser = clap::value_parser!(u8).range(1..=8))]
+        threads: u8,
+    },
     /// Read the last completed scan without traversing the filesystem.
     List {
         #[arg(long)]
@@ -38,6 +43,11 @@ pub enum StorageCommand {
     History,
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ScanLevelArg {
+    Overview,
+    Resources,
+}
+#[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum ResourceStatus {
     All,
     Archived,
@@ -57,7 +67,17 @@ pub(super) enum Action {
 }
 pub(super) fn prepare(client: &Client, command: StorageCommand) -> Result<Action, ServiceError> {
     let task = match command {
-        StorageCommand::Scan => StorageRequest::Scan,
+        StorageCommand::Scan { level, threads } => StorageRequest::Scan {
+            level: match level {
+                ScanLevelArg::Overview => {
+                    analytics_workflow::storage_management::ScanLevel::Overview
+                }
+                ScanLevelArg::Resources => {
+                    analytics_workflow::storage_management::ScanLevel::Resources
+                }
+            },
+            threads: usize::from(threads),
+        },
         StorageCommand::Plan { resources } => StorageRequest::Plan { resources },
         StorageCommand::Apply {
             plan,
@@ -77,8 +97,21 @@ pub(super) fn prepare(client: &Client, command: StorageCommand) -> Result<Action
             search,
             modified_before,
         } => {
+            let snapshot = client.call(Rpc::StorageSnapshot)?;
+            let cached = match client.call(Rpc::StorageInventory) {
+                Ok(value) => value,
+                Err(e)
+                    if e.message.contains("No such file")
+                        || e.message.contains("storage_inventory_format") =>
+                {
+                    return Ok(Action::Read(
+                        serde_json::json!({"inventory":null,"snapshot":snapshot,"diagnostic":"尚无有效扫描缓存，请运行 storage scan"}),
+                    ));
+                }
+                Err(e) => return Err(e),
+            };
             let mut inventory: StorageInventory =
-                serde_json::from_value(client.call(Rpc::StorageInventory)?).map_err(invalid)?;
+                serde_json::from_value(cached).map_err(invalid)?;
             let category = category
                 .map(|c| {
                     serde_json::from_value::<
@@ -122,9 +155,9 @@ pub(super) fn prepare(client: &Client, command: StorageCommand) -> Result<Action
                     .resources
                     .sort_by(|a, b| b.modified_at.cmp(&a.modified_at)),
             }
-            return Ok(Action::Read(
-                serde_json::to_value(inventory).map_err(invalid)?,
-            ));
+            let mut value = serde_json::to_value(inventory).map_err(invalid)?;
+            value["snapshot"] = snapshot;
+            return Ok(Action::Read(value));
         }
     };
     Ok(Action::Task(task))
@@ -159,5 +192,38 @@ mod tests {
             ])
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod scan_tests {
+    use super::*;
+    #[test]
+    fn storage_scan_defaults_to_overview_and_rejects_unbounded_threads() {
+        let cli = Cli::try_parse_from(["jfquant", "storage", "scan"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Storage(StorageCommand::Scan {
+                level: ScanLevelArg::Overview,
+                threads: 1..=4
+            })
+        ));
+        assert!(
+            Cli::try_parse_from([
+                "jfquant",
+                "storage",
+                "scan",
+                "--level",
+                "resources",
+                "--threads",
+                "8"
+            ])
+            .is_ok()
+        );
+        for threads in ["0", "9", "-1"] {
+            assert!(
+                Cli::try_parse_from(["jfquant", "storage", "scan", "--threads", threads]).is_err()
+            );
+        }
     }
 }

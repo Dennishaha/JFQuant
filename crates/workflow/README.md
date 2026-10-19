@@ -2,18 +2,18 @@
 
 ## 本地存储管理
 
-新增共享 `WorkflowRequest::Storage` 的扫描、预览和永久释放任务，以及资源清单、清理收据和独立能力状态。服务协议44，App/CLI同步更新；数据、模型及研究签名格式不变。
+新增共享 `WorkflowRequest::Storage` 的扫描、预览和永久释放任务，以及资源清单、清理收据和独立能力状态。服务协议45，App/CLI同步更新；数据、模型及研究签名格式不变。
 按生产者清单识别资源，按实际依赖保护训练材料与预测回放；保留任务参数、摘要、曲线及来源身份。提交前中断回滚，提交后启动继续删除；失败可重试相同计划。接口、统计口径、目录格式及复现命令见 [存储管理组件](src/storage_management/README.md)。
 
-### 协议44升级与数据格式
+### 协议45升级与数据格式
 
-43→44只修改本地服务通信，工作区1、研究结果22、研究worker4和已有行情/模型生产者格式不变；已有数据无需转换。存储清单、计划、事务及历史摘要是首次新增的格式1。App、CLI和服务需同步更新，旧服务结束后由新版CLI重新启动。服务在解析任务前拒绝非44协议，不协商、不降级；存储读取拒绝未知格式，缓存清单可重新扫描生成，签名模型和原始任务记录不改写。已有独立的离线配置迁移命令不属于通信协议兼容层。
+44→45同步更新App、CLI和服务，拒绝旧服务协议，不协商、不降级。扫描拆为overview/resources，清理预览执行完整核验；清单摘要格式2与完整文件索引分开保存，旧清单缓存重新生成，旧未执行计划重新预览。既有事务、收据及历史摘要保持格式1并正常恢复；工作区1、结果22、worker4及行情/模型签名格式不变，无需业务数据迁移。
 
 账户执行身份使用组件内的 `research/rust-execution-dependencies.json`，由锁文件与workflow本地依赖闭包的有效Cargo合同生成；架构检查会拒绝过期收据。依赖变化后运行 `python3 crates/workflow/checks/execution_dependencies.py --write`。这会更新新执行的依赖身份，不修改既有结果的冻结身份及签名；旧结果仍按原产物核验。
 
 ## MSCI 官方收盘任务
 
-`IndexOperation::CollectMsci {version, calendar_market, start, end}` 复用后台任务、取消、报告、原子发布和市场登记。提交冻结指数版本、日历市场及适配器签名，执行前重新校验。报告保留请求范围、实际范围、内部缺值和日历来源。服务协议44，原有行情格式及采集协议不变。仅采集指数收盘，不进入股票来源自动协调，不生产股票或成员历史。
+`IndexOperation::CollectMsci {version, calendar_market, start, end}` 复用后台任务、取消、报告、原子发布和市场登记。提交冻结指数版本、日历市场及适配器签名，执行前重新校验。报告保留请求范围、实际范围、内部缺值和日历来源。服务协议45，原有行情格式及采集协议不变。仅采集指数收盘，不进入股票来源自动协调，不生产股票或成员历史。
 
 验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow indices --lib`。
 
@@ -224,7 +224,7 @@ The shared adapter projects reviewed terminal/successor events, follows successo
 
 ## 数据修订与账户诊断
 
-Evidence MarketDraft 和 ReviseMarket 共用只读校验，版本1收据绑定原行情、选择、来源树哈希和可选任务。发布重算校验，不读取ready标记；后台取消后不得rename发布。ImportStatus只导入独立停牌凭据，和ReconcileActions的全量条款协调分开。行动修订5发布格式10，服务协议44。
+Evidence MarketDraft 和 ReviseMarket 共用只读校验，版本1收据绑定原行情、选择、来源树哈希和可选任务。发布重算校验，不读取ready标记；后台取消后不得rename发布。ImportStatus只导入独立停牌凭据，和ReconcileActions的全量条款协调分开。行动修订5发布格式10，服务协议45。
 
 公告／GP29状态索引每任务一次，账户估值不进入因子输入。候选缺价报告先于撮合，实际账本在首个未知估值日汇总同日持仓缺口，将后续账户状态标为等待核验；不以假价格继续认证，也不把候选数当持仓影响数。补录市场进入既有完整数据签名，因子、标签、预测按完整上下文重新校验／计算；仅账户证据变化保留可验证预测复用。
 
@@ -247,7 +247,7 @@ Acceptance: `DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow index_recipe
 
 ## 工作区指数接入
 
-`indices` 服务通过现有任务、取消和原子写入管理配置；配置格式1，服务协议44。
+`indices` 服务通过现有任务、取消和原子写入管理配置；配置格式1，服务协议45。
 `.jfquant/indices/index-<完整内容哈希>.json` 是不可变版本；重复导入返回同一版本。
 内置种子用 `builtin:<id>` 解析，用户版本不覆盖内置身份，不允许不同指数占用相同数据键或供应商路线。
 修改展示字段生成新的配置完整性版本，但不改变计算合同签名，也不改写原有数据与任务。
@@ -272,11 +272,11 @@ flowchart LR
 验收：`cargo test -p analytics-workflow indices`，包括不可变版本、展示签名、映射冲突、篡改、
 导入冻结、取消、导出及缺少成员数据。
 
-本次指数接入格式已收敛：AdjustmentRecord 仅接受格式4（`index_input` 必填，普通证券及内置目录指数显式为 null，自定义指数冻结完整合同）；SourceMap 仅接受格式2，指数无可下单证券身份；CollectionRequest 必须显式包含 `index_inputs`（可为空对象）。正常读取不升级旧版本、不猜测缺失字段。旧快照只作历史留存，显式离线转换后必须以新内容哈希重新登记，原始响应及采集器身份不得改写成当前版本。服务协议44、采集协议16拒绝旧检查点；格式更新不等于来源准入通过。
+本次指数接入格式已收敛：AdjustmentRecord 仅接受格式4（`index_input` 必填，普通证券及内置目录指数显式为 null，自定义指数冻结完整合同）；SourceMap 仅接受格式2，指数无可下单证券身份；CollectionRequest 必须显式包含 `index_inputs`（可为空对象）。正常读取不升级旧版本、不猜测缺失字段。旧快照只作历史留存，显式离线转换后必须以新内容哈希重新登记，原始响应及采集器身份不得改写成当前版本。服务协议45、采集协议16拒绝旧检查点；格式更新不等于来源准入通过。
 
 ## 指数历史成分任务
 
-`membership_history::Operation`经`IndexOperation::History`提供Draft、Preview、Publish、Import、Status、Export、Capture、Material、Compare，复用worker、取消和报告持久化。提交冻结指数、市场/日历/映射、请求及原文哈希；执行重验。服务协议44。
+`membership_history::Operation`经`IndexOperation::History`提供Draft、Preview、Publish、Import、Status、Export、Capture、Material、Compare，复用worker、取消和报告持久化。提交冻结指数、市场/日历/映射、请求及原文哈希；执行重验。服务协议45。
 
 发布选择确切连续范围，复制证据到`.jfquant/histories/history-<SHA256>/evidence/`。产物格式2包含请求、审核、规则版本、日历、映射、报告及成员区间；读取重验冻结副本及结果，不信任ready标记。导出生成history.json及相对原文；导入重验。
 
@@ -287,7 +287,7 @@ flowchart LR
 
 ### 历史补证材料任务
 
-服务协议44仅接受历史请求/报告/产物2；旧任务记录和原文保留，旧产物不能直接使用，需准备当前格式请求并重新验证发布；没有旧格式转换模块或运行时猜测。`history_material::MaterialAction`提供Inspect、Register、Extract、Review；检查只读离线，采集仅由Capture显式联网。文件、PDF与像素解码全部在worker。Inspect分别返回`material_status`、带来源/哈希的`extracted_texts`和可选缩略RGBA；Review显式生成原图区域核对收据，返回新草稿，不修改旧文件。取消不会发布历史产物。
+服务协议45仅接受历史请求/报告/产物2；旧任务记录和原文保留，旧产物不能直接使用，需准备当前格式请求并重新验证发布；没有旧格式转换模块或运行时猜测。`history_material::MaterialAction`提供Inspect、Register、Extract、Review；检查只读离线，采集仅由Capture显式联网。文件、PDF与像素解码全部在worker。Inspect分别返回`material_status`、带来源/哈希的`extracted_texts`和可选缩略RGBA；Review显式生成原图区域核对收据，返回新草稿，不修改旧文件。取消不会发布历史产物。
 
 `Compare`接收两个预览任务ID，要求相同`task_context_signature`（指数计算合同、市场、日历、身份、请求范围及规则）；证据变化仍允许比较。结果分别列解除/剩余/新增诊断、新增/失去证明日期和连续区间数量。完整冻结签名仍包含证据与修订，任何关键输入变化使旧预览失效；正式发布重新核验副本。
 
@@ -371,7 +371,7 @@ details.artifact指向`inputs.json`，同目录保留`fundamentals.json`、raw�
 最终行情的`three_factor_build/`保存完整可复算输入包及时间假设manifest。
 
 默认`observed_on`不能把今天采集的版本倒填至历史；显式`provider_dates`可计算供应商
-历史日期口径，保留`revision_vintage_verified=false`。构造版本v2、服务协议44。
+历史日期口径，保留`revision_vintage_verified=false`。构造版本v2、服务协议45。
 不自动改变因子选择，不认证全市场或无前视财务。[字段与完整命令](../storage/src/three_factor/acquire/README.md)。
 
 `WorkflowRequest::BuildThreeFactors { market, inputs }` 由共享worker执行，CLI/App共用。

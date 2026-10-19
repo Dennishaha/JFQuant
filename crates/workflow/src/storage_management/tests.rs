@@ -166,7 +166,7 @@ fn storage_unknown_formats_are_rejected_before_deletion_or_recovery() {
     let w = Workspace::open(temp.path()).unwrap();
     let root = cache(&w, "strict-format");
     let mut inventory = scan(&w, &context()).unwrap();
-    for version in [0, 2] {
+    for version in [0, 1, 3] {
         inventory.schema_version = version;
         atomic_json(&w.resolve(".jfquant/storage/inventory.json"), &inventory).unwrap();
         assert!(
@@ -176,7 +176,7 @@ fn storage_unknown_formats_are_rejected_before_deletion_or_recovery() {
                 .contains("format_or_workspace_mismatch")
         );
     }
-    inventory.schema_version = 1;
+    inventory.schema_version = 2;
     inventory.workspace = "/stale-workspace".into();
     atomic_json(&w.resolve(".jfquant/storage/inventory.json"), &inventory).unwrap();
     assert!(latest(&w).is_err());
@@ -590,7 +590,7 @@ fn storage_unreadable_directories_make_scan_incomplete_and_block_cleanup() {
     fs::set_permissions(&protected, fs::Permissions::from_mode(0o700)).unwrap();
     assert!(!s.complete);
     assert!(!s.diagnostics.is_empty());
-    assert_eq!(s.reclaimable_allocated_bytes_estimate, 0);
+    assert_eq!(s.reclaimable_allocated_bytes_estimate, Some(0));
     let id = resource(&w, &root).id;
     assert!(
         !dependencies::build_plan(&w, &s, &[id], Uuid::new_v4())
@@ -677,5 +677,136 @@ fn storage_releasing_real_models_preserves_verified_prediction_replay_and_histor
     assert_eq!(
         crate::research::backtest::verification::report(&w, next.id).unwrap()["status"],
         "consistent"
+    );
+}
+
+#[test]
+fn storage_tiers_keep_overview_content_free_and_require_preview_for_dependencies() {
+    let temp = tempfile::tempdir().unwrap();
+    let w = Workspace::open(temp.path()).unwrap();
+    let root = cache(&w, "tiers");
+    json_file(&w, "user-reference.json", json!({"unknown_reference":root}));
+    let ctx = context();
+    let overview = inventory::scan_with(&w, &ctx, ScanLevel::Overview, 4, false, None).unwrap();
+    assert!(overview.files.is_empty());
+    assert!(overview.resources.is_empty());
+    assert!(!overview.dependencies_checked);
+    assert!(!overview.directories.is_empty());
+    let identified = inventory::scan_with(&w, &ctx, ScanLevel::Resources, 4, false, None).unwrap();
+    assert!(!identified.dependencies_checked);
+    assert!(identified.references.is_empty());
+    let id = identified
+        .resources
+        .iter()
+        .find(|r| r.path == root)
+        .unwrap()
+        .id
+        .clone();
+    assert!(!plan(&w, &[id], &ctx).unwrap().blockers.is_empty());
+}
+#[test]
+fn storage_cached_summary_never_reads_full_file_index_and_old_plans_expire() {
+    let temp = tempfile::tempdir().unwrap();
+    let w = Workspace::open(temp.path()).unwrap();
+    let root = cache(&w, "summary-only");
+    let ctx = context();
+    let inventory = scan(&w, &ctx).unwrap();
+    save_inventory(&w, inventory).unwrap();
+    file(&w, ".jfquant/storage/files.json", "invalid full index");
+    assert!(latest(&w).unwrap().files.is_empty());
+    let id = resource(&w, &root).id;
+    let mut plan = saved_plan(&w, &[id]);
+    plan.metadata_fingerprint = "old-fingerprint".into();
+    plan.fingerprint =
+        signature(&(&plan.resources, &plan.files, &plan.metadata_fingerprint)).unwrap();
+    atomic_json(
+        &w.resolve(format!(".jfquant/storage/plans/{}.json", plan.id)),
+        &plan,
+    )
+    .unwrap();
+    assert!(apply(&w, plan.id, &ctx).is_err());
+    assert!(w.resolve(root.join("features.parquet")).exists());
+}
+#[test]
+fn storage_live_snapshot_finishes_and_cancellation_preserves_previous_summary() {
+    let temp = tempfile::tempdir().unwrap();
+    let w = Workspace::open(temp.path()).unwrap();
+    cache(&w, "snapshot");
+    let run = completed_run(&w);
+    let ctx = context();
+    let request = StorageRequest::Scan {
+        level: ScanLevel::Overview,
+        threads: 4,
+    };
+    execute(&w, &request, &run, &ctx).unwrap();
+    let snapshot = snapshot(&w).unwrap().unwrap();
+    assert!(snapshot.finished && snapshot.complete);
+    assert_eq!(snapshot.scan_id, ctx.id);
+    let previous = fs::read(w.resolve(".jfquant/storage/inventory.json")).unwrap();
+    let cancelled = context();
+    cancelled.cancel.store(true, Ordering::Relaxed);
+    assert!(execute(&w, &request, &run, &cancelled).is_err());
+    assert_eq!(
+        fs::read(w.resolve(".jfquant/storage/inventory.json")).unwrap(),
+        previous
+    );
+    let stopped = super::snapshot(&w).unwrap().unwrap();
+    assert!(stopped.finished && !stopped.complete);
+}
+
+#[test]
+fn storage_own_progress_writes_do_not_invalidate_dependency_verification() {
+    let temp = tempfile::tempdir().unwrap();
+    let w = Workspace::open(temp.path()).unwrap();
+    let root = cache(&w, "own-progress");
+    let id = Uuid::new_v4();
+    let record = w
+        .begin(id, "扫描", json!({"request":{"operation":"storage"}}))
+        .unwrap();
+    let output = w.resolve(record.output.join("run.json"));
+    let ctx = TaskContext::new(id, Arc::new(AtomicBool::new(false)), move |stage| {
+        let mut record = record.clone();
+        record.stage = stage.into();
+        atomic_json(&output, &record).unwrap();
+    });
+    let inventory = inventory::scan_with(&w, &ctx, ScanLevel::Resources, 4, true, None).unwrap();
+    assert!(inventory.complete, "{:?}", inventory.diagnostics);
+    let id = inventory
+        .resources
+        .iter()
+        .find(|r| r.path == root)
+        .unwrap()
+        .id
+        .clone();
+    assert!(
+        dependencies::build_plan(&w, &inventory, &[id], Uuid::new_v4())
+            .unwrap()
+            .blockers
+            .is_empty()
+    );
+}
+
+#[test]
+fn storage_resources_detect_files_changed_between_traversal_and_revalidation() {
+    let temp = tempfile::tempdir().unwrap();
+    let w = Workspace::open(temp.path()).unwrap();
+    let root = cache(&w, "changed-during-scan");
+    let path = w.resolve(root.join("features.parquet"));
+    let ctx = TaskContext::new(
+        Uuid::new_v4(),
+        Arc::new(AtomicBool::new(false)),
+        move |stage| {
+            if stage == "重新校验文件元数据" {
+                fs::write(&path, b"changed").unwrap();
+            }
+        },
+    );
+    let inventory = inventory::scan_with(&w, &ctx, ScanLevel::Resources, 4, false, None).unwrap();
+    assert!(!inventory.complete);
+    assert!(
+        inventory
+            .diagnostics
+            .iter()
+            .any(|d| d.contains("changed during scan"))
     );
 }

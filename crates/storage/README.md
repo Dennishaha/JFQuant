@@ -266,7 +266,7 @@ CNY 价格指数。HiThink 接受确切供应商代码（或转换明确的 SH/S
 `DailyDataset::index_config` 从所选快照解析定义，不读取可编辑目录。
 验收：`cargo test -p analytics-storage runtime_index`；TDX fixture 见 `collectors/tests/test_tdx.py`。
 
-本次指数接入格式已收敛：AdjustmentRecord 仅接受格式4（`index_input` 必填，普通证券及内置目录指数显式为 null，自定义指数冻结完整合同）；SourceMap 仅接受格式2，指数无可下单证券身份；CollectionRequest 必须显式包含 `index_inputs`（可为空对象）。正常读取不升级旧版本、不猜测缺失字段。旧快照只作历史留存，显式离线转换后必须以新内容哈希重新登记，原始响应及采集器身份不得改写成当前版本。服务协议44、采集协议16拒绝旧检查点；格式更新不等于来源准入通过。
+本次指数接入格式已收敛：AdjustmentRecord 仅接受格式4（`index_input` 必填，普通证券及内置目录指数显式为 null，自定义指数冻结完整合同）；SourceMap 仅接受格式2，指数无可下单证券身份；CollectionRequest 必须显式包含 `index_inputs`（可为空对象）。正常读取不升级旧版本、不猜测缺失字段。旧快照只作历史留存，显式离线转换后必须以新内容哈希重新登记，原始响应及采集器身份不得改写成当前版本。服务协议45、采集协议16拒绝旧检查点；格式更新不等于来源准入通过。
 
 ## 历史成员原文核验
 
@@ -343,3 +343,7 @@ Alpha030读取的同一格式。六月分组、滞后权重、披露版本、缺
 CLI `data three-factors --market VERSION --inputs FILE` 和 App“数据更新与版本 → 自算市场三因子”
 共用worker，生成独立行情版本和来源/输入/分组/缺失记录。任务详情列出 `ready` 和
 完整/不完整日期数量。验收：`cargo test -p analytics-storage three_factor --lib`。
+
+### 并行元数据遍历
+
+`filesystem::walk(root, threads, overview, update)`支持1—8线程、有界目录队列和批量结果通道；队列满时在当前线程深度优先处理，取消会关闭结果通道并等待所有线程退出。一次metadata读取生成文件类型与FileStamp。总览保留目录聚合及多链接文件身份，不保留普通文件路径；硬链接按字典序最小的目录桶归属。符号链接不跟随，目录变化、权限与跨文件系统错误进入诊断。回调每100ms检查取消，持久化由workflow每秒节流。验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-storage storage_parallel_`。

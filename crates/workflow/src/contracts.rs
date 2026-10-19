@@ -563,7 +563,7 @@ impl WorkflowRequest {
     pub fn label(&self) -> String {
         match self {
             Self::Storage { request } => match request {
-                crate::storage_management::StorageRequest::Scan => "扫描工作区空间".into(),
+                crate::storage_management::StorageRequest::Scan { .. } => "扫描工作区空间".into(),
                 crate::storage_management::StorageRequest::Plan { .. } => "预览资源清理".into(),
                 crate::storage_management::StorageRequest::Apply { .. } => {
                     "永久释放所选资源".into()

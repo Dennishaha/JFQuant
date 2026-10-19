@@ -101,7 +101,7 @@ fn storage_cli_scan_preview_and_permanent_release_share_service_results() {
         query["result"]["results"]["QueryPaged"]["page"]["next_cursor"].clone(),
     )
     .unwrap();
-    let scan = s.json(&["storage", "scan"])["task_id"]
+    let scan = s.json(&["storage", "scan", "--level", "resources"])["task_id"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -139,6 +139,12 @@ fn storage_cli_scan_preview_and_permanent_release_share_service_results() {
     assert!(!cache.join("features.parquet").exists());
     assert!(cache.join("user-note.txt").is_file());
     assert_eq!(s.json(&["storage", "history"])[0]["plan"], plan);
+    let rescan = s.json(&["storage", "scan", "--level", "resources"])["task_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    s.client.wait(rescan, Some(20)).unwrap();
     assert_eq!(
         s.json(&["storage", "list", "--status", "released"])["resources"][0]["id"],
         resource

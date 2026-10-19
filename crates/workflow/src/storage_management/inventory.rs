@@ -5,6 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) struct Registry<'a> {
     pub w: &'a Workspace,
+    pub context: &'a TaskContext,
+    pub active_root: PathBuf,
     pub files: BTreeMap<PathBuf, StorageFile>,
     pub resources: BTreeMap<String, StorageResource>,
     pub runs: BTreeMap<PathBuf, RunRecord>,
@@ -12,6 +14,8 @@ pub(crate) struct Registry<'a> {
     pub references: Vec<ResourceReference>,
     pub external: BTreeSet<PathBuf>,
     pub diagnostics: Vec<String>,
+    pub names: BTreeMap<String, Vec<String>>,
+    pub roots: BTreeMap<PathBuf, Vec<String>>,
 }
 impl Registry<'_> {
     pub fn add(
@@ -28,6 +32,7 @@ impl Registry<'_> {
             path.starts_with(".jfquant/staging") || path.to_string_lossy().contains(".partial");
         let mut modified = 0;
         for p in paths {
+            self.context.check()?;
             if let Some(file) = self.files.get_mut(&p) {
                 if !file.owners.contains(&id) {
                     file.owners.push(id.clone());
@@ -35,6 +40,13 @@ impl Registry<'_> {
                 file.category = category;
                 modified = modified.max(file.stamp.modified.0);
             }
+        }
+        if !self.resources.contains_key(&id) {
+            self.names.entry(name.clone()).or_default().push(id.clone());
+            self.roots
+                .entry(path.to_owned())
+                .or_default()
+                .push(id.clone());
         }
         self.resources.entry(id.clone()).or_insert(StorageResource {
             id: id.clone(),
@@ -80,12 +92,21 @@ impl Registry<'_> {
         if file.stamp.bytes > 16 * 1024 * 1024 {
             return Err("storage_manifest_too_large".into());
         }
+        self.context.check()?;
         let bytes = fs::read(owned_path(self.w, path)?)?;
         if filesystem::FileStamp::read(&self.w.resolve(path))? != file.stamp {
             return Err("storage_manifest_changed_during_scan".into());
         }
-        self.metadata
-            .insert(path.to_owned(), crate::signature(&bytes)?);
+        self.metadata.insert(
+            path.to_owned(),
+            format!(
+                "sha256:{}",
+                <sha2::Sha256 as sha2::Digest>::digest(&bytes)
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            ),
+        );
         Ok(serde_json::from_slice(&bytes)?)
     }
     pub fn target(&self, path: &Path) -> Option<String> {
@@ -94,11 +115,8 @@ impl Registry<'_> {
             .and_then(|f| f.owners.first())
             .cloned()
             .or_else(|| {
-                self.resources
-                    .values()
-                    .filter(|r| path.starts_with(&r.path))
-                    .max_by_key(|r| r.path.components().count())
-                    .map(|r| r.id.clone())
+                path.ancestors()
+                    .find_map(|root| self.roots.get(root).and_then(|ids| ids.first()).cloned())
             })
     }
     pub fn reference(&mut self, source: &str, target: &str, kind: ReferenceKind, reason: &str) {
@@ -131,6 +149,9 @@ fn load_runs(r: &mut Registry<'_>) -> Result<()> {
         .cloned()
         .collect();
     for p in paths {
+        if p.starts_with(&r.active_root) {
+            continue;
+        }
         let Ok(value) = r.metadata(&p) else { continue };
         let Ok(run) = serde_json::from_value::<RunRecord>(value) else {
             continue;
@@ -808,6 +829,7 @@ fn protect_and_account(
     let mut total = SpaceUsage::default();
     let mut categories = BTreeMap::<_, SpaceUsage>::new();
     for file in r.files.values_mut() {
+        r.context.check()?;
         file.owners.sort();
         file.owners.dedup();
         if let Some(owner) = file.owners.first() {
@@ -837,17 +859,72 @@ pub(crate) fn add_usage(total: &mut SpaceUsage, more: &SpaceUsage) {
     total.files = total.files.saturating_add(more.files);
 }
 pub fn scan(w: &Workspace, context: &TaskContext) -> Result<StorageInventory> {
-    context.report("扫描工作区文件元数据")?;
-    let mut count = 0;
-    let physical = filesystem::inventory(w.root(), || {
-        count += 1;
-        if count % 2000 == 0 {
-            context.report(format!("已检查 {count} 个目录项"))?;
+    scan_with(
+        w,
+        context,
+        ScanLevel::Resources,
+        default_threads(),
+        true,
+        None,
+    )
+}
+pub(crate) fn scan_with(
+    w: &Workspace,
+    context: &TaskContext,
+    level: ScanLevel,
+    threads: usize,
+    verify: bool,
+    reporter: Option<&super::progress::Reporter>,
+) -> Result<StorageInventory> {
+    phase(context, reporter, "遍历文件元数据")?;
+    let physical = filesystem::walk(
+        w.root(),
+        threads,
+        level == ScanLevel::Overview,
+        |progress, diagnostics| {
+            context.check()?;
+            if let Some(reporter) = reporter {
+                reporter.update(progress, diagnostics)?;
+            }
+            Ok(())
+        },
+    )?;
+    let directories = physical.progress.directories;
+    let physical = physical.inventory;
+    if level == ScanLevel::Overview {
+        let mut total = SpaceUsage::default();
+        for usage in directories.values() {
+            total.logical_bytes += usage.logical_bytes;
+            total.allocated_bytes += usage.allocated_bytes;
+            total.files += usage.files;
         }
-        context.check()
-    })?;
+        return Ok(StorageInventory {
+            schema_version: 2,
+            scan_id: context.id,
+            level,
+            dependencies_checked: false,
+            stale: false,
+            scanned_at: crate::now(),
+            workspace: w.root().to_owned(),
+            complete: physical.errors.is_empty(),
+            diagnostics: physical.errors,
+            available_bytes: filesystem::available_bytes(w.root()).ok(),
+            total,
+            categories: BTreeMap::new(),
+            reclaimable_allocated_bytes_estimate: None,
+            resources: vec![],
+            references: vec![],
+            external_references: vec![],
+            files: vec![],
+            metadata_fingerprint: String::new(),
+            directories,
+        });
+    }
+    phase(context, reporter, "识别资源与生产者清单")?;
     let mut r = Registry {
         w,
+        context,
+        active_root: PathBuf::from(format!(".jfquant/runs/{}", context.id)),
         files: physical
             .files
             .into_iter()
@@ -869,13 +946,18 @@ pub fn scan(w: &Workspace, context: &TaskContext) -> Result<StorageInventory> {
         references: vec![],
         external: BTreeSet::new(),
         diagnostics: physical.errors,
+        names: BTreeMap::new(),
+        roots: BTreeMap::new(),
     };
     load_runs(&mut r)?;
     data_packages(&mut r)?;
     cached_packages(&mut r)?;
     run_packages(&mut r)?;
     staging_packages(&mut r)?;
-    super::dependencies::discover(&mut r, context)?;
+    if verify {
+        phase(context, reporter, "解析资源引用与清理依赖")?;
+        super::dependencies::discover(&mut r, context)?;
+    }
     let released = super::history::released(w)?;
     for item in &released {
         if r.resources
@@ -888,11 +970,13 @@ pub fn scan(w: &Workspace, context: &TaskContext) -> Result<StorageInventory> {
             }
         }
     }
+    phase(context, reporter, "汇总空间与保护状态")?;
     let (total, categories) = protect_and_account(&mut r, &physical.symlinks)?;
     if let Err(e) = crate::maintenance::require_complete(w.root()) {
         r.diagnostics.push(e.to_string());
     }
     // Detect concurrent metadata changes instead of publishing a falsely complete inventory.
+    phase(context, reporter, "重新校验文件元数据")?;
     let mut changed = vec![];
     for file in r.files.values().filter(|f| !volatile(&r, &f.path)) {
         context.check()?;
@@ -905,7 +989,7 @@ pub fn scan(w: &Workspace, context: &TaskContext) -> Result<StorageInventory> {
         }
     }
     r.diagnostics.extend(changed);
-    let metadata_fingerprint = crate::signature(&r.metadata)?;
+    let metadata_fingerprint = format!("storage-v2:{}", crate::signature(&r.metadata)?);
     let mut resources: Vec<_> = r.resources.into_values().collect();
     for item in released {
         if resources.iter().any(|r| r.id == item.resource.id) {
@@ -947,13 +1031,18 @@ pub fn scan(w: &Workspace, context: &TaskContext) -> Result<StorageInventory> {
         }
     }
     let files: Vec<_> = r.files.into_values().collect();
-    let reclaimable = if r.diagnostics.is_empty() {
+    let reclaimable = if verify && r.diagnostics.is_empty() {
         super::dependencies::release_usage(&files, &eligible).allocated_bytes
     } else {
         0
     };
     Ok(StorageInventory {
-        schema_version: 1,
+        schema_version: 2,
+        scan_id: context.id,
+        level,
+        dependencies_checked: verify,
+        stale: false,
+        directories,
         scanned_at: crate::now(),
         workspace: w.root().to_owned(),
         complete: r.diagnostics.is_empty(),
@@ -961,7 +1050,7 @@ pub fn scan(w: &Workspace, context: &TaskContext) -> Result<StorageInventory> {
         available_bytes: filesystem::available_bytes(w.root()).ok(),
         total,
         categories,
-        reclaimable_allocated_bytes_estimate: reclaimable,
+        reclaimable_allocated_bytes_estimate: verify.then_some(reclaimable),
         resources,
         references: r.references,
         external_references: r.external.into_iter().collect(),
@@ -969,10 +1058,23 @@ pub fn scan(w: &Workspace, context: &TaskContext) -> Result<StorageInventory> {
         metadata_fingerprint,
     })
 }
-fn volatile(r: &Registry<'_>, path: &Path) -> bool {
+pub(crate) fn volatile(r: &Registry<'_>, path: &Path) -> bool {
     path.starts_with(".jfquant/storage")
+        || path.starts_with(&r.active_root)
         || path == Path::new(".jfquant/app.lock")
-        || r.runs
-            .iter()
-            .any(|(root, run)| management_run(run) && path.starts_with(root))
+        || path
+            .ancestors()
+            .any(|root| r.runs.get(root).is_some_and(management_run))
+}
+
+fn phase(
+    context: &TaskContext,
+    reporter: Option<&super::progress::Reporter>,
+    phase: &str,
+) -> Result<()> {
+    context.report(phase)?;
+    if let Some(reporter) = reporter {
+        reporter.phase(phase);
+    }
+    Ok(())
 }

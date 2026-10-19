@@ -186,6 +186,9 @@ pub fn apply(w: &Workspace, id: Uuid, context: &TaskContext) -> Result<CleanupRe
         w,
         &PathBuf::from(format!(".jfquant/storage/plans/{id}.json")),
     )?)?;
+    if !plan.metadata_fingerprint.starts_with("storage-v2:") {
+        return Err("storage_plan_stale: 存储扫描规则已更新，请重新预览".into());
+    }
     if plan.schema_version != 1
         || plan.id != id
         || plan.workspace != w.root()

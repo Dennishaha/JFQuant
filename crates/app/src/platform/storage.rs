@@ -3,17 +3,30 @@ use super::*;
 use analytics_workflow::{
     service::{Client, Rpc},
     storage_management::{
-        CleanupPlan, CleanupResult, ResourceCategory, StorageInventory, StorageRequest,
+        CleanupPlan, CleanupResult, ResourceCategory, ScanLevel, ScanSnapshot, StorageInventory,
+        StorageRequest, default_threads,
     },
 };
 use std::{
     collections::BTreeSet,
     sync::mpsc::{Receiver, TryRecvError, channel},
 };
-type SnapshotReply = Receiver<Result<(StorageInventory, Vec<CleanupResult>), String>>;
+type SnapshotReply = Receiver<
+    Result<
+        (
+            Option<StorageInventory>,
+            Vec<CleanupResult>,
+            Option<ScanSnapshot>,
+        ),
+        String,
+    >,
+>;
 #[derive(Default)]
 pub(crate) struct StorageTools {
     root: Option<PathBuf>,
+    snapshot: Option<ScanSnapshot>,
+    last_read: Option<std::time::Instant>,
+    initial_scan: bool,
     inventory: Option<StorageInventory>,
     history: Vec<CleanupResult>,
     read: Option<(PathBuf, SnapshotReply)>,
@@ -40,7 +53,14 @@ impl StorageTools {
             if let Ok(snapshot) = serde_json::from_value::<StorageInventory>(value.clone())
                 && snapshot.workspace == root
             {
+                if self.snapshot.as_ref().is_some_and(|s| {
+                    s.scan_id != snapshot.scan_id && s.started_at > snapshot.scanned_at
+                }) {
+                    return;
+                }
                 self.root = Some(root.to_owned());
+                self.initial_scan = true;
+                self.selected.clear();
                 self.inventory = Some(snapshot);
                 self.stale = false;
                 self.plan = None;
@@ -79,22 +99,33 @@ impl StorageTools {
             let result = (|| {
                 let client = Client::connect(&path).map_err(|e| e.to_string())?;
                 client.ensure(None).map_err(|e| e.to_string())?;
-                let snapshot = serde_json::from_value(
+                let progress = serde_json::from_value(
                     client
-                        .call(Rpc::StorageInventory)
+                        .call(Rpc::StorageSnapshot)
                         .map_err(|e| e.to_string())?,
                 )
                 .map_err(|e| e.to_string())?;
+                let snapshot = match client.call(Rpc::StorageInventory) {
+                    Ok(value) => Some(serde_json::from_value(value).map_err(|e| e.to_string())?),
+                    Err(e)
+                        if e.message.contains("No such file")
+                            || e.message.contains("storage_inventory_format") =>
+                    {
+                        None
+                    }
+                    Err(e) => return Err(e.to_string()),
+                };
                 let history = serde_json::from_value(
                     client
                         .call(Rpc::StorageHistory)
                         .map_err(|e| e.to_string())?,
                 )
                 .map_err(|e| e.to_string())?;
-                Ok((snapshot, history))
+                Ok((snapshot, history, progress))
             })();
             let _ = tx.send(result);
         });
+        self.last_read = Some(std::time::Instant::now());
         self.read = Some((root, rx));
     }
     fn poll(&mut self, root: &Path, ctx: &egui::Context) {
@@ -105,12 +136,37 @@ impl StorageTools {
             Ok(result) => {
                 if key == root {
                     match result {
-                        Ok((snapshot, history)) if snapshot.workspace == root => {
-                            self.inventory = Some(snapshot);
+                        Ok((snapshot, history, progress)) => {
+                            if let Some(snapshot) = snapshot
+                                && snapshot.workspace == root
+                                && self
+                                    .inventory
+                                    .as_ref()
+                                    .is_none_or(|old| snapshot.scanned_at >= old.scanned_at)
+                            {
+                                if self
+                                    .inventory
+                                    .as_ref()
+                                    .is_some_and(|old| old.scan_id != snapshot.scan_id)
+                                {
+                                    self.selected.clear();
+                                    self.plan = None;
+                                    self.confirmed = false;
+                                }
+                                self.inventory = Some(snapshot);
+                            }
+                            if let Some(progress) = progress
+                                && progress.workspace == root
+                                && self
+                                    .snapshot
+                                    .as_ref()
+                                    .is_none_or(|old| progress.updated_at >= old.updated_at)
+                            {
+                                self.snapshot = Some(progress);
+                            }
                             self.history = history;
                             self.error = None;
                         }
-                        Ok(_) => {}
                         Err(e) => self.error = Some(e),
                     }
                 }
@@ -165,14 +221,44 @@ pub fn storage_panel(
         tools.refresh = false;
         tools.request_read(root.clone());
     }
+    if tools.read.is_none()
+        && tools
+            .last_read
+            .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(1))
+    {
+        tools.request_read(root.clone());
+    }
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(250));
     let mut request = None;
+    if !tools.initial_scan && enabled && tools.last_read.is_some() && tools.read.is_none() {
+        tools.initial_scan = true;
+        request = Some(StorageRequest::Scan {
+            level: ScanLevel::Overview,
+            threads: default_threads(),
+        });
+    }
     ui.horizontal(|ui| {
         if ui
-            .add_enabled(enabled, egui::Button::new("扫描工作区空间"))
+            .add_enabled(enabled, egui::Button::new("刷新占用"))
             .clicked()
         {
-            request = Some(StorageRequest::Scan);
+            request = Some(StorageRequest::Scan {
+                level: ScanLevel::Overview,
+                threads: default_threads(),
+            });
+            tools.initial_scan = true;
             tools.error = None;
+        }
+        if ui
+            .add_enabled(enabled, egui::Button::new("识别资源"))
+            .clicked()
+        {
+            request = Some(StorageRequest::Scan {
+                level: ScanLevel::Resources,
+                threads: default_threads(),
+            });
+            tools.initial_scan = true;
         }
         if ui
             .add_enabled(
@@ -194,8 +280,38 @@ pub fn storage_panel(
     if let Some(error) = &tools.error {
         ui.colored_label(crate::theme::semantic(ui.ctx()).error, error);
     }
+    if let Some(snapshot) = &tools.snapshot {
+        ui.label(format!(
+            "{} · {} 个文件 · {} 个目录完成 · {:.1} 秒{}",
+            snapshot.phase,
+            snapshot.progress.total.files,
+            snapshot.progress.completed_directories,
+            snapshot.elapsed_ms as f64 / 1000.0,
+            if snapshot.finished {
+                ""
+            } else {
+                " · 统计中"
+            }
+        ));
+        ui.label(format!(
+            "本次已发现 {}（扫描结束前不是完整总量）",
+            bytes(snapshot.progress.total.allocated_bytes)
+        ));
+        ui.collapsing("本次目录占用", |ui| {
+            for (path, usage) in &snapshot.progress.directories {
+                ui.label(format!(
+                    "{} · {}",
+                    path.display(),
+                    bytes(usage.allocated_bytes)
+                ));
+            }
+        });
+        for diagnostic in &snapshot.diagnostics {
+            ui.label(diagnostic);
+        }
+    }
     if let Some(inventory) = &tools.inventory {
-        overview(ui, inventory, tools.stale);
+        overview(ui, inventory, tools.stale || inventory.stale);
         filters(ui, tools);
         let changed = resource_rows(ui, tools, enabled);
         let inventory = tools.inventory.as_ref().unwrap();
@@ -205,7 +321,7 @@ pub fn storage_panel(
         }
         if ui
             .add_enabled(
-                enabled && !tools.selected.is_empty() && inventory.complete,
+                enabled && !tools.selected.is_empty() && inventory.complete && !inventory.stale,
                 egui::Button::new("预览所选资源清理"),
             )
             .clicked()
@@ -369,8 +485,15 @@ fn overview(ui: &mut egui::Ui, inventory: &StorageInventory, stale: bool) {
                 .unwrap_or_else(|| "未知".into())
         ));
         ui.label(format!(
-            "可清理估计 {}",
-            bytes(inventory.reclaimable_allocated_bytes_estimate)
+            "可释放空间：{}",
+            if inventory.dependencies_checked {
+                inventory
+                    .reclaimable_allocated_bytes_estimate
+                    .map(bytes)
+                    .unwrap_or_else(|| "预览后评估".into())
+            } else {
+                "预览后评估".into()
+            }
         ));
     });
     ui.label(format!(
@@ -408,6 +531,16 @@ fn overview(ui: &mut egui::Ui, inventory: &StorageInventory, stale: bool) {
                 ui.end_row();
             }
         });
+    for (path, usage) in &inventory.directories {
+        ui.label(format!(
+            "{} · {}",
+            path.display(),
+            bytes(usage.allocated_bytes)
+        ));
+    }
+    if inventory.level == ScanLevel::Overview {
+        ui.label("点击“识别资源”后选择资源并预览清理。");
+    }
     ui.separator();
 }
 fn cleanup_preview(
@@ -588,6 +721,44 @@ mod tests {
         tools.accept(w.root(), &value);
         assert!(tools.plan.is_none());
         assert!(!tools.confirmed);
+    }
+    #[test]
+    fn storage_late_scan_in_same_workspace_cannot_replace_newer_scan() {
+        let temp = tempfile::tempdir().unwrap();
+        let w = analytics_workflow::Workspace::open(temp.path()).unwrap();
+        let mut old =
+            analytics_workflow::storage_management::scan(&w, &Default::default()).unwrap();
+        old.scanned_at = "2026-01-01T00:00:00Z".into();
+        let mut newer = old.clone();
+        newer.scan_id = uuid::Uuid::new_v4();
+        newer.scanned_at = "2026-01-02T00:00:00Z".into();
+        let live = ScanSnapshot {
+            schema_version: 1,
+            workspace: w.root().to_owned(),
+            scan_id: newer.scan_id,
+            level: ScanLevel::Overview,
+            phase: "扫描中".into(),
+            started_at: newer.scanned_at.clone(),
+            updated_at: newer.scanned_at.clone(),
+            elapsed_ms: 0,
+            finished: false,
+            complete: false,
+            diagnostics: vec![],
+            progress: Default::default(),
+        };
+        let mut tools = StorageTools {
+            root: Some(w.root().to_owned()),
+            inventory: Some(newer.clone()),
+            snapshot: Some(live),
+            ..Default::default()
+        };
+        tools.accept(w.root(), &serde_json::to_value(&old).unwrap());
+        assert_eq!(tools.inventory.as_ref().unwrap().scan_id, newer.scan_id);
+        let (tx, rx) = channel();
+        tx.send(Ok((Some(old), vec![], None))).unwrap();
+        tools.read = Some((w.root().to_owned(), rx));
+        tools.poll(w.root(), &egui::Context::default());
+        assert_eq!(tools.inventory.as_ref().unwrap().scan_id, newer.scan_id);
     }
     #[test]
     fn storage_snapshots_from_old_workspace_do_not_replace_new_selection() {

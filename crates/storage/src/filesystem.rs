@@ -31,7 +31,11 @@ impl FileStamp {
         if !m.is_file() {
             return Err(io::Error::other("expected regular file"));
         }
-        Ok(Self {
+        Ok(Self::from_metadata(&m))
+    }
+    /// Construct a stamp from metadata already obtained during traversal.
+    pub fn from_metadata(m: &fs::Metadata) -> Self {
+        Self {
             device: m.dev(),
             inode: m.ino(),
             bytes: m.len(),
@@ -39,7 +43,7 @@ impl FileStamp {
             links: m.nlink(),
             modified: (m.mtime(), m.mtime_nsec()),
             changed: (m.ctime(), m.ctime_nsec()),
-        })
+        }
     }
 }
 /// A physical directory entry, relative to the inventory root.
@@ -62,63 +66,11 @@ pub struct Inventory {
 }
 /// Walk one filesystem. The callback supports cancellation and incremental progress.
 pub fn inventory(root: &Path, mut check: impl FnMut() -> io::Result<()>) -> io::Result<Inventory> {
-    let device = fs::metadata(root)?.dev();
-    let mut out = Inventory::default();
-    let mut pending = vec![root.to_owned()];
-    while let Some(dir) = pending.pop() {
-        check()?;
-        let entries = match fs::read_dir(&dir) {
-            Ok(v) => v,
-            Err(e) => {
-                out.errors.push(format!("{}: {e}", dir.display()));
-                continue;
-            }
-        };
-        for entry in entries {
-            check()?;
-            let entry = match entry {
-                Ok(e) => e,
-                Err(e) => {
-                    out.errors.push(e.to_string());
-                    continue;
-                }
-            };
-            let path = entry.path();
-            let relative = path
-                .strip_prefix(root)
-                .map_err(io::Error::other)?
-                .to_owned();
-            let m = match fs::symlink_metadata(&path) {
-                Ok(m) => m,
-                Err(e) => {
-                    out.errors.push(format!("{}: {e}", relative.display()));
-                    continue;
-                }
-            };
-            if m.file_type().is_symlink() {
-                out.symlinks.push(relative);
-            } else if m.dev() != device {
-                out.errors.push(format!(
-                    "{}: nested filesystem is not managed",
-                    relative.display()
-                ));
-            } else if m.is_dir() {
-                pending.push(path);
-            } else if m.is_file() {
-                match FileStamp::read(&path) {
-                    Ok(stamp) => out.files.push(FileEntry {
-                        path: relative,
-                        stamp,
-                    }),
-                    Err(e) => out.errors.push(format!("{}: {e}", relative.display())),
-                }
-            }
-        }
-    }
-    out.files.sort_by(|a, b| a.path.cmp(&b.path));
-    out.symlinks.sort();
-    Ok(out)
+    parallel::walk(root, 1, false, |_, _| check()).map(|v| v.inventory)
 }
+mod parallel;
+pub use parallel::{DirectoryUsage, WalkProgress, WalkResult, walk};
+
 /// Available bytes for an unprivileged caller on the containing filesystem.
 pub fn available_bytes(root: &Path) -> io::Result<u64> {
     let s = rustix::fs::statvfs(root)?;

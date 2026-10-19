@@ -5,6 +5,7 @@ mod dependencies;
 mod history;
 mod inventory;
 mod members;
+mod progress;
 mod types;
 
 use crate::{Result, RunRecord, WorkflowOutcome, Workspace, atomic_json};
@@ -45,13 +46,43 @@ pub(crate) fn owned_path(w: &Workspace, path: &Path) -> Result<PathBuf> {
     Ok(current)
 }
 pub fn latest(w: &Workspace) -> Result<StorageInventory> {
-    let inventory: StorageInventory = read(&owned_path(
+    let value: serde_json::Value = read(&owned_path(
         w,
         Path::new(".jfquant/storage/inventory.json"),
     )?)?;
-    if inventory.schema_version != 1 || inventory.workspace != w.root() {
+    if value["schema_version"] != 2 {
         return Err("storage_inventory_format_or_workspace_mismatch: 请重新扫描".into());
     }
+    let inventory: StorageInventory = serde_json::from_value(value)?;
+    if inventory.workspace != w.root() {
+        return Err("storage_inventory_format_or_workspace_mismatch: 请重新扫描".into());
+    }
+    Ok(inventory)
+}
+/// Lightweight in-progress or last scan snapshot; absence is a normal empty state.
+pub fn snapshot(w: &Workspace) -> Result<Option<ScanSnapshot>> {
+    let path = owned_path(w, Path::new(".jfquant/storage/snapshot.json"))?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let snapshot: ScanSnapshot = read(&path)?;
+    if snapshot.schema_version != 1 || snapshot.workspace != w.root() {
+        return Err("storage_snapshot_format_or_workspace_mismatch: 请重新扫描".into());
+    }
+    Ok(Some(snapshot))
+}
+fn save_inventory(w: &Workspace, mut inventory: StorageInventory) -> Result<StorageInventory> {
+    if !inventory.files.is_empty() {
+        atomic_json(
+            &owned_path(w, Path::new(".jfquant/storage/files.json"))?,
+            &inventory.files,
+        )?;
+    }
+    inventory.files.clear();
+    atomic_json(
+        &owned_path(w, Path::new(".jfquant/storage/inventory.json"))?,
+        &inventory,
+    )?;
     Ok(inventory)
 }
 pub fn cleanup_history(w: &Workspace) -> Result<Vec<CleanupResult>> {
@@ -79,13 +110,17 @@ pub fn execute(
     context: &TaskContext,
 ) -> Result<WorkflowOutcome> {
     let details = match request {
-        StorageRequest::Scan => {
-            let mut inventory = scan(w, context)?;
-            atomic_json(
-                &owned_path(w, Path::new(".jfquant/storage/inventory.json"))?,
-                &inventory,
-            )?;
-            inventory.files.clear();
+        StorageRequest::Scan { level, threads } => {
+            if !(1..=8).contains(threads) {
+                return Err("storage_invalid_threads: expected 1..8".into());
+            }
+            let reporter = progress::Reporter::new(w, context, *level)?;
+            let inventory =
+                inventory::scan_with(w, context, *level, *threads, false, Some(&reporter))?;
+            context.check()?;
+            reporter.phase("保存扫描摘要");
+            let inventory = save_inventory(w, inventory)?;
+            reporter.finish(&inventory)?;
             serde_json::to_value(inventory)?
         }
         StorageRequest::Plan { resources } => {
@@ -101,8 +136,10 @@ pub fn execute(
         }
         StorageRequest::Apply { plan } => {
             let result = apply(w, *plan, context)?;
-            if result.committed {
-                let inventory = scan(w, context)?;
+            if result.committed
+                && let Ok(mut inventory) = latest(w)
+            {
+                inventory.stale = true;
                 atomic_json(
                     &owned_path(w, Path::new(".jfquant/storage/inventory.json"))?,
                     &inventory,
@@ -120,7 +157,16 @@ pub fn execute(
     })
 }
 pub fn plan(w: &Workspace, resources: &[String], context: &TaskContext) -> Result<CleanupPlan> {
-    let inventory = scan(w, context)?;
+    let reporter = progress::Reporter::new(w, context, ScanLevel::Resources)?;
+    let inventory = inventory::scan_with(
+        w,
+        context,
+        ScanLevel::Resources,
+        default_threads(),
+        true,
+        Some(&reporter),
+    )?;
+    reporter.finish(&inventory)?;
     dependencies::build_plan(w, &inventory, resources, Uuid::new_v4())
 }
 

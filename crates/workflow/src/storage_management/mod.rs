@@ -71,6 +71,28 @@ pub fn snapshot(w: &Workspace) -> Result<Option<ScanSnapshot>> {
     }
     Ok(Some(snapshot))
 }
+/// Called under the startup lease after interrupted task records have been recovered.
+/// Progress is a rebuildable cache; an invalid cache remains an explicit read error,
+/// and must not prevent recovery of authoritative cleanup transactions.
+pub(crate) fn recover_snapshot(w: &Workspace) -> Result<()> {
+    let Ok(Some(mut snapshot)) = snapshot(w) else {
+        return Ok(());
+    };
+    if !snapshot.finished {
+        snapshot.finished = true;
+        snapshot.complete = false;
+        snapshot.phase = "扫描中断，请重新扫描".into();
+        snapshot.updated_at = crate::now();
+        snapshot
+            .diagnostics
+            .push("服务在扫描完成前退出，进度仅为部分统计".into());
+        atomic_json(
+            &owned_path(w, Path::new(".jfquant/storage/snapshot.json"))?,
+            &snapshot,
+        )?;
+    }
+    Ok(())
+}
 fn save_inventory(w: &Workspace, mut inventory: StorageInventory) -> Result<StorageInventory> {
     if !inventory.files.is_empty() {
         atomic_json(

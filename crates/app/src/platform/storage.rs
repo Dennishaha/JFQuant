@@ -144,11 +144,10 @@ impl StorageTools {
                                     .as_ref()
                                     .is_none_or(|old| snapshot.scanned_at >= old.scanned_at)
                             {
-                                if self
-                                    .inventory
-                                    .as_ref()
-                                    .is_some_and(|old| old.scan_id != snapshot.scan_id)
-                                {
+                                if self.inventory.as_ref().is_some_and(|old| {
+                                    old.scan_id != snapshot.scan_id
+                                        || (!old.stale && snapshot.stale)
+                                }) {
                                     self.selected.clear();
                                     self.plan = None;
                                     self.confirmed = false;
@@ -759,6 +758,44 @@ mod tests {
         tools.read = Some((w.root().to_owned(), rx));
         tools.poll(w.root(), &egui::Context::default());
         assert_eq!(tools.inventory.as_ref().unwrap().scan_id, newer.scan_id);
+    }
+    #[test]
+    fn storage_cli_cleanup_invalidates_app_selection_and_confirmation() {
+        let temp = tempfile::tempdir().unwrap();
+        let w = analytics_workflow::Workspace::open(temp.path()).unwrap();
+        let original =
+            analytics_workflow::storage_management::scan(&w, &Default::default()).unwrap();
+        let plan = CleanupPlan {
+            schema_version: 1,
+            id: uuid::Uuid::new_v4(),
+            created_at: String::new(),
+            workspace: w.root().to_owned(),
+            resources: vec![],
+            files: vec![],
+            metadata_fingerprint: String::new(),
+            fingerprint: String::new(),
+            blockers: vec![],
+            impacts: vec![],
+            estimated_release: Default::default(),
+        };
+        let mut tools = StorageTools {
+            root: Some(w.root().to_owned()),
+            inventory: Some(original.clone()),
+            plan: Some(plan),
+            selected: BTreeSet::from(["previous-selection".into()]),
+            confirmed: true,
+            ..Default::default()
+        };
+        let mut stale = original;
+        stale.stale = true;
+        let (tx, rx) = channel();
+        tx.send(Ok((Some(stale), vec![], None))).unwrap();
+        tools.read = Some((w.root().to_owned(), rx));
+        tools.poll(w.root(), &egui::Context::default());
+        assert!(tools.inventory.as_ref().unwrap().stale);
+        assert!(tools.selected.is_empty());
+        assert!(tools.plan.is_none());
+        assert!(!tools.confirmed);
     }
     #[test]
     fn storage_snapshots_from_old_workspace_do_not_replace_new_selection() {

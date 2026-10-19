@@ -762,6 +762,7 @@ pub fn serve(root: &Path) -> Result<()> {
     crate::maintenance::require_complete(workspace.root()).map_err(failure)?;
     crate::storage_management::recover(&workspace).map_err(failure)?;
     workspace.recover().map_err(failure)?;
+    crate::storage_management::recover_snapshot(&workspace).map_err(failure)?;
     for directory in [".jfquant/staging", ".jfquant/runs"] {
         analytics_storage::collector::cleanup_private_runtimes(&workspace.resolve(directory))
             .map_err(failure)?;

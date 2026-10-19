@@ -13,12 +13,9 @@ use std::{
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DirectoryUsage {
     /// Logical bytes, deduplicated by inode.
-    /// Logical bytes, deduplicated by inode.
     pub logical_bytes: u64,
     /// Allocated bytes; shared extents remain an estimate.
-    /// Allocated bytes; shared extents remain an estimate.
     pub allocated_bytes: u64,
-    /// Number of file paths, including hard link aliases.
     /// Number of file paths, including hard link aliases.
     pub files: u64,
 }
@@ -26,24 +23,18 @@ pub struct DirectoryUsage {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WalkProgress {
     /// Entries in directories that have finished enumeration.
-    /// Entries in directories that have finished enumeration.
     pub entries: u64,
-    /// Number of fully enumerated directories.
     /// Number of fully enumerated directories.
     pub completed_directories: u64,
     /// Space discovered so far.
-    /// Space discovered so far.
     pub total: DirectoryUsage,
-    /// Disjoint directory buckets discovered so far.
     /// Disjoint directory buckets discovered so far.
     pub directories: BTreeMap<PathBuf, DirectoryUsage>,
 }
 /// Full detail or compact overview of one traversal.
 pub struct WalkResult {
     /// File detail, omitted in overview mode.
-    /// File detail, omitted in overview mode.
     pub inventory: Inventory,
-    /// Final counters and directory aggregates.
     /// Final counters and directory aggregates.
     pub progress: WalkProgress,
 }
@@ -75,6 +66,12 @@ impl Walker<'_> {
         if !before.is_dir() || before.file_type().is_symlink() {
             return self.send(Event::Error(format!(
                 "{}: directory changed during scan",
+                dir.display()
+            )));
+        }
+        if before.dev() != self.device {
+            return self.send(Event::Error(format!(
+                "{}: nested filesystem is not managed",
                 dir.display()
             )));
         }

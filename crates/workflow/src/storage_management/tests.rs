@@ -810,3 +810,47 @@ fn storage_resources_detect_files_changed_between_traversal_and_revalidation() {
             .any(|d| d.contains("changed during scan"))
     );
 }
+
+#[test]
+fn storage_startup_finishes_interrupted_progress_without_replacing_completed_inventory() {
+    let temp = tempfile::tempdir().unwrap();
+    let w = Workspace::open(temp.path()).unwrap();
+    let run = completed_run(&w);
+    execute(
+        &w,
+        &StorageRequest::Scan {
+            level: ScanLevel::Overview,
+            threads: 1,
+        },
+        &run,
+        &context(),
+    )
+    .unwrap();
+    let previous = fs::read(w.resolve(".jfquant/storage/inventory.json")).unwrap();
+    let mut progress = snapshot(&w).unwrap().unwrap();
+    progress.finished = false;
+    progress.complete = false;
+    progress.phase = "遍历文件元数据".into();
+    let path = w.resolve(".jfquant/storage/snapshot.json");
+    atomic_json(&path, &progress).unwrap();
+    recover_snapshot(&w).unwrap();
+    let recovered = snapshot(&w).unwrap().unwrap();
+    assert!(recovered.finished && !recovered.complete);
+    assert_eq!(recovered.scan_id, progress.scan_id);
+    assert_eq!(recovered.progress.total, progress.progress.total);
+    assert!(!recovered.diagnostics.is_empty());
+    assert_eq!(
+        fs::read(w.resolve(".jfquant/storage/inventory.json")).unwrap(),
+        previous
+    );
+    let once = fs::read(&path).unwrap();
+    recover_snapshot(&w).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), once);
+    file(
+        &w,
+        ".jfquant/storage/snapshot.json",
+        "invalid progress cache",
+    );
+    assert!(recover_snapshot(&w).is_ok());
+    assert!(snapshot(&w).is_err());
+}

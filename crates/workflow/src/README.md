@@ -3,7 +3,7 @@
 `three_factor_build` also freezes empty-facts templates, market and collector identities for
 CollectThreeFactorInputs. It acquires capital/equity on the worker, publishes a portable native
 evidence package, and replays normalization before BuildThreeFactors publishes a new market.
-Service protocol43. [Input format and acceptance](../../storage/src/three_factor/acquire/README.md).
+Service protocol44. [Input format and acceptance](../../storage/src/three_factor/acquire/README.md).
 
 `Workspace::publish_bigquant_market_factors` synchronously leases the workspace, replays the
 immutable BigQuant artifact, preserves the base source identity, copies a new market and registers
@@ -31,6 +31,7 @@ owning component; adding a task must not add business logic to `lib.rs`.
 | `refresh` | Planning, quote/action acquisition and immutable publication |
 | `views` | Read-only catalog/result/log/NAV snapshots for background clients |
 | `maintenance` | Offline preview, integrity inventory, recoverable archival |
+| `storage_management` | Resource accounting, dependency preview, permanent release, historical display and crash recovery |
 
 ```mermaid
 flowchart TD
@@ -98,7 +99,7 @@ Regression compares the optimized sets against the original observation-by-obser
 
 ## Allocation modules
 
-`allocation` defines strict shared config, independent weight/time verification and signed artifact manifests. `allocation_reference` maintains a separate fractional event-aware account. `allocation_migration` is the sole legacy reader for this upgrade, with offline preview/apply/resume/rollback. `allocation_comparison` checks frozen same-input completed methods. Multi-strategy orchestration lives beside research execution in `research/backtest/combined.rs`; App/CLI dispatch the same WorkflowRequest variants. Current protocol: service43 / worker4 / result22 / template12 / independent-backtest-plan4.
+`allocation` defines strict shared config, independent weight/time verification and signed artifact manifests. `allocation_reference` maintains a separate fractional event-aware account. `allocation_migration` is the sole legacy reader for this upgrade, with offline preview/apply/resume/rollback. `allocation_comparison` checks frozen same-input completed methods. Multi-strategy orchestration lives beside research execution in `research/backtest/combined.rs`; App/CLI dispatch the same WorkflowRequest variants. Current protocol: service44 / worker4 / result22 / template12 / independent-backtest-plan4.
 
 `research/backtest/allocation_readiness.rs`在训练前检查冻结日历上的预测、参考账、正式账户边界，输出最早就绪日期下界；`allocation.rs`独立验证下一开盘生效、求解/目标一致性和账户换手。迁移模块覆盖中断归档和中断回滚恢复，未知注册格式阻断服务启动。
 

@@ -39,6 +39,8 @@ pub mod refresh;
 /// Local service, task requests and transport client.
 #[cfg(unix)]
 pub mod service;
+/// Metadata-only resource accounting and recoverable permanent release.
+pub mod storage_management;
 pub mod views;
 
 /// Shared research orchestration and supervised Python runtime.

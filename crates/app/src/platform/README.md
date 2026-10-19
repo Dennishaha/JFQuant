@@ -1,5 +1,7 @@
 # Workspace panels
 
+`storage` owns capacity rendering, resource selection, plan confirmation and stale-safe background snapshot reads. It submits the shared Storage workflow and never walks/deletes files on the render thread. Completed cleanup invalidates pending run views; historical summaries and curves are displayed with independent availability flags. See [storage contracts](../../../workflow/src/storage_management/README.md).
+
 The three-factor area also submits CollectThreeFactorInputs with a default-off provider-date
 option and the same input file picker. Its returned artifact can feed BuildThreeFactors.
 Both tasks use the shared worker and prevent duplicate submissions; the temporal assumption

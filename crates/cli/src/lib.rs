@@ -1,5 +1,6 @@
 //! Clap frontend only: task execution and lifecycle live in analytics-workflow.
 mod indices;
+mod storage;
 use analytics_core::{ExportFormat, ExportRequest, PageRequest, SortKey};
 use analytics_workflow::{
     ResearchTemplate, WorkflowRequest, Workspace,
@@ -34,6 +35,9 @@ pub struct Cli {
 }
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Inventory and explicitly release local workspace resources.
+    #[command(subcommand)]
+    Storage(storage::StorageCommand),
     #[command(subcommand)]
     Workspace(WorkspaceCommand),
     /// List built-in index identities and configured source routes (offline).
@@ -1417,6 +1421,10 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
     client.ensure(None)?;
     let mut synchronous = false;
     let task = match cli.command {
+        Command::Storage(command) => match storage::prepare(&client, command)? {
+            storage::Action::Read(value) => return Ok(value),
+            storage::Action::Task(request) => workflow(WorkflowRequest::Storage { request }),
+        },
         Command::Indices {command}=>match indices::prepare(&client,command.expect("offline catalogue handled before connecting"))? {
             indices::Action::Read(value)=>return Ok(value),
             indices::Action::Task {request,synchronous:wait}=>{synchronous=wait;workflow(request)}

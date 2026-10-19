@@ -81,11 +81,11 @@ cargo clippy -p analytics-cli --all-targets -- -D warnings
 
 ## 动态股票池与 Python 采集接口
 
-当前模板schema 12、研究结果版本见 RESEARCH_SCHEMA_VERSION、服务协议43；GTJA191公式为v5。解析后配置包含 `pool_version`、`benchmark` 和 `pool_exit_policy`（磁盘保存于TargetProfile）；默认 `builtin:csi500` / `SH000905`，沪深300模板使用 `builtin:csi300` / `SH000300`。自选和集合组合引用不可变pool版本，冻结成员区间、人工日期调整及输入哈希；模型manifest和缓存签名包含这些研究输入。原schema结果明确拒绝，历史状态和日志仍可查看，不转换旧文件。
+当前模板schema 12、研究结果版本见 RESEARCH_SCHEMA_VERSION、服务协议44；GTJA191公式为v5。解析后配置包含 `pool_version`、`benchmark` 和 `pool_exit_policy`（磁盘保存于TargetProfile）；默认 `builtin:csi500` / `SH000905`，沪深300模板使用 `builtin:csi300` / `SH000300`。自选和集合组合引用不可变pool版本，冻结成员区间、人工日期调整及输入哈希；模型manifest和缓存签名包含这些研究输入。原schema结果明确拒绝，历史状态和日志仍可查看，不转换旧文件。
 
 ```mermaid
 flowchart LR
-  CLIENT["App / jfquant"] --> SERVICE["协议43公共服务"]
+  CLIENT["App / jfquant"] --> SERVICE["协议44公共服务"]
   SERVICE --> POOL["保存/预览不可变股票池"]
   SERVICE --> COLLECT["Rust HiThink REST / 监督内置Python备用采集"]
   COLLECT --> SNAPSHOT["验证后的Parquet版本与公司行动候选"]
@@ -254,3 +254,5 @@ jfquant --workspace W data revise-actions --actions ACTIONS --request VALIDATED_
 草稿报告格式3提供 event_template（null 表示未知，不能直接发布）、validation.problems 和 validation_receipt；传入 --task 绑定终结任务上下文。状态报告格式3的 current.checklist 按范围输出稳定要求ID、已有证据和下一步操作；未指定任务仍仅为证据清单。发布重新验证源哈希和原文，不接受单独的 ready=true。
 
 后继证券补采可通过修订4的 `structured_manifest` 引用已注册、完整核验的 HiThink 公司行动包；允许空 events/coverage_reviews 的纯附件修订。仅接受已有已发布事件指向、原包未查询过的后继证券，拒绝覆盖旧证券、无关证券、采集失败和未解决冲突；原文按哈希继承并在后续读取核验。可先用 `draft --request ... --task ...` 预览，再用原有 revise-actions 发布，不修改原任务和原模型。
+
+`storage` translates scan/list/plan/apply/history into the shared storage workflow and cached control reads. Apply requires a persisted plan UUID and an explicit permanent-deletion flag; no client-side file deletion. [Contracts and acceptance](../../workflow/src/storage_management/README.md).

@@ -157,6 +157,35 @@ pub fn runs_panel(
         reads::poll(&mut state.platform, ui.ctx());
         match &state.platform.reads.current {
             Some((_, Ok(view))) => {
+                if !view.availability.released_resources.is_empty()
+                    || !view.availability.original_inputs_available
+                {
+                    ui.colored_label(
+                        crate::theme::semantic(ui.ctx()).warning,
+                        "相关产物已释放或原始输入已缺失；当前展示保留的历史信息。",
+                    );
+                    for reason in &view.availability.reasons {
+                        ui.label(reason);
+                    }
+                    ui.label(format!(
+                        "模型复用：{} · 预测回放：{} · 完整核验：{}",
+                        if view.availability.models_reusable {
+                            "可用"
+                        } else {
+                            "不可用"
+                        },
+                        if view.availability.predictions_replayable {
+                            "可用"
+                        } else {
+                            "不可用"
+                        },
+                        if view.availability.full_verification_available {
+                            "可用"
+                        } else {
+                            "不可用"
+                        }
+                    ));
+                }
                 match &view.result {
                     Ok(v) => {
                         crate::quality_ui::reasons(ui, v);

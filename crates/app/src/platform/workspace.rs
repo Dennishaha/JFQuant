@@ -32,6 +32,7 @@ fn select_workspace(state: &mut AppState, path: &Path) -> analytics_workflow::Re
     #[cfg(test)]
     w.recover()?;
     state.platform.reads = Default::default();
+    state.platform.storage = Default::default();
     state.platform.reads.overview(w.root().to_owned());
     let datasets = Vec::new();
     let runs = Vec::new();

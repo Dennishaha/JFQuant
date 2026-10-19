@@ -69,6 +69,90 @@ impl Drop for Sandbox {
     }
 }
 #[test]
+fn storage_cli_scan_preview_and_permanent_release_share_service_results() {
+    let s = Sandbox::new();
+    let cache = s
+        .client
+        .root
+        .join(".jfquant/runs/.factor-shards-v1/fixture/2020");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(cache.join("features.parquet"), vec![7u8; 16384]).unwrap();
+    std::fs::write(
+        cache.join("manifest.json"),
+        json!({"schema_version":1,"features":["fixture"],"sha256":"fixture","signature":"fixture"})
+            .to_string(),
+    )
+    .unwrap();
+    std::fs::write(cache.join("user-note.txt"), b"keep").unwrap();
+    let query = s.json(&[
+        "query",
+        "run",
+        "--sql",
+        "SELECT * FROM (VALUES (1),(2)) AS v(n)",
+        "--page-size",
+        "1",
+    ]);
+    let query_id = query["submission"]["query_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let cursor = serde_json::from_value(
+        query["result"]["results"]["QueryPaged"]["page"]["next_cursor"].clone(),
+    )
+    .unwrap();
+    let scan = s.json(&["storage", "scan"])["task_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let scanned = s.client.wait(scan.parse().unwrap(), Some(20)).unwrap();
+    let inventory = s.json(&["storage", "list", "--category", "factor_cache"]);
+    assert_eq!(inventory["resources"].as_array().unwrap().len(), 1);
+    assert_eq!(inventory["total"], scanned["results"]["total"]);
+    let resource = inventory["resources"][0]["id"].as_str().unwrap();
+    let task = s.json(&["storage", "plan", "--resource", resource])["task_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let preview = s.client.wait(task.parse().unwrap(), Some(20)).unwrap()["results"].clone();
+    assert_eq!(preview["blockers"], json!([]), "{preview}");
+    let plan = preview["id"].as_str().unwrap();
+    assert!(
+        !s.cli(&["storage", "apply", "--plan", plan])
+            .status
+            .success()
+    );
+    let apply = s.json(&["storage", "apply", "--plan", plan, "--confirm-permanent"])["task_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let result = s.client.wait(apply.parse().unwrap(), Some(20)).unwrap();
+    assert_eq!(result["results"]["status"], "completed", "{result}");
+    let expired = s.submit(TaskRequest::QueryNext {
+        query_id,
+        after: cursor,
+    });
+    assert_eq!(
+        s.client.wait(expired, Some(10)).unwrap_err().code,
+        "query_expired"
+    );
+    assert!(!cache.join("features.parquet").exists());
+    assert!(cache.join("user-note.txt").is_file());
+    assert_eq!(s.json(&["storage", "history"])[0]["plan"], plan);
+    assert_eq!(
+        s.json(&["storage", "list", "--status", "released"])["resources"][0]["id"],
+        resource
+    );
+    let again = s.json(&["storage", "apply", "--plan", plan, "--confirm-permanent"])["task_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        s.client.wait(again.parse().unwrap(), Some(20)).unwrap()["results"]["deleted"],
+        result["results"]["deleted"]
+    );
+}
+#[test]
 fn three_factor_capture_cli_exposes_temporal_policy_and_validates_before_network() {
     let s = Sandbox::new();
     let help = s.cli(&["data", "three-factor-inputs", "--help"]);

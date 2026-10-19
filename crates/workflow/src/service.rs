@@ -26,7 +26,7 @@ use std::{
 };
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 43;
+pub const PROTOCOL_VERSION: u32 = 44;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TaskRequest {
@@ -202,6 +202,8 @@ fn result_error(e: Box<dyn std::error::Error>, task_id: Option<Uuid>) -> Service
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum Rpc {
+    StorageInventory,
+    StorageHistory,
     Operators {
         query: String,
     },
@@ -319,6 +321,7 @@ pub struct ActiveTask {
 struct Active {
     info: ActiveTask,
     cancel: Arc<AtomicBool>,
+    cleanup: bool,
 }
 struct State {
     active: Option<Active>,
@@ -329,6 +332,7 @@ struct State {
     stopped: bool,
 }
 struct Server {
+    control: Mutex<()>,
     workspace: Workspace,
     state: Mutex<State>,
     worker: Mutex<backend::WorkerHandle>,
@@ -342,7 +346,20 @@ impl Server {
             .find(|r| r.id == id)
             .ok_or_else(|| ServiceError::new("not_found", "unknown task"))
     }
-    fn handle(&self, rpc: Rpc) -> Result<Value> {
+    fn cleanup_control(&self, rpc: &Rpc) -> Result<Option<std::sync::MutexGuard<'_, ()>>> {
+        let safe_during_cleanup = matches!(
+            rpc,
+            Rpc::Status
+                | Rpc::Events { .. }
+                | Rpc::Jobs
+                | Rpc::Job { .. }
+                | Rpc::Logs { .. }
+                | Rpc::Cancel { .. }
+                | Rpc::StorageHistory
+        );
+        // Admission and control writes share a gate: a writer cannot slip between cleanup
+        // reservation and worker-side plan revalidation.
+        let control = (!safe_during_cleanup).then(|| self.control.lock().unwrap());
         {
             let mut state = self.state.lock().unwrap();
             if state.stopped {
@@ -352,8 +369,28 @@ impl Server {
                 ));
             }
             state.last_client = Instant::now();
+            if !safe_during_cleanup && state.active.as_ref().is_some_and(|a| a.cleanup) {
+                return Err(ServiceError::new(
+                    "storage_cleanup_busy",
+                    "工作区正在清理资源，请等待完成",
+                ));
+            }
         }
+        Ok(control)
+    }
+    fn handle(&self, rpc: Rpc) -> Result<Value> {
+        let _control = self.cleanup_control(&rpc)?;
         match rpc {
+            Rpc::StorageInventory => {
+                let mut inventory =
+                    crate::storage_management::latest(&self.workspace).map_err(failure)?;
+                inventory.files.clear();
+                serde_json::to_value(inventory).map_err(failure)
+            }
+            Rpc::StorageHistory => serde_json::to_value(
+                crate::storage_management::cleanup_history(&self.workspace).map_err(failure)?,
+            )
+            .map_err(failure),
             Rpc::Status => {
                 let s = self.state.lock().unwrap();
                 Ok(
@@ -419,7 +456,9 @@ impl Server {
                     _ => None,
                 };
                 let cancel = Arc::new(AtomicBool::new(false));
+                let cleanup = matches!(&request, TaskRequest::Workflow { request } if matches!(&**request, WorkflowRequest::Storage { request: crate::storage_management::StorageRequest::Apply { .. } }));
                 s.active = Some(Active {
+                    cleanup,
                     info: ActiveTask {
                         id,
                         kind: request.kind(),
@@ -478,6 +517,13 @@ impl Server {
                     .as_ref()
                     .filter(|a| a.info.id == id)
                     .ok_or_else(|| ServiceError::new("not_running", "task is not running"))?;
+                if active.cleanup && crate::storage_management::committed_task(&self.workspace, id)
+                {
+                    return Err(ServiceError::new(
+                        "storage_cleanup_committed",
+                        "清理已提交，正在完成永久删除，不能取消",
+                    ));
+                }
                 active.cancel.store(true, Ordering::Relaxed);
                 Ok(json!({"task_id":id,"cancel_requested":true}))
             }
@@ -695,6 +741,7 @@ pub fn serve(root: &Path) -> Result<()> {
         .lease()
         .map_err(|e| ServiceError::new("workspace_locked", e))?;
     crate::maintenance::require_complete(workspace.root()).map_err(failure)?;
+    crate::storage_management::recover(&workspace).map_err(failure)?;
     workspace.recover().map_err(failure)?;
     for directory in [".jfquant/staging", ".jfquant/runs"] {
         analytics_storage::collector::cleanup_private_runtimes(&workspace.resolve(directory))
@@ -710,6 +757,7 @@ pub fn serve(root: &Path) -> Result<()> {
     let (worker, events) =
         backend::spawn_in_workspace(Wake::default(), Some(workspace.root().into()));
     let server = Arc::new(Server {
+        control: Mutex::new(()),
         workspace,
         state: Mutex::new(State {
             active: None,
@@ -1270,12 +1318,64 @@ impl Client {
 mod lifecycle_tests {
     use super::*;
     #[test]
+    fn storage_cleanup_excludes_submission_import_and_configuration_writes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(tmp.path()).unwrap();
+        let (worker, _events) =
+            backend::spawn_in_workspace(Wake::default(), Some(tmp.path().into()));
+        let task = Uuid::new_v4();
+        let server = Server {
+            control: Mutex::new(()),
+            workspace,
+            worker: Mutex::new(worker),
+            state: Mutex::new(State {
+                active: Some(Active {
+                    info: ActiveTask {
+                        id: task,
+                        kind: TaskKind::Workflow,
+                        label: "cleanup".into(),
+                    },
+                    cancel: Arc::new(AtomicBool::new(false)),
+                    cleanup: true,
+                }),
+                events: vec![],
+                sequence: 0,
+                unavailable: None,
+                last_client: Instant::now(),
+                stopped: false,
+            }),
+        };
+        for rpc in [
+            Rpc::ImportRun {
+                path: "not-imported".into(),
+            },
+            Rpc::SaveTemplate {
+                template: Box::default(),
+            },
+            Rpc::ArchiveFactor {
+                id: "unchanged".into(),
+            },
+            Rpc::Submit {
+                id: Uuid::new_v4(),
+                request: Box::new(TaskRequest::Workflow {
+                    request: Box::new(WorkflowRequest::CreateDemo {}),
+                }),
+            },
+        ] {
+            assert_eq!(server.handle(rpc).unwrap_err().code, "storage_cleanup_busy");
+        }
+        assert!(server.handle(Rpc::Status).is_ok());
+        assert!(server.handle(Rpc::Cancel { id: task }).is_ok());
+        assert!(server.workspace.runs().unwrap().is_empty());
+    }
+    #[test]
     fn stopped_service_rejects_accepted_connections_without_creating_runs() {
         let tmp = tempfile::tempdir().unwrap();
         let workspace = Workspace::open(tmp.path()).unwrap();
         let (worker, _events) =
             backend::spawn_in_workspace(Wake::default(), Some(tmp.path().into()));
         let server = Server {
+            control: Mutex::new(()),
             workspace,
             worker: Mutex::new(worker),
             state: Mutex::new(State {

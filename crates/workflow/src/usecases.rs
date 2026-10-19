@@ -53,6 +53,12 @@ pub(crate) fn reconciliation_evidence_root(
     }
 }
 pub(crate) fn version_metadata(workspace: &Workspace, id: &str, kind: &str) -> Result<DataVersion> {
+    if crate::storage_management::dataset_released(workspace, id)? {
+        return Err(format!(
+            "storage_artifacts_released: 数据版本 {id} 已永久释放，来源身份仍保留"
+        )
+        .into());
+    }
     let data = workspace
         .datasets()?
         .into_iter()
@@ -160,6 +166,9 @@ fn execute_scoped(
 ) -> Result<WorkflowOutcome> {
     context.check()?;
     match request {
+        WorkflowRequest::Storage { request } => {
+            crate::storage_management::execute(w, request, run, context)
+        }
         WorkflowRequest::CollectAnnouncements { .. }
         | WorkflowRequest::CollectReference { .. }
         | WorkflowRequest::SourceStatus { .. }

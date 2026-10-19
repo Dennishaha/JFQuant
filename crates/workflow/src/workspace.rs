@@ -64,10 +64,14 @@ impl Workspace {
     /// Scan registered immutable versions.
     pub fn datasets(&self) -> Result<Vec<DataVersion>> {
         let mut out = Vec::new();
+        let released = crate::storage_management::released_dataset_ids(self)?;
         for entry in fs::read_dir(self.root.join(".jfquant/catalog"))? {
             let p = entry?.path();
             if p.extension().is_some_and(|e| e == "json") {
                 let item: DataVersion = serde_json::from_slice(&fs::read(p)?)?;
+                if released.contains(&item.id) {
+                    continue;
+                }
                 if item.path.is_absolute()
                     || item
                         .path

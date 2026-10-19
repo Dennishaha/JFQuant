@@ -255,5 +255,7 @@ pub mod adjustment;
 
 pub mod credentials;
 pub mod execution_data;
+/// Metadata-only workspace space accounting.
+pub mod filesystem;
 /// Immutable explicit-coefficient views over unmodified Qlib data.
 pub mod market_view;

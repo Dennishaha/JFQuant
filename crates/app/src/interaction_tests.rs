@@ -14,6 +14,59 @@ struct Harness {
     commands: Receiver<WorkerCommand>,
     events: std::sync::mpsc::Sender<WorkerEvent>,
 }
+#[test]
+fn storage_page_scan_button_submits_shared_task_without_selecting_original_data() {
+    let temp = tempfile::tempdir().unwrap();
+    let w = analytics_workflow::Workspace::open(temp.path()).unwrap();
+    let mut h = Harness::new(Panel::Storage);
+    h.app.state.platform.workspace = Some(w);
+    h.click("扫描工作区空间");
+    assert!(
+        matches!(h.commands.try_recv().unwrap(),WorkerCommand::ExecuteWorkflow{request,..} if matches!(*request,analytics_workflow::WorkflowRequest::Storage{request:analytics_workflow::storage_management::StorageRequest::Scan}))
+    );
+    assert!(h.app.state.busy());
+}
+#[test]
+fn storage_permanent_release_requires_preview_confirmation_in_real_widgets() {
+    use analytics_workflow::storage_management::{self as storage, ResourceCategory};
+    let temp = tempfile::tempdir().unwrap();
+    let w = analytics_workflow::Workspace::open(temp.path()).unwrap();
+    let cache = w.resolve(".jfquant/runs/.factor-shards-v1/widget/2020");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(cache.join("features.parquet"), b"fixture").unwrap();
+    std::fs::write(cache.join("manifest.json"),serde_json::json!({"schema_version":1,"features":["fixture"],"signature":"widget","sha256":"fixture"}).to_string()).unwrap();
+    let inventory = storage::scan(&w, &Default::default()).unwrap();
+    let id = inventory
+        .resources
+        .iter()
+        .find(|r| r.category == ResourceCategory::FactorCache)
+        .unwrap()
+        .id
+        .clone();
+    let plan = storage::plan(&w, &[id], &Default::default()).unwrap();
+    assert!(plan.blockers.is_empty());
+    let mut h = Harness::new(Panel::Storage);
+    h.app.state.platform.workspace = Some(w.clone());
+    h.app
+        .state
+        .platform
+        .storage
+        .accept(w.root(), &serde_json::to_value(inventory).unwrap());
+    h.click("选择可重建因子缓存");
+    h.app
+        .state
+        .platform
+        .storage
+        .accept(w.root(), &serde_json::to_value(&plan).unwrap());
+    h.click("永久释放所选资源");
+    assert!(h.commands.try_recv().is_err());
+    h.click("我确认永久删除上述内容，无法恢复；保留的任务摘要与曲线不受影响。");
+    h.click("永久释放所选资源");
+    assert!(
+        matches!(h.commands.try_recv().unwrap(),WorkerCommand::ExecuteWorkflow{request,..} if matches!(*request,analytics_workflow::WorkflowRequest::Storage{request:storage::StorageRequest::Apply{plan:id}} if id==plan.id))
+    );
+    assert!(cache.join("features.parquet").exists());
+}
 
 impl Harness {
     fn new(panel: Panel) -> Self {

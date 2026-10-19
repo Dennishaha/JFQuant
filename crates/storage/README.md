@@ -22,6 +22,10 @@ HiThink 为默认主源，由 Rust 直接调用 REST；通达信备用，维持�
 
 # analytics-storage
 
+## 工作区空间元数据
+
+`filesystem::{inventory, FileStamp, available_bytes}` 提供不跟随符号链接的元数据盘点、文件身份、逻辑与分配空间，以及磁盘可用容量。扫描保留权限和跨挂载点诊断，不把未读内容当作零占用；不读取行情内容、不执行删除。分类、依赖和清理事务由 [工作流存储管理](../workflow/src/storage_management/README.md) 负责。验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow storage_ --lib`。
+
 ## MSCI 官方收盘适配器
 
 `msci::{validate, calendar, collect, signature}` 是 Rust 原生固定来源接口。映射 `msci` 必须等于六位官方代码，仅支持显式 CNY 价格指数；不接受任意 URL、脚本或自动换源。响应代码、币种、STRD、日期和数值均核验，原始 JSON 与收据哈希进入快照。
@@ -262,7 +266,7 @@ CNY 价格指数。HiThink 接受确切供应商代码（或转换明确的 SH/S
 `DailyDataset::index_config` 从所选快照解析定义，不读取可编辑目录。
 验收：`cargo test -p analytics-storage runtime_index`；TDX fixture 见 `collectors/tests/test_tdx.py`。
 
-本次指数接入格式已收敛：AdjustmentRecord 仅接受格式4（`index_input` 必填，普通证券及内置目录指数显式为 null，自定义指数冻结完整合同）；SourceMap 仅接受格式2，指数无可下单证券身份；CollectionRequest 必须显式包含 `index_inputs`（可为空对象）。正常读取不升级旧版本、不猜测缺失字段。旧快照只作历史留存，显式离线转换后必须以新内容哈希重新登记，原始响应及采集器身份不得改写成当前版本。服务协议43、采集协议16拒绝旧检查点；格式更新不等于来源准入通过。
+本次指数接入格式已收敛：AdjustmentRecord 仅接受格式4（`index_input` 必填，普通证券及内置目录指数显式为 null，自定义指数冻结完整合同）；SourceMap 仅接受格式2，指数无可下单证券身份；CollectionRequest 必须显式包含 `index_inputs`（可为空对象）。正常读取不升级旧版本、不猜测缺失字段。旧快照只作历史留存，显式离线转换后必须以新内容哈希重新登记，原始响应及采集器身份不得改写成当前版本。服务协议44、采集协议16拒绝旧检查点；格式更新不等于来源准入通过。
 
 ## 历史成员原文核验
 

@@ -77,6 +77,7 @@ pub fn snapshot(w: &Workspace, job: &Job) -> Result<Value> {
     job.plan().validate()?;
     let mut sources = Vec::new();
     for id in &job.plan().sources {
+        crate::storage_management::require_available(w, *id, "predictions")?;
         let root = w.resolve(format!(".jfquant/runs/{id}"));
         let run: crate::RunRecord = serde_json::from_slice(&fs::read(root.join("run.json"))?)?;
         if run.id != *id

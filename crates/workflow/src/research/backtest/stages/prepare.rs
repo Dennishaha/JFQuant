@@ -25,6 +25,12 @@ pub(super) fn prepare(
             .collect();
     }
     let request = &selected_request;
+    if let Some(source) = &request.reuse_training {
+        crate::storage_management::require_path_available(source, "models")?;
+    }
+    if let Some(source) = &request.reuse_predictions {
+        crate::storage_management::require_path_available(source, "predictions")?;
+    }
     context.check()?;
     request.config.validate()?;
     request.quality_policy.validate()?;

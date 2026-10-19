@@ -64,6 +64,7 @@ pub fn render(
                 });
         }
         Panel::Runs => crate::platform::runs_panel(ui, state, worker, cancel_slot),
+        Panel::Storage => crate::platform::storage_panel(ui, state, worker, cancel_slot),
     }
     if state.worker_error.is_some() {
         *cancel_slot = None;

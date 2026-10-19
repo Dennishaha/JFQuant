@@ -540,6 +540,15 @@ impl Worker {
                 self.record_request = serde_json::to_value(&request).ok();
                 self.active_cancel = Some(cancel.clone());
                 self.run_task(task, TaskKind::Workflow, request.label(), |worker| {
+                    if matches!(
+                        &*request,
+                        crate::WorkflowRequest::Storage {
+                            request: crate::storage_management::StorageRequest::Apply { .. }
+                        }
+                    ) {
+                        worker.query_sessions.clear();
+                        worker.query = QuerySession::new(worker.root.clone());
+                    }
                     let root = worker.root.as_ref().ok_or("请先选择工作区")?;
                     let workspace = crate::Workspace::open(root).map_err(|e| e.to_string())?;
                     let mut record = worker.active_record.clone().ok_or("任务记录未创建")?;

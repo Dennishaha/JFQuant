@@ -6,6 +6,15 @@ use std::fs;
 
 /// Snapshot selected input versions when creating a run, rather than resolving them later.
 pub fn snapshot(workspace: &Workspace, request: &WorkflowRequest) -> Result<Value> {
+    match request {
+        WorkflowRequest::BacktestResearch { training, .. } => {
+            crate::storage_management::require_available(workspace, *training, "models")?
+        }
+        WorkflowRequest::BacktestPredictions { source, .. } => {
+            crate::storage_management::require_available(workspace, *source, "predictions")?
+        }
+        _ => {}
+    }
     if let WorkflowRequest::CompareAllocations { tasks } = request {
         return Ok(
             json!({"request":request,"comparison":crate::allocation_comparison::snapshot(workspace,tasks)?}),

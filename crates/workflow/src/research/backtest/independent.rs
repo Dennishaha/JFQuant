@@ -458,6 +458,7 @@ fn sign_catalogue(c: &ModelCatalogue) -> Result<String> {
 /// Load current fit-only catalogues (5) or signed pipeline descriptors (4).
 /// Both are current producer formats; descriptor adaptation never upgrades old versions.
 pub fn catalogue(source: &Path) -> Result<ModelCatalogue> {
+    crate::storage_management::require_path_available(source, "models")?;
     let v: Value = serde_json::from_slice(&fs::read(source.join("training.json"))?)?;
     let c: ModelCatalogue = if v["schema_version"] == 5 {
         if v["status"] != "trained" {

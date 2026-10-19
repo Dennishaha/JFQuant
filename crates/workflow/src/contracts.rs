@@ -301,6 +301,11 @@ pub struct RunRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkflowRequest {
+    /// Inventory, preview or permanently release explicitly selected workspace resources.
+    Storage {
+        /// Apply accepts only a previously persisted plan ID.
+        request: crate::storage_management::StorageRequest,
+    },
     /// Compare completed allocation methods against an equal-weight baseline.
     CompareAllocations {
         /// Distinct successful tasks with identical inputs.
@@ -557,6 +562,13 @@ impl WorkflowRequest {
     /// Display operation names without exposing backend details in the user flow.
     pub fn label(&self) -> String {
         match self {
+            Self::Storage { request } => match request {
+                crate::storage_management::StorageRequest::Scan => "扫描工作区空间".into(),
+                crate::storage_management::StorageRequest::Plan { .. } => "预览资源清理".into(),
+                crate::storage_management::StorageRequest::Apply { .. } => {
+                    "永久释放所选资源".into()
+                }
+            },
             Self::CompareAllocations { .. } => "比较组合优化方法".into(),
             Self::Combined { .. } => "多策略统一账户".into(),
             Self::CollectAnnouncements { .. } => "采集巨潮实施公告证据".into(),

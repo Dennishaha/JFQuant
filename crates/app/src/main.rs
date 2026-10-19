@@ -171,6 +171,7 @@ impl DesktopApp {
                     (Panel::Model, "建模"),
                     (Panel::Research, "研究流程"),
                     (Panel::Runs, "运行记录"),
+                    (Panel::Storage, "存储管理"),
                 ] {
                     let selected = self.state.panel == panel;
                     let text = if selected {

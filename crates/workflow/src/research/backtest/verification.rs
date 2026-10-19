@@ -60,6 +60,7 @@ fn performance(value: &Value, days: &[portfolio::DayResult]) -> Result<()> {
 /// This checks consistency, not complete event coverage or absence of sample bias.
 /// It never rewrites a task, changes its state, or starts a Python process.
 pub fn report(workspace: &Workspace, task_id: Uuid) -> Result<Value> {
+    crate::storage_management::require_available(workspace, task_id, "verification")?;
     let root = workspace.resolve(format!(".jfquant/runs/{task_id}"));
     let run: RunRecord = serde_json::from_value(read(&root, "run.json")?)?;
     if run.id != task_id

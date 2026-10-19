@@ -2,7 +2,7 @@
 
 HiThink 为默认主源，由 Rust 直接调用 REST；通达信备用，维持内置 Python `tdxaidata==1.2.2`；巨潮公告使用独立 `cninfo` 来源。旧来源依赖、配置、权限检查及历史兼容入口已移除；旧数据不迁移、不删除，重新配置来源并采集。
 
-公共来源为 `hithink|tdxaidata|cninfo`，复权选项为 `hithink-forward|tdx-forward|none`。服务协议43、采集协议16、来源策略2；HiThink 行情格式6，通达信格式5与 Qlib 读取保留。HiThink 训练选择供应商口径（`price_basis=provider`），前复权 OHLC、原始股数及人民币成交额、VWAP null；回测使用原价。训练缓存与 manifest 冻结口径、来源和证据哈希，特征顺序及公式版本保持。
+公共来源为 `hithink|tdxaidata|cninfo`，复权选项为 `hithink-forward|tdx-forward|none`。服务协议44、采集协议16、来源策略2；HiThink 行情格式6，通达信格式5与 Qlib 读取保留。HiThink 训练选择供应商口径（`price_basis=provider`），前复权 OHLC、原始股数及人民币成交额、VWAP null；回测使用原价。训练缓存与 manifest 冻结口径、来源和证据哈希，特征顺序及公式版本保持。
 
 接口、凭据、覆盖范围与复现命令见[采集组件](../../storage/collectors/README.md)。当前成分不能回填历史，下载成功不代表研究或账户资料完整。
 
@@ -70,11 +70,11 @@ cargo clippy -p analytics-desktop --all-targets -- -D warnings
 
 ## 动态股票池与 Python 采集接口
 
-当前模板schema 12、研究结果schema22、服务协议43；GTJA191公式为v5。解析后配置包含 `pool_version`、`benchmark` 和 `pool_exit_policy`（磁盘保存于TargetProfile）；默认 `builtin:csi500` / `SH000905`，沪深300模板使用 `builtin:csi300` / `SH000300`。自选和集合组合引用不可变pool版本，冻结成员区间、人工日期调整及输入哈希；模型manifest和缓存签名包含这些研究输入。原schema结果明确拒绝，历史状态和日志仍可查看，不转换旧文件。
+当前模板schema 12、研究结果schema22、服务协议44；GTJA191公式为v5。解析后配置包含 `pool_version`、`benchmark` 和 `pool_exit_policy`（磁盘保存于TargetProfile）；默认 `builtin:csi500` / `SH000905`，沪深300模板使用 `builtin:csi300` / `SH000300`。自选和集合组合引用不可变pool版本，冻结成员区间、人工日期调整及输入哈希；模型manifest和缓存签名包含这些研究输入。原schema结果明确拒绝，历史状态和日志仍可查看，不转换旧文件。
 
 ```mermaid
 flowchart LR
-  CLIENT["App / jfquant"] --> SERVICE["协议43公共服务"]
+  CLIENT["App / jfquant"] --> SERVICE["协议44公共服务"]
   SERVICE --> POOL["保存/预览不可变股票池"]
   SERVICE --> COLLECT["Rust HiThink REST / 监督内置Python备用采集"]
   COLLECT --> SNAPSHOT["验证后的Parquet版本与公司行动候选"]
@@ -184,3 +184,5 @@ EvaluateFactors后台任务，`state.rs`只接收当前活动任务的FactorsEva
 研究页“证据维护：公告留存、批次恢复与修订草稿”由 `platform/evidence.rs` 维护：选定 PDF 的公开 URL、证券、文档ID、披露日、标题和实施分类表单；原批次恢复与检查点重试；全局/单证券缺口；可编辑骨架及已有修订的核验迁移。全部发送 `WorkflowRequest::Evidence`，不在 GUI 采集、改哈希或解除准入。报告可将 manifest 或 draft_request 显式载入现有编辑器，再经原修订入口发布。交互验收覆盖共享状态与草稿请求。
 
 公司行动当前阻断、历史失败和覆盖审核入口见 [platform](platform/README.md)；客户端仅展示共享任务报告，不自行判断历史覆盖。
+
+The Storage navigation target renders shared workspace capacity reports, selection and permanent-deletion previews through `platform/storage`; the reducer invalidates stale asynchronous run views after task completion. [Storage panel responsibilities](platform/README.md).

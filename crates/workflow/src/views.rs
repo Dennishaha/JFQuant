@@ -23,6 +23,8 @@ pub struct WorkspaceView {
 /// Immutable display snapshot, loaded off the rendering thread.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RunView {
+    /// Independent capability state; released artifacts remain a display-only historical view.
+    pub availability: crate::storage_management::ResourceAvailability,
     /// Parsed result or the validation error displayed to the user.
     pub result: std::result::Result<Value, String>,
     /// Last 200 persisted progress records.
@@ -55,6 +57,8 @@ pub fn run(root: &Path, id: Uuid) -> Result<RunView> {
         .find(|r| r.id == id)
         .ok_or("run not found")?;
     let result = w.results(&record).map_err(|e| e.to_string());
+    let availability = crate::storage_management::availability(&w, id)?;
+    let historical = crate::storage_management::historical_view(&w, id)?;
     let dir = w.resolve(&record.output);
     let mut logs = VecDeque::new();
     if let Ok(file) = fs::File::open(dir.join("events.jsonl")) {
@@ -74,25 +78,28 @@ pub fn run(root: &Path, id: Uuid) -> Result<RunView> {
     } else {
         Some(dir)
     };
-    let nav = artifact_dir
-        .filter(|_| result.is_ok())
-        .and_then(|p| fs::read_to_string(p.join("nav.csv")).ok())
-        .map(|text| {
-            text.lines()
-                .skip(1)
-                .filter_map(|line| {
-                    let c: Vec<_> = line.split(',').collect();
-                    if c.len() != 3 {
-                        return None;
-                    }
-                    let a = c[1].parse::<f64>().ok()?;
-                    let b = c[2].parse::<f64>().ok()?;
-                    (a.is_finite() && b.is_finite()).then(|| (c[0].to_owned(), a, b))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let nav = historical.map(|(_, nav)| nav).unwrap_or_else(|| {
+        artifact_dir
+            .filter(|_| result.is_ok())
+            .and_then(|p| fs::read_to_string(p.join("nav.csv")).ok())
+            .map(|text| {
+                text.lines()
+                    .skip(1)
+                    .filter_map(|line| {
+                        let c: Vec<_> = line.split(',').collect();
+                        if c.len() != 3 {
+                            return None;
+                        }
+                        let a = c[1].parse::<f64>().ok()?;
+                        let b = c[2].parse::<f64>().ok()?;
+                        (a.is_finite() && b.is_finite()).then(|| (c[0].to_owned(), a, b))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
     Ok(RunView {
+        availability,
         result,
         logs: logs.into_iter().collect(),
         nav,

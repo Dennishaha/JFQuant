@@ -18,7 +18,10 @@ mod evidence;
 mod history;
 mod indices;
 mod reads;
+mod storage;
+pub use storage::storage_panel;
 pub struct PlatformState {
+    pub(crate) storage: storage::StorageTools,
     pub(crate) reads: reads::ReadState,
     pub workspace: Option<Workspace>,
     pub lease: Option<WorkspaceLease>,
@@ -94,6 +97,7 @@ impl std::fmt::Debug for PlatformState {
 impl Default for PlatformState {
     fn default() -> Self {
         Self {
+            storage: Default::default(),
             reads: Default::default(),
             workspace: None,
             lease: None,

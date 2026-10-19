@@ -31,6 +31,8 @@ pub enum Panel {
     Research,
     /// Persistent local task history.
     Runs,
+    /// Workspace capacity, resource selection and explicit permanent release.
+    Storage,
 }
 
 /// State of the dataset management panel.
@@ -629,6 +631,10 @@ pub fn apply_event(state: &mut AppState, event: &WorkerEvent) {
             state.platform.datasets = datasets.clone();
             state.platform.runs = runs.clone();
             state.platform.details = outcome.details.clone();
+            if let Some(w) = &state.platform.workspace {
+                state.platform.storage.accept(w.root(), &outcome.details);
+            }
+            state.platform.reads = Default::default();
             if let Some(versions) = outcome.details.get("index_versions") {
                 match serde_json::from_value(versions.clone()) {
                     Ok(v) => state.platform.index_versions = v,

@@ -17,6 +17,14 @@ impl Workspace {
     }
     /// Load saved artifacts, rejecting unsupported research result formats.
     pub fn results(&self, run: &RunRecord) -> Result<Value> {
+        if let Some((result, _)) = crate::storage_management::historical_view(self, run.id)? {
+            return Ok(result);
+        }
+        if run.request["request"]["operation"] == "storage" {
+            let outcome: crate::WorkflowOutcome =
+                serde_json::from_slice(&fs::read(self.resolve(&run.output).join("outcome.json"))?)?;
+            return Ok(outcome.details);
+        }
         if run.read_only {
             crate::research::backtest::validate_result(&run.request["summary"])?;
             return Ok(run.request["summary"].clone());

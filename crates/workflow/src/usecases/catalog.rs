@@ -61,7 +61,17 @@ impl Workspace {
         } else {
             details
         };
-        let id = format!("{kind}-{}", &hash[7..23]);
+        let mut id = format!("{kind}-{}", &hash[7..23]);
+        if crate::storage_management::dataset_released(self, &id)? {
+            if let Some(existing) = self
+                .datasets()?
+                .into_iter()
+                .find(|d| d.kind == kind && d.signature == hash && d.path == relative)
+            {
+                return Ok(existing);
+            }
+            id = format!("{id}-{}", Uuid::new_v4());
+        }
         let data = DataVersion {
             id: id.clone(),
             kind: kind.into(),

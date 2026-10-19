@@ -1,8 +1,13 @@
-当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议43、采集协议16、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
+当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议44、采集协议16、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
 
 # analytics-desktop
 
-当前 App 与 CLI 使用同一服务协议43；研究模板12、worker4、结果22。
+## 本地存储管理
+
+侧栏“存储管理”提供后台空间扫描、分类合计、类型/日期/任务/归档/临时状态筛选、引用详情、清理预览、永久删除确认和失败重试。原始数据默认不勾选，“选择可重建因子缓存”仍需预览与确认。
+工作区切换及新任务响应会丢弃旧读取；清理后运行记录显示保留的摘要/曲线和已释放能力，不把历史展示标为产物完整。UI线程不遍历文件、不删除文件、不持有数据库/模型句柄。服务协议44；[后台事务与统计口径](../workflow/src/storage_management/README.md)。验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-desktop storage_`。
+
+当前 App 与 CLI 使用同一服务协议44；研究模板12、worker4、结果22。
 GTJA191 v5 默认190项，191项均可选择；Alpha030依赖所选行情的实际三因子覆盖，
 输入检查与正式研究沿用同一读取、缺失传播及来源签名。
 BigQuant 发布后登记的新行情可由现有数据选择器选用，完整性以产物报告为准。
@@ -70,7 +75,7 @@ DUCKDB_DOWNLOAD_LIB=1 cargo nextest run -p analytics-desktop
 当前结果对未模拟特殊事件显示“回测完成，含未模拟事件”，并保留未解决普通问题的阻断状态。
 核对规则、格式6与复现命令见storage/workflow组件README。验收包含公共任务、结果警告与旧格式隔离。
 
-原生刷新现在以3个证券工作线程获取行情和公司行动，沿用监督进程、检查点、取消及完整发布校验。后端`RefreshRequest`允许1—8线程及显式跨任务分片复用；公共`RefreshCoverage`只读RPC可读取进度、历史成员覆盖及候选可用池，报告不自动授权训练或改变股票池。CLI命令及完整验收见[工作流README](../workflow/README.md)。服务协议43。
+原生刷新现在以3个证券工作线程获取行情和公司行动，沿用监督进程、检查点、取消及完整发布校验。后端`RefreshRequest`允许1—8线程及显式跨任务分片复用；公共`RefreshCoverage`只读RPC可读取进度、历史成员覆盖及候选可用池，报告不自动授权训练或改变股票池。CLI命令及完整验收见[工作流README](../workflow/README.md)。服务协议44。
 
 “更新行动”按钮使用同一Rust动作分片流程，保持当前登记行情，重新获取事件；不读废弃动作版本作为补采输入。
 
@@ -87,7 +92,7 @@ Packaged CLI acceptance also invokes `research verify --task <UUID>` after the t
 
 因子页提供只读Alpha158/GTJA191组，以及复制、改名、编辑说明、筛选、保存、删除自定义组；
 “应用到研究配置”只替换因子选择，保留日期和股票池。修改内置组必须先复制。
-“因子有效性测试”独立发送服务协议43的EvaluateFactors任务，支持进度和取消；默认5日、5分层、
+“因子有效性测试”独立发送服务协议44的EvaluateFactors任务，支持进度和取消；默认5日、5分层、
 30个日内有效样本。报告展示覆盖率、配对率、有效天数、IC、RankIC、RankIC IR、正RankIC比例、
 高减低收益，展开查看每日统计与分层收益，可导出JSON及逐项加入自定义选择后保存。
 结果使用冻结参数，即使表单后来改变也不会改写报告；模型训练仍保留原入口。
@@ -121,7 +126,7 @@ Packaged CLI acceptance also invokes `research verify --task <UUID>` after the t
 
 A/B可重叠，横截面计算互相隔离；B不参与验证或早停。首日没有合法模型则拒绝回测。
 账户跨模型连续运行；报告显示曾见/未见标的及同一账户贡献，预测可独立重放。
-旧“年度研究/仅训练/已有模型回测”入口保持原配置语义。服务协议43，结果20仅读取当前格式。
+旧“年度研究/仅训练/已有模型回测”入口保持原配置语义。服务协议44，结果20仅读取当前格式。
 
 ```bash
 DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-desktop independent_training_and_backtest_editors
@@ -165,9 +170,9 @@ Independent backtest plans expose `evidence_only` and `research_transitions`. Th
 
 ## 跨证券证据维护
 
-现有证据区域支持合并已采集 manifest、任务补证清单、选择已采集文档、原文/单位引用与参与方关联维护、新增待填写的换股事件草稿，以及逐项校验结果。操作走相同 Evidence worker；GUI 不持有数据库句柄、不在渲染时读取文件或联网。选择的行动版本、任务或草稿变化时旧校验显示过期；发布仍通过共享服务重新核验。协议43需要 App、CLI 和服务一起更新。
+现有证据区域支持合并已采集 manifest、任务补证清单、选择已采集文档、原文/单位引用与参与方关联维护、新增待填写的换股事件草稿，以及逐项校验结果。操作走相同 Evidence worker；GUI 不持有数据库句柄、不在渲染时读取文件或联网。选择的行动版本、任务或草稿变化时旧校验显示过期；发布仍通过共享服务重新核验。协议44需要 App、CLI 和服务一起更新。
 
-证据维护面板支持公告停复牌区间及逐边界原文引用、仅导入原生停牌证据、行情修订JSON载入／编辑／预览／发布。行情预览显示原价与研究值、研究和执行可用性及逐项冲突，输入、所选市场或任务改变后显示过期。业务校验和发布均走工作流后台，不在UI线程使用数据库或模型句柄。服务协议43，生成数据不随源码提交。
+证据维护面板支持公告停复牌区间及逐边界原文引用、仅导入原生停牌证据、行情修订JSON载入／编辑／预览／发布。行情预览显示原价与研究值、研究和执行可用性及逐项冲突，输入、所选市场或任务改变后显示过期。业务校验和发布均走工作流后台，不在UI线程使用数据库或模型句柄。服务协议44，生成数据不随源码提交。
 
 差异化现金分红可在同一修订编辑器中人工审核：单份充分、已核验的正式文件即可，实际派息与除息参考分别维护字段引用及单位。预览和发布使用共享校验，只解除匹配证券、日期及原问题哈希的冲突；历史失败和其他问题继续显示，不要求多个来源一致。
 
@@ -207,7 +212,7 @@ build/distribution commands remain the packaging commands above.
 
 ### 历史成员图片与修订维护
 
-指数维护页使用共享历史服务协议43：可编辑名单/事件修订号、替代关系、更正引用、已核验发布时间、逐证券名称与代码关联，以及该次审议有变化/无变化/未核实。图片由worker核验并返回缩略图，拖选区域按原图像素记录；录入文字后显式填写审核人并确认生成绑定收据。引用编辑器的图片核对ID区分人工录入与原文，修改后发布重新核验。
+指数维护页使用共享历史服务协议44：可编辑名单/事件修订号、替代关系、更正引用、已核验发布时间、逐证券名称与代码关联，以及该次审议有变化/无变化/未核实。图片由worker核验并返回缩略图，拖选区域按原图像素记录；录入文字后显式填写审核人并确认生成绑定收据。引用编辑器的图片核对ID区分人工录入与原文，修改后发布重新核验。
 
 资料操作提供与CLI相同的结构化Register/Extract/Inspect/Review接口；不在UI读取PDF、联网或持有数据库。页面分别显示当前诊断、历史追溯、未证明交易日和连续区间；支持同上下文预览任务对比；不提供旧格式转换入口。高级JSON保留完整可维护字段，任务返回新草稿，需载入后继续编辑。
 
@@ -222,7 +227,7 @@ build/distribution commands remain the packaging commands above.
 验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-desktop`及`bash crates/app/packaging/package-macos.sh`；另一台Apple Silicon/macOS14设备的实机验收仍需实际执行。
 
 
-Allocation editing now provides method and candidate-policy selectors, stock/strategy cap sliders, optional turnover, risk/calibration windows and explicit mean-variance λ controls. Advanced JSON remains available for full configuration including warmup dates and numerical tolerance. Small Top N/cap conflicts show the required count immediately and offer an explicit cap-setting action. Method comparisons render a horizontal metrics table. The shared service 43 provides eligibility diagnostics before training and prediction admission before matching; App does not implement a separate optimizer. Current templates are format 12 and combined plans format 2.
+Allocation editing now provides method and candidate-policy selectors, stock/strategy cap sliders, optional turnover, risk/calibration windows and explicit mean-variance λ controls. Advanced JSON remains available for full configuration including warmup dates and numerical tolerance. Small Top N/cap conflicts show the required count immediately and offer an explicit cap-setting action. Method comparisons render a horizontal metrics table. The shared service 44 provides eligibility diagnostics before training and prediction admission before matching; App does not implement a separate optimizer. Current templates are format 12 and combined plans format 2.
 
 ## GTJA191 v5选择（2026-10-18）
 

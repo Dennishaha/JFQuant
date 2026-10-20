@@ -5,6 +5,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
+
 def check_wal_mode(db_path: str):
     """Check WAL mode configuration and health."""
     db = Path(db_path)
@@ -21,13 +22,13 @@ def check_wal_mode(db_path: str):
     journal_mode = cursor.fetchone()[0]
     print(f"Journal mode: {journal_mode}")
 
-    if journal_mode.lower() != 'wal':
+    if journal_mode.lower() != "wal":
         print("❌ WAL mode is not enabled!")
         return False
 
     # Check WAL files
-    shm = db.with_suffix('.sqlite-shm')
-    wal = db.with_suffix('.sqlite-wal')
+    shm = db.with_suffix(".sqlite-shm")
+    wal = db.with_suffix(".sqlite-wal")
 
     print(f"\nWAL files:")
     print(f"  -shm: {'✓' if shm.exists() else '✗'} {shm}")
@@ -42,7 +43,7 @@ def check_wal_mode(db_path: str):
     # Check synchronous mode
     cursor.execute("PRAGMA synchronous;")
     sync_mode = cursor.fetchone()[0]
-    sync_names = {0: 'OFF', 1: 'NORMAL', 2: 'FULL', 3: 'EXTRA'}
+    sync_names = {0: "OFF", 1: "NORMAL", 2: "FULL", 3: "EXTRA"}
     print(f"\nSynchronous mode: {sync_names.get(sync_mode, sync_mode)}")
 
     # Check foreign keys
@@ -66,7 +67,7 @@ def check_wal_mode(db_path: str):
     cursor.execute("PRAGMA integrity_check;")
     integrity = cursor.fetchone()[0]
 
-    if integrity == 'ok':
+    if integrity == "ok":
         print("✅ Database integrity: OK")
     else:
         print(f"❌ Database integrity: {integrity}")
@@ -94,7 +95,8 @@ def check_wal_mode(db_path: str):
     print("\n✅ All WAL checks passed!")
     return True
 
-if __name__ == '__main__':
-    db_path = sys.argv[1] if len(sys.argv) > 1 else '.jfquant/storage/index.sqlite'
+
+if __name__ == "__main__":
+    db_path = sys.argv[1] if len(sys.argv) > 1 else ".jfquant/storage/index.sqlite"
     success = check_wal_mode(db_path)
     sys.exit(0 if success else 1)

@@ -1,11 +1,11 @@
 {
-  "cargo_lock_sha256": "sha256:f430ef13d83d23cc56ab6dd7fe09eafc8fdfce5ce6c1ceeec5fbfe8d57761557",
+  "cargo_lock_sha256": "sha256:c89e4dab4128fcc301dc72157e3b3bcfb297cb0ebe9a0ef740db58b63aeee787",
   "dependency_contracts_sha256": {
     "analytics-core": "sha256:2fddc0c8e9461cebfc902a3fbcc18401e0838d7d483c5c67cd85442c343dd86d",
     "analytics-engine": "sha256:23326b9ddb3a7047161a37ccbd5247a7d0b50533aa5a347ea128477c3192c0db",
     "analytics-factor": "sha256:1c994c8e79bf674bceca2b663829ad5f9311ca4e214664cb5915b1dc4ea157f0",
-    "analytics-storage": "sha256:edce9119d8341b2e3e3163e7ab58e8cf7efadd0f3d717aebc0a577f0990b85fc",
-    "analytics-workflow": "sha256:049a015c2d8f7091e9572fffbb6d29088f72b7e2724575b8ecd6cee2393407e7"
+    "analytics-storage": "sha256:9238a9588c68c953313cb54643455ead06deec545e477ec8838c1e2aa91d8621",
+    "analytics-workflow": "sha256:9164b3b6e2eace033315be9087b165c435f748cb129c052058b0e65cd5023ebe"
   },
   "schema_version": 1
 }

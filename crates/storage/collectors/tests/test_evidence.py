@@ -62,11 +62,21 @@ class HttpEvidence(unittest.TestCase):
             response.status_code = 200
             response.url = "https://www.cninfo.com.cn/new/hisAnnouncement/query"
             response._content = b'{"totalAnnouncement":0,"announcements":[]}'
-            form = {"stock": "600000,gssh0600000", "column": "sse", "seDate": "2024-01-01~2024-12-31", "searchkey": "", "tabName": "fulltext", "pageNum": "1", "pageSize": "30"}
+            form = {
+                "stock": "600000,gssh0600000",
+                "column": "sse",
+                "seDate": "2024-01-01~2024-12-31",
+                "searchkey": "",
+                "tabName": "fulltext",
+                "pageNum": "1",
+                "pageSize": "30",
+            }
             response.request = requests.Request("POST", response.url, data=form).prepare()
             capture.response(response)
             self.assertEqual(capture.receipts[-1]["query_request"], form)
-            response.request = requests.Request("POST", response.url, data={**form, "api_key": "private-key"}).prepare()
+            response.request = requests.Request(
+                "POST", response.url, data={**form, "api_key": "private-key"}
+            ).prepare()
             capture.response(response)
             self.assertNotIn("query_request", capture.receipts[-1])
             self.assertNotIn("private-key", str(capture.receipts))

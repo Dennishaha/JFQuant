@@ -309,9 +309,16 @@ def fundamentals(request, report):
                 tqs.get_market_data(["Close"], [source_code], "1d", first, last, -1, "none")
                 tqs.get_gb_info_by_date(source_code, first, last)
             captured_on = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).date().isoformat()
-            report("action_shard", instrument=code, observed_on=captured_on,
-                   evidence={"provider": "tdxaidata", "sdk_version": VERSION,
-                             "sdk_receipts": receipts[:]})
+            report(
+                "action_shard",
+                instrument=code,
+                observed_on=captured_on,
+                evidence={
+                    "provider": "tdxaidata",
+                    "sdk_version": VERSION,
+                    "sdk_receipts": receipts[:],
+                },
+            )
             receipts.clear()
             responses.clear()
     report("complete", calendar=[], universes={})
@@ -354,25 +361,63 @@ def collect(request, report):
                     before = len(responses)
                     try:
                         tqs.get_gpjy_value([request_symbol(request, code)], [field], start, end)
-                        rights_fields[field] = "captured" if len(responses) > before else "unavailable"
-                    except (ValueError, TypeError, OSError, RuntimeError, AttributeError, KeyError, IndexError, ctypes.ArgumentError):
+                        rights_fields[field] = (
+                            "captured" if len(responses) > before else "unavailable"
+                        )
+                    except (
+                        ValueError,
+                        TypeError,
+                        OSError,
+                        RuntimeError,
+                        AttributeError,
+                        KeyError,
+                        IndexError,
+                        ctypes.ArgumentError,
+                    ):
                         rights_fields[field] = "failed"
                 # Status is auxiliary evidence; unavailable status must not erase
                 # a successfully captured ordinary-action history.
                 status = {"status": "unavailable"}
                 try:
-                    calendar_start = (dt.date.fromisoformat(start) - dt.timedelta(days=3660)).isoformat()
+                    calendar_start = (
+                        dt.date.fromisoformat(start) - dt.timedelta(days=3660)
+                    ).isoformat()
                     tqs.get_trading_dates("SH", calendar_start, end, count=-1)
                     tqs.get_gpjy_value([request_symbol(request, code)], ["GP29"], start, end)
-                    status = {"status": "captured", "rule": "tdxaidata.gp29-resumption-v1", "calendar_start": calendar_start}
-                except (ValueError, TypeError, OSError, RuntimeError, AttributeError, KeyError, IndexError, ctypes.ArgumentError):
+                    status = {
+                        "status": "captured",
+                        "rule": "tdxaidata.gp29-resumption-v1",
+                        "calendar_start": calendar_start,
+                    }
+                except (
+                    ValueError,
+                    TypeError,
+                    OSError,
+                    RuntimeError,
+                    AttributeError,
+                    KeyError,
+                    IndexError,
+                    ctypes.ArgumentError,
+                ):
                     status = {"status": "unavailable"}
                 # A dated current suspension can prove only the latest ongoing
                 # episode retrospectively, including episodes without a resume.
                 try:
-                    tqs.get_more_info(request_symbol(request, code), field_list=["TPFlag", "HqDate", "StopJYDate_Recent"])
+                    tqs.get_more_info(
+                        request_symbol(request, code),
+                        field_list=["TPFlag", "HqDate", "StopJYDate_Recent"],
+                    )
                     status["current_snapshot"] = "captured"
-                except (ValueError, TypeError, OSError, RuntimeError, AttributeError, KeyError, IndexError, ctypes.ArgumentError):
+                except (
+                    ValueError,
+                    TypeError,
+                    OSError,
+                    RuntimeError,
+                    AttributeError,
+                    KeyError,
+                    IndexError,
+                    ctypes.ArgumentError,
+                ):
                     status["current_snapshot"] = "unavailable"
                 evidence = {
                     "provider": "tdxaidata",

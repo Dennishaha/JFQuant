@@ -102,8 +102,13 @@ def main():
             if operation == "announcements" and request["provider"] == "cninfo":
                 execute = announcements
             elif request["provider"] == "tdxaidata":
-                execute = (fundamentals if operation == "fundamentals" else
-                           reference if operation in ("calendar", "members") else tdx_collect)
+                execute = (
+                    fundamentals
+                    if operation == "fundamentals"
+                    else reference
+                    if operation in ("calendar", "members")
+                    else tdx_collect
+                )
             else:
                 raise ValueError("unsupported_collector_provider")
             completed = []

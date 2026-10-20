@@ -32,7 +32,11 @@ def table():
 class TdxContracts(unittest.TestCase):
     def test_runtime_index_routes_use_explicit_mapping_and_do_not_guess_members(self):
         config = {"definition": {"id": "custom_index"}, "mappings": {"tdxaidata": "SH000903"}}
-        request = {"source_bindings": {"IDX_custom_index": "SH000903"}, "index_inputs": {"IDX_custom_index": config}, "index_member_codes": {"custom_index": "SH000903"}}
+        request = {
+            "source_bindings": {"IDX_custom_index": "SH000903"},
+            "index_inputs": {"IDX_custom_index": config},
+            "index_member_codes": {"custom_index": "SH000903"},
+        }
         self.assertEqual(tdx.request_symbol(request, "IDX_custom_index"), "000903.SH")
         self.assertEqual(tdx.member_code(request, "custom_index"), "000903.SH")
         with self.assertRaises(ValueError):
@@ -42,24 +46,44 @@ class TdxContracts(unittest.TestCase):
 
     def test_empty_actions_still_query_and_capture_independent_gp29(self):
         calls, responses, emitted = [], [], []
+
         class SDK:
             def get_divid_factors(self, *args):
                 calls.append("actions")
-                responses.append({"ErrorId":"0","Value":[]})
+                responses.append({"ErrorId": "0", "Value": []})
+
             def get_trading_dates(self, *args, **kwargs):
                 calls.append("calendar")
-                responses.append({"Date":["20210104"]})
+                responses.append({"Date": ["20210104"]})
                 return ["20210104"]
+
             def get_gpjy_value(self, *args):
                 calls.append(args[1][0])
-                responses.append({"ErrorId":"0","Value":{"GP29":[]}})
+                responses.append({"ErrorId": "0", "Value": {"GP29": []}})
+
             def get_more_info(self, *args, **kwargs):
                 calls.append("current_status")
-                responses.append({"ErrorId":"0","Value":{"TPFlag":"1","HqDate":"20220104","StopJYDate_Recent":"20211230"}})
+                responses.append(
+                    {
+                        "ErrorId": "0",
+                        "Value": {
+                            "TPFlag": "1",
+                            "HqDate": "20220104",
+                            "StopJYDate_Recent": "20211230",
+                        },
+                    }
+                )
+
         @contextmanager
         def session(*args):
             yield SDK(), [], responses
-        request = {"start":"2021-01-01","end":"2021-12-31","operation":"actions","instruments":["SH688981"]}
+
+        request = {
+            "start": "2021-01-01",
+            "end": "2021-12-31",
+            "operation": "actions",
+            "instruments": ["SH688981"],
+        }
         with patch.object(tdx, "session", session):
             tdx.collect(request, lambda event, **value: emitted.append((event, value)))
         self.assertEqual(calls, ["actions", "GP41", "GP43", "calendar", "GP29", "current_status"])
@@ -70,9 +94,14 @@ class TdxContracts(unittest.TestCase):
         self.assertEqual(shard["records"], [])
 
     def test_successful_empty_action_reference_does_not_suppress_auxiliary_status(self):
-        self.assertEqual(action_references({"ErrorId":"0","Error":"","Value":[]}, "2021-01-01", "2021-12-31"), [])
+        self.assertEqual(
+            action_references(
+                {"ErrorId": "0", "Error": "", "Value": []}, "2021-01-01", "2021-12-31"
+            ),
+            [],
+        )
         with self.assertRaises(ValueError):
-            action_references({"ErrorId":"2","Value":[]}, "2021-01-01", "2021-12-31")
+            action_references({"ErrorId": "2", "Value": []}, "2021-01-01", "2021-12-31")
 
     def test_unfilled_units_and_explicit_factor_direction(self):
         data = table()

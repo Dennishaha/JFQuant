@@ -5,6 +5,7 @@
 [![CI Status](https://github.com/Dennishaha/JFQuant/actions/workflows/ci.yml/badge.svg)](https://github.com/Dennishaha/JFQuant/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ![Rust Edition](https://img.shields.io/badge/rust-2024-blue)
+[![codecov](https://codecov.io/gh/Dennishaha/JFQuant/branch/main/graph/badge.svg)](https://codecov.io/gh/Dennishaha/JFQuant)
 
 macOS 优先的本地量化研究平台。Rust App 和独立 `jfquant` CLI 共用工作区服务：
 数据采集、DuckDB 查询和 GTJA191／Alpha158 因子保留 Rust 实现；Python LightGBM
@@ -89,12 +90,18 @@ jfquant jobs results TASK_UUID
 
 项目集成了自动化 CI/CD、Git hooks 和开发容器：
 
+- **快速开始**：[5 分钟快速入门指南](docs/QUICKSTART.md)
 - **CI/CD**：自动格式检查、测试、覆盖率报告（每次 PR 和推送）
 - **Git Hooks**：提交前格式检查，推送前 Clippy 验证
 - **DevContainer**：零配置开发环境（Rust + Python + 所有工具）
-- **覆盖率报告**：使用 `cargo llvm-cov --html --open` 查看本地覆盖率
+- **覆盖率报告**：使用 `./scripts/dev cov` 或 `cargo llvm-cov --html --open` 查看本地覆盖率
+- **开发脚本**：`./scripts/dev check|test|watch|cov|release` - 统一的开发命令
+- **一键设置**：`bash scripts/dev-setup.sh` - 自动安装所有工具
 
-详见 [工程化工具使用指南](docs/ENGINEERING.md)。
+详细文档：
+- [工程化指南](docs/ENGINEERING.md) - 完整的工程化实践
+- [优化建议](docs/ENGINEERING_OPTIMIZATION.md) - 工程化优化分析
+- [代码规范](AGENTS.md) - 代码风格和架构规则
 
 ## 回测口径与兼容
 

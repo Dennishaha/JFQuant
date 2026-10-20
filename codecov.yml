@@ -1,0 +1,49 @@
+# Codecov 配置
+# https://docs.codecov.com/docs/codecov-yaml
+
+coverage:
+  status:
+    project:
+      default:
+        target: 75%              # 项目整体覆盖率目标
+        threshold: 2%            # 允许降低 2%
+        if_ci_failed: error      # CI 失败时报错
+
+    patch:
+      default:
+        target: 80%              # 新增代码要求更高覆盖率
+        threshold: 5%            # 新代码允许 5% 波动
+        if_ci_failed: error
+
+  # 忽略的路径
+  ignore:
+    - "crates/*/tests/**"           # 测试代码本身
+    - "crates/*/benches/**"         # 基准测试
+    - "crates/app/packaging/**"     # 打包脚本
+    - "crates/*/examples/**"        # 示例代码
+    - "target/**"                   # 构建产物
+    - "**/*.md"                     # 文档
+
+# 评论配置
+comment:
+  layout: "header, diff, files, footer"
+  behavior: default
+  require_changes: true            # 仅在覆盖率变化时评论
+
+# Codecov 行为
+codecov:
+  notify:
+    after_n_builds: 1              # 等待 1 个 build 完成后再通知
+  require_ci_to_pass: yes
+
+# 标志（用于区分不同测试类型）
+flags:
+  unittests:
+    paths:
+      - crates/
+    carryforward: true             # 如果此次未运行，使用上次结果
+
+  integration:
+    paths:
+      - crates/cli/tests/
+    carryforward: true

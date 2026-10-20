@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 📚 Documentation
+    url: https://github.com/Dennishaha/JFQuant/tree/main/docs
+    about: 查看项目文档和指南
+  - name: 💬 Discussions
+    url: https://github.com/Dennishaha/JFQuant/discussions
+    about: 讨论想法、提问或分享经验
+  - name: 🔒 Security Issue
+    url: https://github.com/Dennishaha/JFQuant/security/advisories/new
+    about: 报告安全漏洞（私密）

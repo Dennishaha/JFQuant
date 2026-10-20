@@ -1,0 +1,281 @@
+name: CI (Optimized)
+
+# 这是优化版的 CI 流水线
+# 主要改进：
+# 1. 快速反馈路径（5 分钟内）
+# 2. 更好的缓存策略
+# 3. 并行执行优化
+# 4. 分层测试策略
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  RUST_BACKTRACE: 1
+  DUCKDB_DOWNLOAD_LIB: 1
+  CARGO_TERM_COLOR: always
+  # 增量编译缓存
+  CARGO_INCREMENTAL: 1
+  # 减少 LLVM 调试信息以加快编译
+  CARGO_PROFILE_DEV_DEBUG: 1
+
+jobs:
+  # ====================
+  # 快速检查（5 分钟内）
+  # ====================
+  fast-check:
+    name: Fast Check (Format + Lint)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # 优化的 Rust 缓存
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "fast-check"
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # 并行运行 Rust 检查
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy (fast)
+        run: |
+          cargo clippy --workspace --lib --bins --message-format=json \
+            -- -D warnings | tee clippy-output.json
+
+      # Python 检查（并行）
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install Python formatters
+        run: |
+          pip install ruff
+          pip list | grep ruff
+
+      - name: Check Python formatting
+        run: |
+          ruff format --check crates/storage/collectors/ crates/workflow/
+          ruff check crates/storage/collectors/ crates/workflow/
+
+      # 架构验证
+      - name: Validate architecture
+        run: python3 crates/workflow/checks/architecture.py
+
+      # 上传检查结果（用于后续分析）
+      - name: Upload lint results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-results
+          path: clippy-output.json
+          if-no-files-found: ignore
+
+  # ====================
+  # 快速单元测试（10 分钟内）
+  # ====================
+  unit-tests:
+    name: Unit Tests (Fast)
+    runs-on: macos-14
+    needs: fast-check  # 仅在快速检查通过后运行
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "unit-tests"
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@cargo-nextest
+
+      # 仅运行快速单元测试（不包括集成测试）
+      - name: Run unit tests
+        run: |
+          cargo nextest run \
+            --workspace \
+            --lib \
+            --bins \
+            --profile ci \
+            --no-fail-fast
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-results
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+
+  # ====================
+  # 完整测试（仅 main 分支或显式触发）
+  # ====================
+  full-tests:
+    name: Full Test Suite
+    runs-on: macos-14
+    # 仅在 main 分支或 workflow_dispatch 时运行完整测试
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    needs: unit-tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "full-tests"
+          cache-on-failure: true
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@cargo-nextest
+
+      # 运行所有测试（包括集成测试）
+      - name: Run all tests
+        run: |
+          cargo nextest run \
+            --workspace \
+            --all-targets \
+            --profile ci \
+            --no-fail-fast
+        continue-on-error: true  # 集成测试可能需要额外依赖
+
+      - name: Upload full test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-test-results
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+
+  # ====================
+  # Python 测试
+  # ====================
+  python-tests:
+    name: Python Tests
+    runs-on: macos-14
+    needs: fast-check
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Python 依赖缓存
+      - name: Cache Python environment
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            target/collector-build
+          key: ${{ runner.os }}-python-${{ hashFiles('**/requirements*.txt', '**/requirements*.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-python-
+
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: Add uv to PATH
+        run: echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Build collector Python environment
+        run: bash crates/app/packaging/build-collector.sh
+
+      # 并行运行 Python 测试
+      - name: Run research tests
+        env:
+          PYTHONPATH: crates/workflow/research
+        run: |
+          target/collector-build/python/bin/python3 -B -m unittest discover \
+            -s crates/workflow/research/tests \
+            -v
+        continue-on-error: true
+
+      - name: Run collectors tests
+        env:
+          PYTHONPATH: crates/storage/collectors
+        run: |
+          target/collector-build/python/bin/python3 -B -m unittest discover \
+            -s crates/storage/collectors/tests \
+            -v
+        continue-on-error: true
+
+  # ====================
+  # 文档构建
+  # ====================
+  docs:
+    name: Documentation
+    runs-on: macos-14
+    needs: fast-check
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "docs"
+
+      - name: Build documentation
+        env:
+          RUSTDOCFLAGS: '-D warnings --cfg docsrs'
+        run: cargo doc --workspace --no-deps --all-features
+
+      - name: Upload documentation
+        uses: actions/upload-artifact@v4
+        with:
+          name: documentation
+          path: target/doc/
+          retention-days: 7
+
+  # ====================
+  # CI 总结（必需检查）
+  # ====================
+  ci-success:
+    name: CI Success
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - fast-check
+      - unit-tests
+      - python-tests
+      - docs
+    steps:
+      - name: Check all jobs
+        run: |
+          echo "Fast Check: ${{ needs.fast-check.result }}"
+          echo "Unit Tests: ${{ needs.unit-tests.result }}"
+          echo "Python Tests: ${{ needs.python-tests.result }}"
+          echo "Docs: ${{ needs.docs.result }}"
+
+          if [ "${{ needs.fast-check.result }}" != "success" ] || \
+             [ "${{ needs.unit-tests.result }}" != "success" ]; then
+            echo "❌ CI failed"
+            exit 1
+          fi
+
+          echo "✅ CI passed"

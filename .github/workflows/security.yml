@@ -1,0 +1,133 @@
+name: Security Audit
+
+on:
+  # 每周日运行
+  schedule:
+    - cron: '0 0 * * 0'
+
+  # 依赖变更时运行
+  push:
+    paths:
+      - '**/Cargo.lock'
+      - '**/Cargo.toml'
+      - '**/requirements*.txt'
+
+  # 允许手动触发
+  workflow_dispatch:
+
+jobs:
+  # ====================
+  # Rust 依赖安全审计
+  # ====================
+  cargo-audit:
+    name: Cargo Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run cargo-audit
+        uses: rustsec/audit-check@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # ====================
+  # 依赖许可证检查
+  # ====================
+  cargo-deny:
+    name: Cargo Deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@cargo-deny
+
+      - name: Check advisories
+        run: cargo deny check advisories
+
+      - name: Check licenses
+        run: cargo deny check licenses
+
+      - name: Check bans
+        run: cargo deny check bans
+
+      - name: Check sources
+        run: cargo deny check sources
+
+  # ====================
+  # Python 依赖安全审计
+  # ====================
+  python-safety:
+    name: Python Safety Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install safety
+        run: pip install safety
+
+      # 检查 collectors 依赖
+      - name: Check collectors dependencies
+        working-directory: crates/storage/collectors
+        run: |
+          if [ -f requirements.txt ]; then
+            safety check -r requirements.txt --json > collectors-safety.json || true
+            cat collectors-safety.json
+          fi
+        continue-on-error: true
+
+      # 检查 workflow 依赖
+      - name: Check workflow dependencies
+        working-directory: crates/workflow/research
+        run: |
+          if [ -f requirements.txt ]; then
+            safety check -r requirements.txt --json > workflow-safety.json || true
+            cat workflow-safety.json
+          fi
+        continue-on-error: true
+
+      - name: Upload safety reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-safety-reports
+          path: |
+            **/collectors-safety.json
+            **/workflow-safety.json
+          if-no-files-found: ignore
+
+  # ====================
+  # 创建安全报告 Issue
+  # ====================
+  create-issue-on-failure:
+    name: Create Security Issue
+    runs-on: ubuntu-latest
+    needs: [cargo-audit, cargo-deny, python-safety]
+    if: failure()
+    steps:
+      - name: Create issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '🔒 Security Audit Failed',
+              body: `Security audit failed on ${new Date().toISOString()}.
+
+              Please review the [workflow run](${context.payload.repository.html_url}/actions/runs/${context.runId}) for details.
+
+              **Jobs:**
+              - Cargo Audit: ${{ needs.cargo-audit.result }}
+              - Cargo Deny: ${{ needs.cargo-deny.result }}
+              - Python Safety: ${{ needs.python-safety.result }}
+
+              cc @Dennishaha`,
+              labels: ['security', 'dependencies']
+            });
+            console.log('Created issue:', issue.data.html_url);

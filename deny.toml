@@ -1,0 +1,82 @@
+# cargo-deny 配置
+# https://embarkstudios.github.io/cargo-deny/
+
+[advisories]
+# 检查已知的安全漏洞
+version = 2
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+
+# 忽略特定的公告（如果有合理原因）
+ignore = [
+    # 示例: "RUSTSEC-2020-0001"
+]
+
+# 安全漏洞严重性阈值
+severity-threshold = "low"
+
+[licenses]
+# 许可证检查
+version = 2
+
+# 允许的许可证
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "0BSD",
+]
+
+# 拒绝的许可证
+deny = [
+    "GPL-3.0",  # 不允许 GPLv3
+]
+
+# 信心阈值（许可证检测的准确性）
+confidence-threshold = 0.8
+
+# 例外情况
+exceptions = [
+    # 示例: { allow = ["GPL-3.0"], name = "some-crate" }
+]
+
+[bans]
+# 禁止的包
+version = 2
+
+# 不允许多个版本共存的包
+multiple-versions = "warn"
+
+# 通配符依赖（不允许使用 "*" 版本）
+wildcards = "deny"
+
+# 拒绝特定的 crate
+deny = [
+    # 示例: { name = "some-bad-crate" }
+]
+
+# 跳过特定的包树
+skip = [
+    # 示例: { name = "some-crate", version = "=0.1.0" }
+]
+
+# 跳过特定的依赖关系
+skip-tree = [
+    # 示例: { name = "windows-sys" }
+]
+
+[sources]
+# 源检查
+version = 2
+
+# 允许的源
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+
+[sources.allow-org]
+# 允许的 GitHub 组织
+# github = ["org-name"]

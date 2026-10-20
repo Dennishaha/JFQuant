@@ -1,0 +1,122 @@
+# Dependabot 配置
+# https://docs.github.com/en/code-security/dependabot/dependabot-version-updates
+
+version: 2
+updates:
+  # Rust 依赖
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Shanghai"
+
+    # 分组更新
+    groups:
+      # 开发工具
+      development-dependencies:
+        patterns:
+          - "criterion*"
+          - "proptest*"
+          - "cargo-*"
+        update-types:
+          - "minor"
+          - "patch"
+
+      # 测试框架
+      testing-dependencies:
+        patterns:
+          - "rstest*"
+          - "assert*"
+          - "mockall*"
+        update-types:
+          - "minor"
+          - "patch"
+
+    # PR 配置
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "rust"
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+
+    # 忽略特定更新
+    ignore:
+      # 暂时固定主要依赖的大版本
+      - dependency-name: "duckdb"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "lightgbm*"
+        update-types: ["version-update:semver-major"]
+
+  # Python 依赖 - collectors
+  - package-ecosystem: "pip"
+    directory: "/crates/storage/collectors"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Shanghai"
+
+    groups:
+      # 数据处理生态
+      data-processing:
+        patterns:
+          - "pandas*"
+          - "numpy*"
+          - "polars*"
+        update-types:
+          - "minor"
+          - "patch"
+
+      # HTTP 客户端
+      http-clients:
+        patterns:
+          - "requests*"
+          - "httpx*"
+          - "aiohttp*"
+        update-types:
+          - "minor"
+          - "patch"
+
+    labels:
+      - "dependencies"
+      - "python"
+      - "collectors"
+    commit-message:
+      prefix: "chore(deps)"
+
+  # Python 依赖 - workflow
+  - package-ecosystem: "pip"
+    directory: "/crates/workflow/research"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Shanghai"
+
+    labels:
+      - "dependencies"
+      - "python"
+      - "workflow"
+    commit-message:
+      prefix: "chore(deps)"
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Shanghai"
+
+    labels:
+      - "dependencies"
+      - "ci"
+    commit-message:
+      prefix: "chore(ci)"
+
+    open-pull-requests-limit: 5

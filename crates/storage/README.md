@@ -359,3 +359,5 @@ CLI `data three-factors --market VERSION --inputs FILE` 和 App“数据更新�
 索引连接使用任务取消标记的SQLite progress handler，长SQL可中断；取消只回滚当前缓存批次，已完成扫描和权威证据事务不受影响。验收：`cargo test -p analytics-storage storage_sqlite_cancel`。
 
 发布构建的容量、耗时、峰值内存及压缩计算验收见[SQLite首版实测](../workflow/src/storage_management/README.md#2026-10-20-sqlite-首版验收)；全量索引重建存在额外耗时，不保证压缩能减少所有小文件的分配空间。
+
+`evidence_store::tree_hash_with_members`为原始证据树在一次读取中同时生成既有树哈希和叶子SHA256，回调提供读取前后保持一致的FileStamp；业务树哈希规则不变。工作流仅对已确认身份复用叶子哈希，压缩估算缓存限定本次任务。验收：`cargo test -p analytics-storage storage_tree_inspection`。

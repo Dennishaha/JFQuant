@@ -454,3 +454,5 @@ DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow recipes_validate_order_ve
 数据流、永久释放、恢复/导出命令及可复现性能验收见[存储管理组件](src/storage_management/README.md#sqlite-索引与共享证据协议46)。`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow storage_ --lib`验证迁移/清理、共享引用、历史摘要、模型复用及预测回放保护。
 
 新行动/公告生产者在成功发布时显式登记准确manifest及数据版本/任务归属，不依赖catalog扫描、UUID子串或目录存在性推测。迁移预览区分文件条目与按原文SHA256去重的唯一对象。
+
+迁移预览按任务复用已核验内容的压缩估算，复合树一次读取计算树/叶子哈希；扫描阶段在原线程内共享只读任务记录，避免深拷贝冻结请求。管理JSON采用64KiB缓冲读写、计数和签名，保持原格式和指纹。协议46不变，无业务数据迁移。验收/测量见[存储管理](src/storage_management/README.md#迁移预览读取与序列化优化)。

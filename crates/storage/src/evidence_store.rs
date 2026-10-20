@@ -439,10 +439,28 @@ pub fn copy_tree(source: &Path, output: &Path) -> io::Result<()> {
     Ok(())
 }
 pub fn tree_hash(root: &Path) -> io::Result<String> {
+    hash_tree(root, None)
+}
+/// Inspect original members and compute the existing tree digest in one read pass.
+/// Every observed member must remain the same regular file throughout that read.
+pub fn tree_hash_with_members(
+    root: &Path,
+    mut member: impl FnMut(&Path, &str, FileStamp) -> io::Result<()>,
+) -> io::Result<String> {
+    hash_tree(root, Some(&mut member))
+}
+type TreeObserver<'a> = dyn FnMut(&Path, &str, FileStamp) -> io::Result<()> + 'a;
+fn hash_tree(root: &Path, mut member: Option<&mut TreeObserver<'_>>) -> io::Result<String> {
     let mut h = Sha256::new();
     let mut buf = vec![0; 1024 * 1024];
     for p in logical_files(root)? {
         TaskContext::current().check()?;
+        let before = if member.is_some() {
+            Some(FileStamp::read(&p)?)
+        } else {
+            None
+        };
+        let mut leaf = member.as_ref().map(|_| Sha256::new());
         let r = p
             .strip_prefix(root)
             .map_err(invalid)?
@@ -466,6 +484,16 @@ pub fn tree_hash(root: &Path) -> io::Result<String> {
                 break;
             }
             h.update(&buf[..n]);
+            if let Some(leaf) = &mut leaf {
+                leaf.update(&buf[..n]);
+            }
+        }
+        if let (Some(observe), Some(before), Some(leaf)) = (&mut member, before, leaf) {
+            if before != FileStamp::read(&p)? {
+                return Err(invalid("tree member changed during read"));
+            }
+            let hash = format!("sha256:{:x}", analytics_core::hash::Hex(leaf.finalize()));
+            observe(&p, &hash, before)?;
         }
     }
     Ok(format!(
@@ -610,6 +638,41 @@ pub mod io_fs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn storage_tree_inspection_preserves_golden_hash_and_reports_verified_members() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fs::create_dir(root.join("nested")).unwrap();
+        for (path, bytes) in [
+            ("a.txt", b"hello\n".as_slice()),
+            ("nested/文.txt", b"world"),
+            ("empty", b""),
+        ] {
+            fs::write(root.join(path), bytes).unwrap();
+        }
+        let mut members = BTreeMap::new();
+        let actual = tree_hash_with_members(root, |p, hash, stamp| {
+            assert_eq!(stamp, FileStamp::read(p)?);
+            members.insert(p.strip_prefix(root).unwrap().to_owned(), hash.to_owned());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            actual,
+            "sha256:0d203330023577758f15741ddf00989ffc87305e45d4a91e2f2465d67fc97b71"
+        );
+        assert_eq!(actual, tree_hash(root).unwrap());
+        assert_eq!(members.len(), 3);
+        assert_eq!(members[Path::new("nested/文.txt")], digest(b"world"));
+        assert_eq!(members[Path::new("empty")], digest(b""));
+        assert!(
+            tree_hash_with_members(root, |_, _, _| Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "cancelled"
+            )))
+            .is_err()
+        );
+    }
     #[test]
     fn storage_objects_preserve_both_encodings_and_reject_corruption_and_unknown_versions() {
         let temp = tempfile::tempdir().unwrap();

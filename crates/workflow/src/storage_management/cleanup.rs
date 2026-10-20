@@ -14,7 +14,7 @@ pub(crate) struct Journal {
     pub result: CleanupResult,
 }
 pub(crate) fn durable_write(path: &Path, value: &impl Serialize) -> Result<()> {
-    atomic_json(path, value)?;
+    super::json::atomic_write(path, value)?;
     // Persist newly created storage/transaction directories as well as the final rename.
     for directory in path.ancestors().skip(1) {
         fs::File::open(directory)?.sync_all()?;

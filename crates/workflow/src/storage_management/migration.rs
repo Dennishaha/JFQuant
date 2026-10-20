@@ -39,7 +39,7 @@ fn registry_hash(w: &Workspace) -> Result<String> {
     }))
 }
 fn fingerprint(plan: &MigrationPlan) -> Result<String> {
-    signature(&(&plan.packages, &plan.registry_sha256))
+    super::json::signature(&(&plan.packages, &plan.registry_sha256))
 }
 fn source_usage<'a>(members: impl Iterator<Item = &'a MigrationMember>) -> SpaceUsage {
     let mut identities = BTreeMap::<(u64, u64), (u64, &FileStamp)>::new();
@@ -83,7 +83,55 @@ fn evidence_member(
     }
     Ok(())
 }
-fn contract(w: &Workspace, manifest: &Path) -> Result<BTreeMap<PathBuf, String>> {
+#[derive(Debug)]
+struct SourceMember {
+    sha256: String,
+    /// A tree inspection already read and hashed this exact file identity.
+    stamp: Option<FileStamp>,
+}
+#[derive(Default)]
+struct Estimates {
+    objects: BTreeMap<String, store::ObjectRef>,
+    #[cfg(test)]
+    compressions: usize,
+}
+impl Estimates {
+    fn inspect(
+        &mut self,
+        path: &Path,
+        source: &SourceMember,
+    ) -> Result<(FileStamp, store::ObjectRef)> {
+        let before = FileStamp::read(path)?;
+        if source.stamp.as_ref().is_some_and(|stamp| stamp != &before) {
+            return Err("migration_source_changed_after_tree_read".into());
+        }
+        let object = if let Some(object) = self.objects.get(&source.sha256) {
+            if before.bytes != object.bytes
+                || (source.stamp.is_none()
+                    && analytics_storage::market_view::file_hash(path)? != source.sha256)
+            {
+                return Err("migration_source_hash_changed".into());
+            }
+            object.clone()
+        } else {
+            let object = store::estimate(path)?;
+            if object.sha256 != source.sha256 {
+                return Err("migration_source_hash_changed".into());
+            }
+            #[cfg(test)]
+            {
+                self.compressions += 1;
+            }
+            self.objects.insert(object.sha256.clone(), object.clone());
+            object
+        };
+        if before != FileStamp::read(path)? {
+            return Err("migration_source_changed_during_read".into());
+        }
+        Ok((before, object))
+    }
+}
+fn contract(w: &Workspace, manifest: &Path) -> Result<BTreeMap<PathBuf, SourceMember>> {
     let root = manifest
         .parent()
         .ok_or("migration_manifest_parent_missing")?;
@@ -91,7 +139,8 @@ fn contract(w: &Workspace, manifest: &Path) -> Result<BTreeMap<PathBuf, String>>
     let mut raw = BTreeMap::<String, String>::new();
     if manifest.file_name().is_some_and(|n| n == "actions.json") {
         let book = ActionBundle::read(&w.resolve(manifest))?;
-        crate::verify_action_evidence(&w.resolve(manifest), &book)?;
+        // ActionBundle retains all semantic validation. Raw members are checked below
+        // by the estimator, and composite trees are checked together with leaf hashes.
         raw.extend(book.raw_sha256);
     } else if manifest
         .file_name()
@@ -141,25 +190,38 @@ fn contract(w: &Workspace, manifest: &Path) -> Result<BTreeMap<PathBuf, String>>
         {
             return Err("migration_invalid_evidence_member".into());
         }
-        members.insert(PathBuf::from("raw").join(name), hash);
+        members.insert(
+            PathBuf::from("raw").join(name),
+            SourceMember {
+                sha256: hash,
+                stamp: None,
+            },
+        );
     }
     if let Some(expected) = members.get(Path::new("raw/source-evidence-sha256.json")) {
         let proof = store::read(w.resolve(root.join("raw/source-evidence-sha256.json")))?;
-        if store::digest(&proof) != *expected {
+        if store::digest(&proof) != expected.sha256 {
             return Err("migration_evidence_proof_changed".into());
         }
         let expected: String = serde_json::from_slice(&proof)?;
         let tree = w.resolve(root.join("source-evidence"));
-        if store::tree_hash(&tree)? != expected {
-            return Err("migration_evidence_tree_changed".into());
-        }
-        for p in store::logical_files(&tree)? {
+        let actual = store::tree_hash_with_members(&tree, |p, hash, stamp| {
             if p.components().any(|c| c.as_os_str() == ".tdx-runtime") {
-                return Err("migration_private_runtime_protected".into());
+                return Err(io::Error::other("migration_private_runtime_protected"));
             }
-            let member = PathBuf::from("source-evidence").join(p.strip_prefix(&tree)?);
-            let hash = analytics_storage::market_view::file_hash(&p)?;
-            members.insert(member, hash);
+            let member = PathBuf::from("source-evidence")
+                .join(p.strip_prefix(&tree).map_err(io::Error::other)?);
+            members.insert(
+                member,
+                SourceMember {
+                    sha256: hash.into(),
+                    stamp: Some(stamp),
+                },
+            );
+            Ok(())
+        })?;
+        if actual != expected {
+            return Err("migration_evidence_tree_changed".into());
         }
     }
     Ok(members)
@@ -168,6 +230,7 @@ fn package(
     w: &Workspace,
     resource: &StorageResource,
     context: &TaskContext,
+    estimates: &mut Estimates,
 ) -> Result<MigrationPackage> {
     let manifest = if resource.path.extension().is_some_and(|e| e == "json") {
         resource.path.clone()
@@ -183,13 +246,14 @@ fn package(
         .find(|p| w.resolve(p).is_file())
         .ok_or("migration_supported_manifest_missing")?
     };
-    package_manifest(w, resource, &manifest, context)
+    package_manifest(w, resource, &manifest, context, estimates)
 }
 fn package_manifest(
     w: &Workspace,
     resource: &StorageResource,
     manifest: &Path,
     context: &TaskContext,
+    estimates: &mut Estimates,
 ) -> Result<MigrationPackage> {
     let root = manifest
         .parent()
@@ -205,15 +269,11 @@ fn package_manifest(
     let mut members = vec![];
     let mut objects = BTreeMap::new();
     let mut last = Instant::now();
-    for (relative, hash) in expected {
+    for (relative, source) in expected {
         context.check()?;
         let path = root.join(&relative);
         let absolute = owned_path(w, &path)?;
-        let before = FileStamp::read(&absolute)?;
-        let object = store::estimate(&absolute)?;
-        if object.sha256 != hash || before != FileStamp::read(&absolute)? {
-            return Err(format!("migration_source_changed:{}", path.display()).into());
-        }
+        let (before, object) = estimates.inspect(&absolute, &source)?;
         members.push(MigrationMember {
             path,
             stamp: before,
@@ -222,9 +282,10 @@ fn package_manifest(
         objects.insert(relative, object);
         if last.elapsed().as_secs_f64() >= 1. {
             context.report(format!(
-                "评估证据压缩 · {} · {} 个成员",
+                "核验证据 · {} · {} 个文件 · {} 个唯一对象已估算",
                 root.display(),
-                members.len()
+                members.len(),
+                estimates.objects.len()
             ))?;
             last = Instant::now();
         }
@@ -271,7 +332,7 @@ fn assemble(
         }
     }
     // Maps and journal must fit even when object encoding succeeds exactly at the limit.
-    let metadata = serde_json::to_vec_pretty(&packages)?.len() as u64 * 3 + 1024 * 1024;
+    let metadata = super::json::pretty_size(&packages)? * 3 + 1024 * 1024;
     let new_object_bytes = additional;
     additional += metadata;
     if available_bytes(w.root()).is_ok_and(|v| v < additional) {
@@ -324,6 +385,7 @@ pub(super) fn plan(w: &Workspace, ids: &[String], context: &TaskContext) -> Resu
     let mut blockers = vec![];
     let mut found = BTreeSet::new();
     let mut roots = BTreeMap::<PathBuf, usize>::new();
+    let mut estimates = Estimates::default();
     if !inventory.complete {
         blockers.extend(inventory.diagnostics.clone());
     }
@@ -367,7 +429,7 @@ pub(super) fn plan(w: &Workspace, ids: &[String], context: &TaskContext) -> Resu
             blockers.push(format!("{}：运行任务正在使用", resource.name));
             continue;
         }
-        match package(w, resource, context) {
+        match package(w, resource, context, &mut estimates) {
             Ok(p) => {
                 if let Some(i) = roots.get(&p.map.root) {
                     packages[*i].map.resources.extend(p.map.resources)
@@ -639,11 +701,27 @@ pub(super) fn apply(w: &Workspace, id: Uuid, context: &TaskContext) -> Result<Mi
         // Re-run the producer contract; unknown membership is never inferred from a directory.
         let contract = contract(w, &p.map.root.join(&p.map.manifest))?;
         if contract.len() != p.map.members.len()
-            || contract
-                .iter()
-                .any(|(path, hash)| p.map.members.get(path).is_none_or(|o| o.sha256 != *hash))
+            || contract.iter().any(|(path, member)| {
+                p.map
+                    .members
+                    .get(path)
+                    .is_none_or(|o| o.sha256 != member.sha256)
+            })
         {
             return Err("migration_plan_stale: producer members changed".into());
+        }
+        // Tree members were hashed together above. Verify every other original again,
+        // including historical action schemas whose reader does not validate raw hashes.
+        for (relative, member) in &contract {
+            context.check()?;
+            if member.stamp.is_none()
+                && analytics_storage::market_view::file_hash(&owned_path(
+                    w,
+                    &p.map.root.join(relative),
+                )?)? != member.sha256
+            {
+                return Err("migration_plan_stale: source hash changed".into());
+            }
         }
         for m in &p.members {
             context.check()?;
@@ -655,7 +733,7 @@ pub(super) fn apply(w: &Workspace, id: Uuid, context: &TaskContext) -> Result<Mi
             p.map.id.clone(),
             PackageLocator {
                 root: p.map.root.clone(),
-                map_sha256: store::digest(&serde_json::to_vec_pretty(&p.map)?),
+                map_sha256: super::json::pretty_signature(&p.map)?,
                 released: false,
             },
         );
@@ -696,9 +774,8 @@ pub(super) fn apply(w: &Workspace, id: Uuid, context: &TaskContext) -> Result<Mi
     activity.phase("生成、同步并核验共享证据对象");
     let prepared = (|| -> Result<()> {
         let mut seen = BTreeSet::new();
-        let members: Vec<_> = all_members(&j).cloned().collect();
         let mut last = Instant::now();
-        for m in &members {
+        for m in all_members(&j) {
             context.check()?;
             if seen.insert(m.object.sha256.clone()) {
                 let temp = root
@@ -731,13 +808,13 @@ pub(super) fn apply(w: &Workspace, id: Uuid, context: &TaskContext) -> Result<Mi
         activity.phase("重新核验并暂存原文件");
         fs::File::open(root.join("created"))?.sync_all()?;
         let mut source_directories = BTreeSet::new();
-        for m in &members {
+        for m in all_members(&j) {
             context.check()?;
             if FileStamp::read(&owned_path(w, &m.path)?)? != m.stamp {
                 return Err("migration_plan_stale: source changed before staging".into());
             }
         }
-        for (i, m) in members.iter().enumerate() {
+        for (i, m) in all_members(&j).enumerate() {
             context.check()?;
             unchanged(&owned_path(w, &m.path)?, &m.stamp)?;
             fs::rename(
@@ -976,7 +1053,7 @@ pub(super) fn published(
         reasons: vec![],
         usage: SpaceUsage::default(),
     };
-    let package = package_manifest(w, &resource, manifest, context)?;
+    let package = package_manifest(w, &resource, manifest, context, &mut Estimates::default())?;
     let plan = assemble(w, context.id, vec![package], vec![])?;
     if !plan.blockers.is_empty() {
         return Err(format!("publication_storage_blocked:{}", plan.blockers.join("; ")).into());
@@ -1015,7 +1092,7 @@ pub(super) fn archive_packages(root: &Path, source: &Path, destination: &Path) -
             map.id.clone(),
             PackageLocator {
                 root: map.root.clone(),
-                map_sha256: store::digest(&serde_json::to_vec_pretty(&map)?),
+                map_sha256: super::json::pretty_signature(&map)?,
                 released: locator.released,
             },
         );

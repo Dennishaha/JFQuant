@@ -270,7 +270,7 @@ fn unresolved_metadata(r: &mut Registry<'_>, context: &TaskContext) -> Result<()
                 && !f.path.ancestors().any(|root| {
                     r.runs
                         .get(root)
-                        .is_some_and(super::inventory::management_run)
+                        .is_some_and(|run| super::inventory::management_run(run))
                 })
         })
         .map(|f| f.path.clone())

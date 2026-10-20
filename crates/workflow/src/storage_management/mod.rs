@@ -4,6 +4,7 @@ mod cleanup;
 mod dependencies;
 mod history;
 mod inventory;
+mod json;
 mod members;
 mod migration;
 mod progress;
@@ -25,7 +26,10 @@ pub use types::*;
 use uuid::Uuid;
 
 pub(crate) fn read<T: DeserializeOwned>(path: &Path) -> Result<T> {
-    Ok(serde_json::from_slice(&fs::read(path)?)?)
+    Ok(serde_json::from_reader(std::io::BufReader::with_capacity(
+        64 * 1024,
+        fs::File::open(path)?,
+    ))?)
 }
 pub(crate) fn safe_relative(path: &Path) -> bool {
     !path.as_os_str().is_empty() && path.components().all(|c| matches!(c, Component::Normal(_)))

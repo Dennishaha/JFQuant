@@ -208,3 +208,5 @@ HiThink 公司行动查询失败按未知证券、参数、认证、权限、限
 缺日/null不填充；所属worker缓存一次读取结果。格式示例与验收见[组件README](../README.md#alpha030外部三因子输入)。
 
 `filesystem` provides metadata-only file identity, allocation and free-space reads without following symlinks. Workspace resource ownership and deletion stay in workflow. [Storage management](../../workflow/src/storage_management/README.md).
+
+`evidence_store::tree_hash_with_members`核验原始文件身份并同时返回树摘要/叶子哈希，供迁移预览避免重复读取。普通对象视图仍使用`tree_hash`；编码、路径排序和业务身份规则不变。

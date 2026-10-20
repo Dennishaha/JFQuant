@@ -2,6 +2,7 @@ use super::*;
 use analytics_storage::filesystem;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 pub(crate) struct Registry<'a> {
     pub w: &'a Workspace,
@@ -12,7 +13,9 @@ pub(crate) struct Registry<'a> {
     pub object_identities: BTreeMap<PathBuf, PathBuf>,
     pub logical_owners: BTreeMap<PathBuf, Vec<String>>,
     pub resources: BTreeMap<String, StorageResource>,
-    pub runs: BTreeMap<PathBuf, RunRecord>,
+    // Passes may mutate resource ownership while reading frozen requests. Share those
+    // immutable records so traversing a snapshot does not deep-copy every request JSON.
+    pub runs: BTreeMap<PathBuf, Rc<RunRecord>>,
     pub metadata: BTreeMap<PathBuf, String>,
     pub references: Vec<ResourceReference>,
     pub external: BTreeSet<PathBuf>,
@@ -211,7 +214,7 @@ fn load_runs(r: &mut Registry<'_>) -> Result<()> {
         if management_run(&run) {
             r.metadata.remove(&p);
         }
-        r.runs.insert(p.parent().unwrap().to_owned(), run);
+        r.runs.insert(p.parent().unwrap().to_owned(), Rc::new(run));
     }
     Ok(())
 }
@@ -1251,7 +1254,7 @@ pub(crate) fn volatile(r: &Registry<'_>, path: &Path) -> bool {
         || path == Path::new(".jfquant/app.lock")
         || path
             .ancestors()
-            .any(|root| r.runs.get(root).is_some_and(management_run))
+            .any(|root| r.runs.get(root).is_some_and(|run| management_run(run)))
 }
 
 fn phase(

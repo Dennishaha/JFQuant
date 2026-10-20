@@ -4,6 +4,9 @@ fn context() -> TaskContext {
     TaskContext::new(Uuid::new_v4(), Arc::new(AtomicBool::new(false)), |_| {})
 }
 fn fixture() -> (tempfile::TempDir, Workspace, Vec<StorageResource>) {
+    fixture_layout(false)
+}
+fn fixture_layout(tree: bool) -> (tempfile::TempDir, Workspace, Vec<StorageResource>) {
     let temp = tempfile::tempdir().unwrap();
     let w = Workspace::open(temp.path()).unwrap();
     let (_, actions, _) = crate::demo::create_canonical(&w).unwrap();
@@ -20,6 +23,17 @@ fn fixture() -> (tempfile::TempDir, Workspace, Vec<StorageResource>) {
         v["downloaded_at"] = format!("fixture-{i}").into();
         v["raw_sha256"]["shared-audit.json"] = store::digest(&shared).into();
         fs::write(root.join("raw/shared-audit.json"), &shared).unwrap();
+        if tree {
+            let tree = root.join("source-evidence/nested");
+            fs::create_dir_all(&tree).unwrap();
+            fs::write(tree.join("same-original.json"), &shared).unwrap();
+            fs::write(tree.join("other.txt"), b"other original bytes\n").unwrap();
+            let proof =
+                serde_json::to_vec(&store::tree_hash(&root.join("source-evidence")).unwrap())
+                    .unwrap();
+            fs::write(root.join("raw/source-evidence-sha256.json"), &proof).unwrap();
+            v["raw_sha256"]["source-evidence-sha256.json"] = store::digest(&proof).into();
+        }
         crate::atomic_json(&manifest, &v).unwrap();
         versions.push(w.register(&manifest).unwrap());
     }
@@ -47,6 +61,62 @@ fn planned(w: &Workspace, resources: &[StorageResource]) -> MigrationPlan {
     assert!(p.blockers.is_empty(), "{:?}", p.blockers);
     assert!(!p.packages.is_empty());
     p
+}
+#[test]
+fn storage_migration_estimates_compress_each_original_once_and_reject_changed_copies() {
+    let (_temp, w, resources) = fixture_layout(true);
+    let mut estimates = Estimates::default();
+    let first = package(&w, &resources[0], &context(), &mut estimates).unwrap();
+    let runs = estimates.compressions;
+    assert!(
+        runs < first.members.len(),
+        "same raw bytes also appear inside the tree"
+    );
+    let second = package(&w, &resources[1], &context(), &mut estimates).unwrap();
+    assert_eq!(
+        estimates.compressions, runs,
+        "copies must reuse the compression estimate"
+    );
+    assert_eq!(first.map.members, second.map.members);
+    let raw = w.resolve(
+        resources[1]
+            .path
+            .parent()
+            .unwrap()
+            .join("raw/shared-audit.json"),
+    );
+    let original = fs::read(&raw).unwrap();
+    let source = SourceMember {
+        sha256: store::digest(&original),
+        stamp: None,
+    };
+    fs::write(&raw, vec![b'!'; original.len()]).unwrap();
+    assert!(
+        estimates.inspect(&raw, &source).is_err(),
+        "cache reuse still hashes every raw copy"
+    );
+    let tree = w.resolve(
+        resources[0]
+            .path
+            .parent()
+            .unwrap()
+            .join("source-evidence/nested/same-original.json"),
+    );
+    let source = SourceMember {
+        sha256: store::digest(&original),
+        stamp: Some(FileStamp::read(&tree).unwrap()),
+    };
+    fs::write(&tree, vec![b'?'; original.len()]).unwrap();
+    assert!(
+        estimates.inspect(&tree, &source).is_err(),
+        "previously inspected tree identity changed"
+    );
+    assert!(
+        contract(&w, &resources[0].path)
+            .unwrap_err()
+            .to_string()
+            .contains("migration_evidence_tree_changed")
+    );
 }
 #[test]
 fn publication_uses_only_the_manifest_supplied_by_the_producer() {
@@ -150,6 +220,10 @@ fn crashed(
 fn storage_migration_deduplicates_preserves_bytes_hashes_and_exports_independent_package() {
     let (temp, w, resources) = fixture();
     let p = planned(&w, &resources);
+    assert_eq!(
+        p.fingerprint,
+        crate::signature(&(&p.packages, &p.registry_sha256)).unwrap()
+    );
     assert!(p.original_reference_bytes > p.unique_original_bytes);
     assert!(p.object_storage_bytes < p.unique_original_bytes / 2);
     let manifest_bytes: Vec<_> = resources

@@ -105,6 +105,28 @@ jobs:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: Add uv to PATH
+        run: echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Cache collector runtime
+        uses: actions/cache@v4
+        with:
+          path: target/collector-build
+          key: ${{ runner.os }}-collector-${{ hashFiles('crates/storage/collectors/requirements.lock', 'crates/workflow/research/requirements.lock', 'crates/storage/collectors/python-runtime.lock.json', 'crates/app/packaging/build-collector.sh', 'crates/app/packaging/build-akquant.sh', 'crates/app/packaging/build-native.sh', 'crates/app/packaging/rewrite-python.py', 'crates/app/packaging/verify-python.py') }}
+          restore-keys: |
+            ${{ runner.os }}-collector-
+
+      - name: Build collector Python environment
+        run: bash crates/app/packaging/build-collector.sh
+
       - name: Refresh DuckDB native library
         run: |
           cargo clean -p libduckdb-sys
@@ -151,6 +173,28 @@ jobs:
         with:
           shared-key: "full-tests"
           cache-on-failure: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: Add uv to PATH
+        run: echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Cache collector runtime
+        uses: actions/cache@v4
+        with:
+          path: target/collector-build
+          key: ${{ runner.os }}-collector-${{ hashFiles('crates/storage/collectors/requirements.lock', 'crates/workflow/research/requirements.lock', 'crates/storage/collectors/python-runtime.lock.json', 'crates/app/packaging/build-collector.sh', 'crates/app/packaging/build-akquant.sh', 'crates/app/packaging/build-native.sh', 'crates/app/packaging/rewrite-python.py', 'crates/app/packaging/verify-python.py') }}
+          restore-keys: |
+            ${{ runner.os }}-collector-
+
+      - name: Build collector Python environment
+        run: bash crates/app/packaging/build-collector.sh
 
       - name: Refresh DuckDB native library
         run: |

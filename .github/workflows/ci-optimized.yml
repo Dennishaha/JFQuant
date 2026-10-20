@@ -79,7 +79,7 @@ jobs:
       # 上传检查结果（用于后续分析）
       - name: Upload lint results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: lint-results
           path: clippy-output.json
@@ -125,7 +125,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: unit-test-results
           path: target/nextest/ci/junit.xml
@@ -172,7 +172,7 @@ jobs:
 
       - name: Upload full test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: full-test-results
           path: target/nextest/ci/junit.xml
@@ -261,7 +261,7 @@ jobs:
         run: cargo doc --workspace --no-deps
 
       - name: Upload documentation
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: documentation
           path: target/doc/

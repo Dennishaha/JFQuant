@@ -90,6 +90,11 @@ jobs:
       - name: Build collector Python environment
         run: bash crates/app/packaging/build-collector.sh
 
+      - name: Refresh DuckDB native library
+        run: |
+          cargo clean -p libduckdb-sys
+          rm -rf target/duckdb-download
+
       - name: Install cargo-nextest
         uses: taiki-e/install-action@cargo-nextest
 

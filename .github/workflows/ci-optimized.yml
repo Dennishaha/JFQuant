@@ -105,6 +105,11 @@ jobs:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      - name: Refresh DuckDB native library
+        run: |
+          cargo clean -p libduckdb-sys
+          rm -rf target/duckdb-download
+
       - name: Install cargo-nextest
         uses: taiki-e/install-action@cargo-nextest
 
@@ -146,6 +151,11 @@ jobs:
         with:
           shared-key: "full-tests"
           cache-on-failure: true
+
+      - name: Refresh DuckDB native library
+        run: |
+          cargo clean -p libduckdb-sys
+          rm -rf target/duckdb-download
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@cargo-nextest
@@ -240,10 +250,15 @@ jobs:
         with:
           shared-key: "docs"
 
+      - name: Refresh DuckDB native library
+        run: |
+          cargo clean -p libduckdb-sys
+          rm -rf target/duckdb-download
+
       - name: Build documentation
         env:
-          RUSTDOCFLAGS: '-D warnings --cfg docsrs'
-        run: cargo doc --workspace --no-deps --all-features
+          RUSTDOCFLAGS: '-D warnings'
+        run: cargo doc --workspace --no-deps
 
       - name: Upload documentation
         uses: actions/upload-artifact@v4

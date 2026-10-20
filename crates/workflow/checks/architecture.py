@@ -5,6 +5,7 @@ import pathlib
 import re
 import subprocess
 import sys
+
 from execution_dependencies import RECEIPT, generate
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
@@ -43,7 +44,7 @@ for component, allowed in ALLOWED.items():
         ):
             errors.append(f"{file.relative_to(ROOT)}: client accesses worker internals")
 root = (ROOT / "crates/workflow/src/lib.rs").read_text()
-if re.search(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s", root, re.M):
+if re.search(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s", root, re.MULTILINE):
     errors.append("workflow/lib.rs: business functions belong in a component module")
 if "Box<Worker>" in (ROOT / "crates/workflow/src/backend.rs").read_text():
     errors.append("query sessions must not embed a task worker")
@@ -53,7 +54,7 @@ if "Box<Worker>" in (ROOT / "crates/workflow/src/backend.rs").read_text():
 def long_functions(text):
     text = re.split(r"#\[cfg\(test\)\]\s*mod\s", text)[0]
     starts = list(
-        re.finditer(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)", text, re.M)
+        re.finditer(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)", text, re.MULTILINE)
     )
     return {
         m[1]: text[
@@ -68,7 +69,11 @@ for file in (ROOT / "crates").rglob("*.rs"):
         continue
     rel = file.relative_to(ROOT)
     old = subprocess.run(
-        ["git", "show", f"HEAD:{rel}"], cwd=ROOT, capture_output=True, text=True
+        ["git", "show", f"HEAD:{rel}"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     before = long_functions(old.stdout)
     for name, size in long_functions(file.read_text()).items():

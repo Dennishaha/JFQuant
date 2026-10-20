@@ -8,11 +8,11 @@ no workspace writes, cache eviction, service startup or network requests.
 import argparse
 import gc
 import json
-from pathlib import Path
 import resource
 import sqlite3
 import statistics
 import time
+from pathlib import Path
 
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument("--workspace", type=Path, required=True)

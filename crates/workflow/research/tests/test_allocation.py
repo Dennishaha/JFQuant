@@ -2,6 +2,7 @@
 
 import threading
 import unittest
+
 import numpy as np
 from allocation_fixture import config, solve
 from jfquant_research.allocation import StockHistory, independent_checks
@@ -115,7 +116,7 @@ class AllocationTests(unittest.TestCase):
             s: {d: float(10 + i * k + 0.01 * i * i * k) for i, d in enumerate(calendar)}
             for s, k in [("a", 0.1), ("b", 0.2), ("c", 0.3)]
         }
-        signals = {d: dict(a=1.0, b=2.0, c=3.0) for d in calendar}
+        signals = {d: {"a": 1.0, "b": 2.0, "c": 3.0} for d in calendar}
         c = config(
             risk_window=5,
             calibration_window=10,
@@ -125,9 +126,9 @@ class AllocationTests(unittest.TestCase):
         h = StockHistory(calendar, prices, signals, 3, c)
         before = h.risk(calendar[20], ["a", "b"])
         mu, receipt = h.calibrate(calendar[20], ["a", "b"], signals[calendar[20]])
-        for s in prices:
+        for price_dict in prices.values():
             for d in calendar[21:]:
-                prices[s][d] *= 100
+                price_dict[d] *= 100
         self.assertEqual(before, h.risk(calendar[20], ["a", "b"]))
         for d in calendar[21:]:
             signals[d]["a"] = 1000.0
@@ -150,7 +151,7 @@ class AllocationTests(unittest.TestCase):
             }
             for k, s in enumerate(["a", "b", "c", "d"], 1)
         }
-        signals = {d: dict(a=10.0, b=3.0, c=2.0, d=1.0) for d in calendar}
+        signals = {d: {"a": 10.0, "b": 3.0, "c": 2.0, "d": 1.0} for d in calendar}
         c = config(
             risk_window=5,
             calibration_window=12,
@@ -279,24 +280,24 @@ class CombinedTests(unittest.TestCase):
         sources = []
         for i, symbol in enumerate(["SH600000", "SZ000001"]):
             rows = [
-                dict(
-                    date=d,
-                    nav=1.0 + j * (0.01 if i == 0 else 0.002),
-                    open_nav=1.0 + j * (0.01 if i == 0 else 0.002),
-                    weights={symbol: 0.98},
-                    changed=False,
-                )
+                {
+                    "date": d,
+                    "nav": 1.0 + j * (0.01 if i == 0 else 0.002),
+                    "open_nav": 1.0 + j * (0.01 if i == 0 else 0.002),
+                    "weights": {symbol: 0.98},
+                    "changed": False,
+                }
                 for j, d in enumerate(calendar)
             ]
             targets = [
-                dict(
-                    date=calendar[22],
-                    effective_date=calendar[23],
-                    weights={symbol: 0.98},
-                )
+                {
+                    "date": calendar[22],
+                    "effective_date": calendar[23],
+                    "weights": {symbol: 0.98},
+                }
             ]
-            sources.append(dict(id=str(i), reference=dict(rows=rows), targets=targets))
-        plan = dict(execution=dict(rebalance_days=5, allocation=config()))
+            sources.append({"id": str(i), "reference": {"rows": rows}, "targets": targets})
+        plan = {"execution": {"rebalance_days": 5, "allocation": config()}}
         return CombinedAllocator(
             plan, sources, calendar, threading.Event(), 0.98
         ), calendar
@@ -330,6 +331,7 @@ class CombinedTests(unittest.TestCase):
 class NativeDecisionTests(unittest.TestCase):
     def test_cancel_releases_pending_projection_before_replacement(self):
         import inspect
+
         import akquant as aq
 
         order = aq.Order(
@@ -355,9 +357,11 @@ class NativeDecisionTests(unittest.TestCase):
         self.assertGreater(state["projected_buying_power"], 999.0)
 
     def test_native_risk_method_uses_next_qualified_stock_and_linear_journal(self):
-        import json, tempfile
+        import json
+        import tempfile
         from pathlib import Path
         from unittest.mock import patch
+
         import test_runtime
         from jfquant_research.backtest import backtest as execute
 
@@ -383,15 +387,15 @@ class NativeDecisionTests(unittest.TestCase):
                 candidate_policy="complete_risk_window",
                 risk_window=2,
             )
-            payload = dict(
-                schema_version=2,
-                stock_exposure=0.98,
-                calendar=dates,
-                prices=prices,
-                config=c,
-                reference_range=dict(start=dates[4], end=dates[-1]),
-                missing_prices={"SH600000": {dates[2]: "verified_suspension"}},
-            )
+            payload = {
+                "schema_version": 2,
+                "stock_exposure": 0.98,
+                "calendar": dates,
+                "prices": prices,
+                "config": c,
+                "reference_range": {"start": dates[4], "end": dates[-1]},
+                "missing_prices": {"SH600000": {dates[2]: "verified_suspension"}},
+            }
             history = StockHistory(
                 dates, prices, {}, 1, c, missing=payload["missing_prices"]
             )
@@ -399,7 +403,7 @@ class NativeDecisionTests(unittest.TestCase):
                 "eligibility": {
                     d: {
                         "eligible": sorted(
-                            history.candidates(d, dict(SH600000=1.0, SZ000001=0.0))[0]
+                            history.candidates(d, {"SH600000": 1.0, "SZ000001": 0.0})[0]
                         )
                     }
                     for d in dates
@@ -463,9 +467,11 @@ class NativeDecisionTests(unittest.TestCase):
                 self.assertEqual(json.loads(path.read_text()), changed)
 
     def test_pool_exit_is_an_explicit_target_instruction(self):
-        import json, tempfile
+        import json
+        import tempfile
         from pathlib import Path
         from unittest.mock import patch
+
         import test_runtime
 
         request = {}
@@ -483,8 +489,8 @@ class NativeDecisionTests(unittest.TestCase):
             request["pool_exit_policy"] = "next_tradable_day"
             request["pool"] = {
                 "intervals": {
-                    "SH600000": [dict(start=dates[0], end=dates[2])],
-                    "SZ000001": [dict(start=dates[0], end=dates[-1])],
+                    "SH600000": [{"start": dates[0], "end": dates[2]}],
+                    "SZ000001": [{"start": dates[0], "end": dates[-1]}],
                 }
             }
             original(request, threading.Event(), lambda *args, **kwargs: None)

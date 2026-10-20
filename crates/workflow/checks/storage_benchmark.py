@@ -124,6 +124,7 @@ def run(binary, root, operation, threads, label):
             subprocess.run(
                 [str(binary), "--workspace", str(root), "service", "stop"],
                 capture_output=True,
+                check=False,
             )
             service.wait(timeout=30)
     match = re.search(r"(\d+)\s+maximum resident set size", log.read_text())

@@ -2,27 +2,28 @@
 
 import json
 from pathlib import Path
+
 import pyarrow.parquet as pq
 from jfquant_research.backtest import backtest as run
 
 
 def config(**changes):
-    result = dict(
-        candidate_policy="unfiltered",
-        solver_tolerance=1e-9,
-        prediction_start=None,
-        reference_start=None,
-        execution_start=None,
-        method="equal",
-        risk_window=252,
-        max_stock_weight=1.0,
-        max_strategy_weight=0.6,
-        max_turnover=None,
-        risk_aversion=None,
-        calibration_window=252,
-        calibration_min_days=60,
-        calibration_min_pairs=30,
-    )
+    result = {
+        "candidate_policy": "unfiltered",
+        "solver_tolerance": 1e-9,
+        "prediction_start": None,
+        "reference_start": None,
+        "execution_start": None,
+        "method": "equal",
+        "risk_window": 252,
+        "max_stock_weight": 1.0,
+        "max_strategy_weight": 0.6,
+        "max_turnover": None,
+        "risk_aversion": None,
+        "calibration_window": 252,
+        "calibration_min_days": 60,
+        "calibration_min_pairs": 30,
+    }
     result.update(changes)
     return result
 

@@ -2,7 +2,6 @@
 
 import hashlib
 import json
-from pathlib import Path
 from bisect import bisect_left, bisect_right
 
 import numpy as np
@@ -148,10 +147,9 @@ def solve(
     if config["method"] == "equal":
         w = np.full(n, exposure / n)
     else:
-        from skfolio.moments import LedoitWolf
-        from skfolio.optimization import MeanRisk, RiskBudgeting, ObjectiveFunction
+        from skfolio.moments import EmpiricalMu, LedoitWolf
+        from skfolio.optimization import MeanRisk, ObjectiveFunction, RiskBudgeting
         from skfolio.prior import EmpiricalPrior
-        from skfolio.moments import EmpiricalMu
 
         if (
             history.ndim != 2
@@ -191,24 +189,24 @@ def solve(
                 result.append(cp.norm1(stock - previous) <= config["max_turnover"])
             return result
 
-        kwargs = dict(
-            prior_estimator=prior,
-            min_weights=0.0,
-            max_weights=cap,
-            budget=exposure,
-            solver="CLARABEL",
-            solver_params={
+        kwargs = {
+            "prior_estimator": prior,
+            "min_weights": 0.0,
+            "max_weights": cap,
+            "budget": exposure,
+            "solver": "CLARABEL",
+            "solver_params": {
                 "tol_gap_abs": config["solver_tolerance"],
                 "tol_feas": config["solver_tolerance"],
                 "tol_gap_rel": config["solver_tolerance"],
                 "max_iter": 200,
             },
-            scale_objective=1000.0,
-            scale_constraints=100.0,
-            add_constraints=constraints,
-            save_problem=True,
-            raise_on_failure=True,
-        )
+            "scale_objective": 1000.0,
+            "scale_constraints": 100.0,
+            "add_constraints": constraints,
+            "save_problem": True,
+            "raise_on_failure": True,
+        }
         if config["method"] == "risk_budgeting":
             kwargs.pop("budget")
             kwargs["max_weights"] = cap / exposure
@@ -378,16 +376,16 @@ class StockHistory:
                 set(scores).intersection(row["eligible"])
             ):
                 raise ValueError("allocation_eligibility_receipt_mismatch")
-        receipt = dict(
-            policy=self.config["candidate_policy"],
-            as_of=date,
-            candidate_count=len(scores),
-            eligible_count=len(eligible),
-            eligible_sha256=digest(sorted(eligible)),
-            excluded_count=len(excluded),
-            excluded=excluded,
-            excluded_sha256=digest(excluded),
-        )
+        receipt = {
+            "policy": self.config["candidate_policy"],
+            "as_of": date,
+            "candidate_count": len(scores),
+            "eligible_count": len(eligible),
+            "eligible_sha256": digest(sorted(eligible)),
+            "excluded_count": len(excluded),
+            "excluded": excluded,
+            "excluded_sha256": digest(excluded),
+        }
         self.candidate_cache[date] = eligible, receipt
         return eligible, receipt
 
@@ -417,7 +415,7 @@ class StockHistory:
                         self.calibrate(date, names, scores)
                 except ValueError as error:
                     issues.append(
-                        dict(date=date, error=str(error), admission=admission)
+                        {"date": date, "error": str(error), "admission": admission}
                     )
             clock += 1
         return issues
@@ -479,20 +477,20 @@ class StockHistory:
                     raise ValueError(
                         f"allocation_calibration_label_gap: {self.calendar[i]}:{s}"
                     )
-                excluded[s] = dict(
-                    reason="verified_suspension", endpoints=list(endpoints)
-                )
+                excluded[s] = {
+                    "reason": "verified_suspension", "endpoints": list(endpoints)
+                }
             if len(pairs) < self.config["calibration_min_pairs"]:
                 records.append(
-                    dict(
-                        score_date=self.calendar[i],
-                        return_start=self.calendar[i + 1],
-                        return_end=self.calendar[i + 1 + self.horizon],
-                        pairs=len(pairs),
-                        used=False,
-                        excluded=excluded,
-                        eligibility=eligibility,
-                    )
+                    {
+                        "score_date": self.calendar[i],
+                        "return_start": self.calendar[i + 1],
+                        "return_end": self.calendar[i + 1 + self.horizon],
+                        "pairs": len(pairs),
+                        "used": False,
+                        "excluded": excluded,
+                        "eligibility": eligibility,
+                    }
                 )
                 continue
             used.append(self.calendar[i])
@@ -512,17 +510,17 @@ class StockHistory:
                     )
                 model = candidates[0]
             records.append(
-                dict(
-                    score_date=self.calendar[i],
-                    return_start=self.calendar[i + 1],
-                    return_end=self.calendar[i + 1 + self.horizon],
-                    pairs=len(pairs),
-                    model=model,
-                    used=True,
-                    excluded=excluded,
-                    excluded_sha256=digest(excluded),
-                    eligibility=eligibility,
-                )
+                {
+                    "score_date": self.calendar[i],
+                    "return_start": self.calendar[i + 1],
+                    "return_end": self.calendar[i + 1 + self.horizon],
+                    "pairs": len(pairs),
+                    "model": model,
+                    "used": True,
+                    "excluded": excluded,
+                    "excluded_sha256": digest(excluded),
+                    "eligibility": eligibility,
+                }
             )
             for r, y in pairs:
                 xx.append(r)

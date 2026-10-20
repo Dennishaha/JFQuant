@@ -30,7 +30,7 @@ def check_wal_mode(db_path: str):
     shm = db.with_suffix(".sqlite-shm")
     wal = db.with_suffix(".sqlite-wal")
 
-    print(f"\nWAL files:")
+    print("\nWAL files:")
     print(f"  -shm: {'✓' if shm.exists() else '✗'} {shm}")
     print(f"  -wal: {'✓' if wal.exists() else '✗'} {wal}")
 
@@ -38,7 +38,7 @@ def check_wal_mode(db_path: str):
         wal_size = wal.stat().st_size
         print(f"  WAL size: {wal_size:,} bytes")
         if wal_size > 10 * 1024 * 1024:  # > 10MB
-            print(f"  ⚠️  WAL is large, consider checkpoint")
+            print("  ⚠️  WAL is large, consider checkpoint")
 
     # Check synchronous mode
     cursor.execute("PRAGMA synchronous;")
@@ -83,7 +83,7 @@ def check_wal_mode(db_path: str):
         cursor2.execute("SELECT COUNT(*) FROM sqlite_master;")
         count = cursor2.fetchone()[0]
         print(f"✅ Concurrent read successful ({count} schema objects)")
-    except Exception as e:
+    except sqlite3.Error as e:
         print(f"❌ Concurrent read failed: {e}")
         conn.close()
         conn2.close()

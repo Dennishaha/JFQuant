@@ -1,16 +1,17 @@
 """AKQuant owns matching, fees and the continuous portfolio; JFQuant supplies signals."""
 
 import datetime as dt
+import itertools
 import json
 import resource
 import time
 from pathlib import Path
 
-from .allocation import StockHistory, solve, digest, validate_config, TOL
-
 import akquant as aq
 import pandas as pd
 import pyarrow.parquet as pq
+
+from .allocation import TOL, StockHistory, digest, solve, validate_config
 
 
 def _backtest(request, cancelled, emit):
@@ -58,7 +59,7 @@ def _backtest(request, cancelled, emit):
                 decisions[journal_count:], targets[journal_count:]
             ):
                 journal.write(
-                    json.dumps(dict(decision=decision, target=target), allow_nan=False)
+                    json.dumps({"decision": decision, "target": target}, allow_nan=False)
                     + "\n"
                 )
                 journal_count += 1
@@ -134,12 +135,12 @@ def _backtest(request, cancelled, emit):
             request["formal_start"],
         )
     )
-    admission_report = dict(
-        schema_version=1,
-        status="blocked" if issues else "ready",
-        issues=issues,
-        candidate_dates={d: r for d, (_, r) in history.candidate_cache.items()},
-    )
+    admission_report = {
+        "schema_version": 1,
+        "status": "blocked" if issues else "ready",
+        "issues": issues,
+        "candidate_dates": {d: r for d, (_, r) in history.candidate_cache.items()},
+    }
     (output / "allocation-admission.json").write_text(
         json.dumps(admission_report, allow_nan=False)
     )
@@ -148,7 +149,7 @@ def _backtest(request, cancelled, emit):
         raise ValueError(
             f"allocation_data_admission_failed: {issues[0]['date']}: {issues[0]['error']}; see allocation-admission.json"
         )
-    next_date = {a: b for a, b in zip(calendar, calendar[1:])}
+    next_date = {a: b for a, b in itertools.pairwise(calendar)}
     warmup_targets, warmup_decisions = [], []
     pool = request.get("pool", {}).get("intervals", {})
     last_warmup_target = {}
@@ -194,18 +195,18 @@ def _backtest(request, cancelled, emit):
                 else:
                     weights = {}
                 warmup_targets.append(
-                    dict(date=date, effective_date=next_date.get(date), weights=weights)
+                    {"date": date, "effective_date": next_date.get(date), "weights": weights}
                 )
                 warmup_decisions.append(
-                    dict(
-                        date=date,
-                        effective_date=next_date.get(date),
-                        solver=receipt,
-                        risk_history=bounds,
-                        calibration=calibration,
-                        eligibility=eligibility,
-                        kind="reference_warmup",
-                    )
+                    {
+                        "date": date,
+                        "effective_date": next_date.get(date),
+                        "solver": receipt,
+                        "risk_history": bounds,
+                        "calibration": calibration,
+                        "eligibility": eligibility,
+                        "kind": "reference_warmup",
+                    }
                 )
                 last_warmup_target = weights
             elif request.get("pool_exit_policy") == "next_tradable_day" and pool:
@@ -216,16 +217,16 @@ def _backtest(request, cancelled, emit):
                 }
                 if kept != last_warmup_target:
                     warmup_targets.append(
-                        dict(
-                            date=date, effective_date=next_date.get(date), weights=kept
-                        )
+                        {
+                            "date": date, "effective_date": next_date.get(date), "weights": kept
+                        }
                     )
                     warmup_decisions.append(
-                        dict(
-                            date=date,
-                            instruction_kind="pool_exit",
-                            kind="reference_warmup",
-                        )
+                        {
+                            "date": date,
+                            "instruction_kind": "pool_exit",
+                            "kind": "reference_warmup",
+                        }
                     )
                     last_warmup_target = kept
             warmup_clock += 1
@@ -377,16 +378,16 @@ def _backtest(request, cancelled, emit):
                     and turnover > allocation["max_turnover"] + TOL
                 ):
                     raise ValueError("allocation_infeasible: pool exit turnover")
-                receipt = dict(
-                    schema_version=1,
-                    method=allocation["method"],
-                    names=list(weights),
-                    weights=list(weights.values()),
-                    status="analytic",
-                    instruction_kind="pool_exit",
-                    constraints=dict(turnover=turnover),
-                    exited_symbols=sorted(exits_pool),
-                )
+                receipt = {
+                    "schema_version": 1,
+                    "method": allocation["method"],
+                    "names": list(weights),
+                    "weights": list(weights.values()),
+                    "status": "analytic",
+                    "instruction_kind": "pool_exit",
+                    "constraints": {"turnover": turnover},
+                    "exited_symbols": sorted(exits_pool),
+                }
                 self.publish_target(date, weights, receipt, snapshot)
                 if date in by_date:
                     self.clock += 1
@@ -658,7 +659,7 @@ def backtest(request, cancelled, emit):
             partial = path.with_suffix(".partial")
             partial.write_text(json.dumps(artifact, allow_nan=False))
             partial.replace(path)
-        except Exception:
+        except (OSError, json.JSONDecodeError):
             # The supervised task also records the original error if the filesystem failed.
             pass
         raise

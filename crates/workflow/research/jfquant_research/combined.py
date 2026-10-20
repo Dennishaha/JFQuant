@@ -1,7 +1,8 @@
 """Frozen strategy targets -> capital allocation -> one net stock instruction."""
 
 import numpy as np
-from .allocation import solve, independent_checks, TOL
+
+from .allocation import independent_checks, solve
 
 
 class CombinedAllocator:
@@ -39,12 +40,12 @@ class CombinedAllocator:
                     raise ValueError(f"combined_reference_history_gap:{a}:{b}")
                 row.append(rows[b]["open_nav"] / rows[a]["open_nav"] - 1.0)
             result.append(row)
-        return np.asarray(result), dict(
-            first_signal_date=self.calendar[start],
-            last_signal_date=self.calendar[end],
-            last_return_date=self.calendar[end + 1 + h],
-            horizon=h,
-        )
+        return np.asarray(result), {
+            "first_signal_date": self.calendar[start],
+            "last_signal_date": self.calendar[end],
+            "last_return_date": self.calendar[end + 1 + h],
+            "horizon": h,
+        }
 
     def allocate(self, date, current):
         c = self.plan["execution"]["allocation"]
@@ -95,13 +96,13 @@ class CombinedAllocator:
             )
             capital_kind = "optimized"
         else:
-            receipt = dict(
-                schema_version=1,
-                method=c["method"],
-                names=self.names,
-                weights=self.capital.tolist(),
-                status="capital_drift",
-                constraints=independent_checks(
+            receipt = {
+                "schema_version": 1,
+                "method": c["method"],
+                "names": self.names,
+                "weights": self.capital.tolist(),
+                "status": "capital_drift",
+                "constraints": independent_checks(
                     self.capital,
                     1.0,
                     1.0,
@@ -111,7 +112,7 @@ class CombinedAllocator:
                     c["max_stock_weight"],
                     self.stock_exposure,
                 ),
-            )
+            }
             capital_kind = "drifted"
         weights = mapping @ self.capital
         receipt.update(

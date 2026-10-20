@@ -6,17 +6,16 @@ All samples and outputs go into a new directory; first passes are not strict col
 
 import argparse
 import json
-from pathlib import Path
 import resource
 import sys
 import threading
 import time
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-
 from allocation_fixture import backtest
 from jfquant_research.training import matrix, predict, train
 
@@ -60,25 +59,25 @@ def main():
         for i, symbol in enumerate(symbols):
             price = 10.0 + i * 0.1 + day * 0.002
             bars.append(
-                dict(
-                    date=date,
-                    symbol=symbol,
-                    open=price,
-                    high=price,
-                    low=price,
-                    close=price,
-                    volume=10000000.0,
-                )
+                {
+                    "date": date,
+                    "symbol": symbol,
+                    "open": price,
+                    "high": price,
+                    "low": price,
+                    "close": price,
+                    "volume": 10000000.0,
+                }
             )
             scores.append(
-                dict(date=date, symbol=symbol, score=float((i + day // 20) % 20))
+                {"date": date, "symbol": symbol, "score": float((i + day // 20) % 20)}
             )
     tables["bars"] = pa.Table.from_pylist(bars)
     tables["signals"] = pa.Table.from_pylist(scores)
     codecs = {
-        "uncompressed": dict(compression=None),
-        "snappy": dict(compression="snappy"),
-        "zstd1": dict(compression="zstd", compression_level=1),
+        "uncompressed": {"compression": None},
+        "snappy": {"compression": "snappy"},
+        "zstd1": {"compression": "zstd", "compression_level": 1},
     }
     if args.codec != "all":
         codecs = {args.codec: codecs[args.codec]}
@@ -87,22 +86,29 @@ def main():
         directory.mkdir()
         for name, table in tables.items():
             path = directory / f"{name}.parquet"
-            _, write_ms = measured(lambda: pq.write_table(table, path, **options))
-            actual, read_ms = measured(lambda: pq.read_table(path))
+
+            def _write(t=table, p=path, o=options):
+                return pq.write_table(t, p, **o)
+
+            def _read(p=path):
+                return pq.read_table(p)
+
+            _, write_ms = measured(_write)
+            actual, read_ms = measured(_read)
             assert actual.equals(table)
             stat = path.stat()
             print(
                 json.dumps(
-                    dict(
-                        codec=codec,
-                        sample=name,
-                        rows=len(table),
-                        bytes=stat.st_size,
-                        allocated_bytes=stat.st_blocks * 512,
-                        write_ms=write_ms,
-                        first_read_ms=read_ms,
-                        values_equal=True,
-                    )
+                    {
+                        "codec": codec,
+                        "sample": name,
+                        "rows": len(table),
+                        "bytes": stat.st_size,
+                        "allocated_bytes": stat.st_blocks * 512,
+                        "write_ms": write_ms,
+                        "first_read_ms": read_ms,
+                        "values_equal": True,
+                    }
                 ),
                 flush=True,
             )
@@ -113,65 +119,75 @@ def main():
             output = directory / phase
             output.mkdir()
             path = str(directory / "matrix.parquet")
-            _, matrix_ms = measured(lambda: matrix(path, columns))
+
+            def _matrix(p=path, c=columns):
+                return matrix(p, c)
+
+            _, matrix_ms = measured(_matrix)
             models = {}
-            spec = dict(
-                factor_ids=columns,
-                objective="Regression",
-                early_stopping_rounds=None,
-                parameters=dict(
-                    num_iterations=30,
-                    learning_rate=0.1,
-                    num_leaves=15,
-                    num_threads=1,
-                    deterministic=True,
-                    force_col_wise=True,
-                    seed=7,
-                ),
-            )
-            _, train_ms = measured(
-                lambda: train(
-                    dict(request=spec, train=path, output=str(output)),
-                    models,
+            spec = {
+                "factor_ids": columns,
+                "objective": "Regression",
+                "early_stopping_rounds": None,
+                "parameters": {
+                    "num_iterations": 30,
+                    "learning_rate": 0.1,
+                    "num_leaves": 15,
+                    "num_threads": 1,
+                    "deterministic": True,
+                    "force_col_wise": True,
+                    "seed": 7,
+                },
+            }
+
+            def _train(s=spec, p=path, o=output, m=models):
+                return train(
+                    {"request": s, "train": p, "output": str(o)},
+                    m,
                     threading.Event(),
                     lambda *a, **k: None,
                 )
-            )
+
+            _, train_ms = measured(_train)
             prediction = output / "prediction.parquet"
-            _, predict_ms = measured(
-                lambda: predict(
-                    dict(
-                        model=str(output / "model.txt"),
-                        matrix=path,
-                        output=str(prediction),
-                        contributions=False,
-                    ),
-                    models,
+
+            def _predict(o=output, p=path, m=models, pred=prediction):
+                return predict(
+                    {
+                        "model": str(o / "model.txt"),
+                        "matrix": p,
+                        "output": str(pred),
+                        "contributions": False,
+                    },
+                    m,
                 )
-            )
+
+            _, predict_ms = measured(_predict)
             predicted = pq.read_table(prediction)
             if baseline_predictions is None:
                 baseline_predictions = predicted
             assert predicted.equals(baseline_predictions)
-            request = dict(
-                bars=str(directory / "bars.parquet"),
-                signals=str(directory / "signals.parquet"),
-                signal_dates=dates,
-                output=str(output),
-                initial_cash=1000000.0,
-                top_n=5,
-                rebalance_days=20,
-                commission_rate=0.00025,
-                minimum_commission=5.0,
-                stamp_tax=0.0005,
-                transfer_fee=0.00001,
-                lot_sizes={s: 100 for s in symbols},
-                actions=[],
-                benchmark_returns={d: 0.0 for d in dates},
-            )
-            result, backtest_ms = measured(
-                lambda: backtest(request, threading.Event(), lambda *a, **k: None)
-            )
+            request = {
+                "bars": str(directory / "bars.parquet"),
+                "signals": str(directory / "signals.parquet"),
+                "signal_dates": dates,
+                "output": str(output),
+                "initial_cash": 1000000.0,
+                "top_n": 5,
+                "rebalance_days": 20,
+                "commission_rate": 0.00025,
+                "minimum_commission": 5.0,
+                "stamp_tax": 0.0005,
+                "transfer_fee": 0.00001,
+                "lot_sizes": {s: 100 for s in symbols},
+                "actions": [],
+                "benchmark_returns": {d: 0.0 for d in dates},
+            }
+
+            def _backtest(r=request):
+                return backtest(r, threading.Event(), lambda *a, **k: None)
+
+            result, backtest_ms = measured(_backtest)
             if baseline_days is None:
                 baseline_days = result["days"]
             assert result["days"] == baseline_days
@@ -180,26 +196,26 @@ def main():
             )
             print(
                 json.dumps(
-                    dict(
-                        codec=codec,
-                        phase=phase,
-                        matrix_ms=matrix_ms,
-                        train_ms=train_ms,
-                        predict_ms=predict_ms,
-                        backtest_ms=backtest_ms,
-                        predictions_equal=True,
-                        account_days_equal=True,
-                    )
+                    {
+                        "codec": codec,
+                        "phase": phase,
+                        "matrix_ms": matrix_ms,
+                        "train_ms": train_ms,
+                        "predict_ms": predict_ms,
+                        "backtest_ms": backtest_ms,
+                        "predictions_equal": True,
+                        "account_days_equal": True,
+                    }
                 ),
                 flush=True,
             )
     print(
         json.dumps(
-            dict(
-                peak_rss_bytes=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            {
+                "peak_rss_bytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
                 * (1 if sys.platform == "darwin" else 1024),
-                note="No OS cache purge: first/warm process passes, not strict cold measurements.",
-            )
+                "note": "No OS cache purge: first/warm process passes, not strict cold measurements.",
+            }
         ),
         flush=True,
     )

@@ -9,11 +9,11 @@ import argparse
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import shutil
 import subprocess
 import time
+from pathlib import Path
 
 
 def digest(path):
@@ -50,6 +50,7 @@ def main():
             [str(binary), "--workspace", str(root), *argv],
             capture_output=True,
             text=True,
+            check=False,
         )
         if result.returncode:
             raise RuntimeError(result.stdout + result.stderr)

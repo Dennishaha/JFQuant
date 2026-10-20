@@ -1,18 +1,17 @@
 """Behavioral acceptance of upstream execution and model artifacts."""
 
 import json
-from pathlib import Path
 import tempfile
 import threading
 import unittest
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-
 from allocation_fixture import backtest
-from jfquant_research.training import train, predict
+from jfquant_research.training import predict, train
 
 
 class RuntimeTests(unittest.TestCase):
@@ -221,13 +220,13 @@ class RuntimeTests(unittest.TestCase):
                         + event["fee"]
                     )
             positions = {s: q for s, q in positions.items() if abs(q) > 1e-8}
-            state = dict(
-                cash=ledger_cash,
-                equity=ledger_cash
+            state = {
+                "cash": ledger_cash,
+                "equity": ledger_cash
                 + sum(q * closes[(date, s)] for s, q in positions.items()),
-                positions=dict(positions),
-                holdings=len(positions),
-            )
+                "positions": dict(positions),
+                "holdings": len(positions),
+            }
             snapshots[date] = state
             day["holdings"] = len(positions)
         self.assertEqual(native["terminal"]["positions"], positions)

@@ -1,9 +1,9 @@
 """Checks the reproducibility and scope of the dependency receipt."""
 
 import copy
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 
 from execution_dependencies import receipt
 

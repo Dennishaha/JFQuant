@@ -2,8 +2,11 @@
 certification of ambiguous original formulas. Synthetic fixture only; no Qlib.
 Run: python reference_ops.py CATALOG_JSON OUTPUT_JSON
 """
-import json, sys
+import json
+import sys
+
 import numpy as np
+
 DAYS, STOCKS = 320, 6
 rng = np.random.default_rng(191)
 shape=(DAYS,STOCKS)
@@ -18,14 +21,14 @@ bopen=bclose+rng.uniform(-1,1,DAYS)
 def delay(x,n=1):
     out=np.full(shape,np.nan);out[n:]=x[:-n];return out
 previous=delay(close);previous_open=delay(open_)
-inputs=dict(open=open_,close=close,high=high,low=low,volume=volume,vwap=vwap,amount=volume*vwap,
-    ret=close/previous-1,hd=high-delay(high),ld=delay(low)-low,
-    tr=np.maximum.reduce([high-low,abs(high-previous),abs(low-previous)]),
-    dtm=np.where(open_<=previous_open,0,np.maximum(high-open_,open_-previous_open)),
-    dbm=np.where(open_>=previous_open,0,np.maximum(open_-low,open_-previous_open)),
-    banchmarkindexclose=np.repeat(bclose[:,None],STOCKS,axis=1),
-    banchmarkindexopen=np.repeat(bopen[:,None],STOCKS,axis=1),
-    mkt=rng.normal(0,.01,shape),smb=rng.normal(0,.01,shape),hml=rng.normal(0,.01,shape))
+inputs={'open': open_,'close': close,'high': high,'low': low,'volume': volume,'vwap': vwap,'amount': volume*vwap,
+    'ret': close/previous-1,'hd': high-delay(high),'ld': delay(low)-low,
+    'tr': np.maximum.reduce([high-low,abs(high-previous),abs(low-previous)]),
+    'dtm': np.where(open_<=previous_open,0,np.maximum(high-open_,open_-previous_open)),
+    'dbm': np.where(open_>=previous_open,0,np.maximum(open_-low,open_-previous_open)),
+    'banchmarkindexclose': np.repeat(bclose[:,None],STOCKS,axis=1),
+    'banchmarkindexopen': np.repeat(bopen[:,None],STOCKS,axis=1),
+    'mkt': rng.normal(0,.01,shape),'smb': rng.normal(0,.01,shape),'hml': rng.normal(0,.01,shape)}
 inputs['dtm'][0]=np.nan;inputs['dbm'][0]=np.nan
 
 def rolling(x,n,fn):
@@ -119,11 +122,13 @@ def evaluate(ast):
 
 def clean(x):return [float(v) if np.isfinite(v) else None for v in x.ravel()]
 if __name__=='__main__':
-    catalog=json.load(open(sys.argv[1]));expected={}
+    with open(sys.argv[1]) as catalog_file:
+        catalog=json.load(catalog_file)
+    expected={}
     np.seterr(all='ignore')
     for spec in catalog['specs']:
         if 'Unsupported' not in spec['expression']:
             result=evaluate(spec['expression']);expected[spec['id']]=clean(result[-3:])
     with open(sys.argv[2],'w') as f:
-        json.dump(dict(formula_version=catalog['specs'][0]['version'],origin='Independent NumPy operator oracle over exported AST; not original-formula certification',days=DAYS,stocks=STOCKS,tail_days=3,columns={k:clean(v) for k,v in inputs.items()},expected=expected),f,separators=(',',':'),allow_nan=False)
+        json.dump({'formula_version': catalog['specs'][0]['version'],'origin': 'Independent NumPy operator oracle over exported AST; not original-formula certification','days': DAYS,'stocks': STOCKS,'tail_days': 3,'columns': {k:clean(v) for k,v in inputs.items()},'expected': expected},f,separators=(',',':'),allow_nan=False)
     print('goldens',len(expected),'all-null tails',[k for k,v in expected.items() if all(x is None for x in v)])

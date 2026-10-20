@@ -2,6 +2,7 @@
 import argparse
 import bisect
 import hashlib
+import itertools
 import json
 from collections import Counter, defaultdict
 from datetime import date
@@ -57,7 +58,7 @@ def audit(cli, sources_path):
     indexed = {}
     for symbol, rows in runs.items():
         ranges = sorted(run_indices(calendar, r) for r in rows)
-        if any(a[1] >= b[0] for a, b in zip(ranges, ranges[1:])):
+        if any(a[1] >= b[0] for a, b in itertools.pairwise(ranges)):
             raise ValueError("overlapping membership runs")
         indexed[symbol] = ranges
     years = range(calendar[0].year, calendar[-1].year + 1)

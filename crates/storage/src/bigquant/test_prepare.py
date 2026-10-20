@@ -2,8 +2,8 @@
 import unittest
 from datetime import date
 
-from prepare import equity_candidate, instrument_id, merged_runs, run_indices
 from audit_annual import latest_version
+from prepare import equity_candidate, instrument_id, merged_runs, run_indices
 
 
 class PrepareTests(unittest.TestCase):

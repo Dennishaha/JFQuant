@@ -5,8 +5,9 @@ NumPy time/cross-section helpers. Run: python reference_completion.py OUTPUT_JSO
 """
 import hashlib
 import json
-from pathlib import Path
 import sys
+from pathlib import Path
+
 import numpy as np
 import reference_ops as ops
 

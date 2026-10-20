@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: jfquant-collectors
+Version: 0.1.0
+Requires-Python: <3.13,>=3.12
+Requires-Dist: requests==2.34.2
+Requires-Dist: pandas==3.0.6
+Requires-Dist: pypdf[image]==6.20.1
+Requires-Dist: tdxaidata==1.2.2

@@ -5,9 +5,10 @@ import decimal
 import io
 import json
 import math
-import sys
-import signal
 import re
+import signal
+import sys
+
 
 # Includes authentication and Flight read; parent also supervises task cancellation.
 def deadline_expired(*_):
@@ -35,7 +36,7 @@ def clean(value):
 def read_allowance(quota, table, columns, max_rows):
     """Check the current SDK allowlist and worst-case cells before downloading."""
     if not isinstance(quota, dict) or not isinstance(quota.get('datasources'), list):
-        raise RuntimeError('quota response invalid')
+        raise TypeError('quota response invalid')
     if table not in quota['datasources']:
         raise PermissionError('table not in SDK allowlist')
     weekly = quota.get('weekly_quota')
@@ -120,6 +121,6 @@ def error_code(error):
 if __name__ == '__main__':
     try:
         result = main()
-    except Exception as error:
+    except (OSError, ValueError, TypeError, PermissionError, KeyError) as error:
         result = {'ok': False, 'error': error_code(error)}
     print(json.dumps(result, ensure_ascii=False, allow_nan=False, separators=(',', ':')))

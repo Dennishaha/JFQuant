@@ -37,7 +37,7 @@ def number(value):
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, (int, float, str)):
-        raise ValueError("invalid numeric type")
+        raise TypeError("invalid numeric type")
     result = float(value)
     if not math.isfinite(result) or abs(result) > 1e25:
         raise ValueError("nonfinite number or sentinel")
@@ -249,9 +249,8 @@ def prepare(cli, manifest_path, output):
                     for c in {"volume", "amount"} & r.keys():
                         if r[c] is not None and r[c] < 0:
                             raise ValueError("negative volume or amount")
-                    if kind == "price_bars" and all(r[c] is not None for c in ("open", "high", "low", "close")):
-                        if not r["low"] <= min(r["open"], r["close"]) <= max(r["open"], r["close"]) <= r["high"]:
-                            raise ValueError("invalid OHLC ordering")
+                    if kind == "price_bars" and all(r[c] is not None for c in ("open", "high", "low", "close")) and not r["low"] <= min(r["open"], r["close"]) <= max(r["open"], r["close"]) <= r["high"]:
+                        raise ValueError("invalid OHLC ordering")
                     r["quote_state"] = "priced" if r["close"] is not None else "missing_close_suspended" if key in suspensions else "missing_close_unexplained"
                     issues[r["quote_state"]] += 1
                     if r["adjust_factor"] is None:

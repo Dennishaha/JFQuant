@@ -5,7 +5,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = ["requests==2.34.2", "pandas==3.0.6", "pypdf[image]==6.20.1", "tdxaidata==1.2.2"]
 
 [build-system]
-requires = ["setuptools>=75"]
+requires = ["setuptools>=84.0.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]

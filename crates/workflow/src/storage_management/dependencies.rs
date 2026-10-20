@@ -266,6 +266,10 @@ fn unresolved_metadata(r: &mut Registry<'_>, context: &TaskContext) -> Result<()
             f.owners.is_empty()
                 && !r.metadata.contains_key(&f.path)
                 && f.path.extension().is_some_and(|e| e == "json")
+                && !f
+                    .path
+                    .to_string_lossy()
+                    .starts_with(".jfquant/archive/json-migration-")
                 && !super::inventory::volatile(r, &f.path)
                 && !f.path.ancestors().any(|root| {
                     r.runs
@@ -275,12 +279,22 @@ fn unresolved_metadata(r: &mut Registry<'_>, context: &TaskContext) -> Result<()
         })
         .map(|f| f.path.clone())
         .collect();
+    let mut values_with_paths =
+        analytics_storage::metadata::ConfigStore::open(&r.w.database_path()?)?
+            .entries()?
+            .into_iter()
+            .map(|(k, v)| (PathBuf::from(k), v))
+            .collect::<Vec<_>>();
     for path in unknown {
         context.check()?;
         let value = match r.metadata(&path) {
             Ok(v) => v,
             Err(_) => continue,
         };
+        values_with_paths.push((path, value));
+    }
+    for (path, value) in values_with_paths {
+        r.metadata.insert(path.clone(), crate::signature(&value)?);
         let mut values = vec![];
         strings(&value, &mut values);
         for value in values {

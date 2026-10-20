@@ -257,3 +257,14 @@ App、CLI和服务同步使用协议46，拒绝45；缓存旧格式重建，清�
 存储优化预览分别显示证据包数、文件条目数和唯一对象数；文件条目包括内容相同的历史副本，唯一对象按原文字节SHA256去重。
 
 发布构建的容量、耗时、峰值内存及压缩计算验收见[SQLite首版实测](../workflow/src/storage_management/README.md#2026-10-20-sqlite-首版验收)；全量索引重建存在额外耗时，不保证压缩能减少所有小文件的分配空间。
+
+
+## SQLite元数据与迁移预览（协议47）
+
+App沿用后台worker查询Catalog和运行记录，UI不持有SQLite、DuckDB或LightGBM连接。
+证据优化预览仍显示包和成员计数，完整成员存于工作区数据库；按钮复制计划ID，CLI使用
+`storage migrate show --plan UUID`查询。旧元数据需先停止旧服务并用新CLI执行
+`storage migrate-json`；备份、日志及恢复由workflow负责。服务协议47拒绝旧客户端。
+
+验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-desktop`；完整数据流和离线命令见
+[存储管理](../workflow/src/storage_management/README.md#json元数据拆表协议47)。

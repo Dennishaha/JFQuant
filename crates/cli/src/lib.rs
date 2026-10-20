@@ -1210,6 +1210,37 @@ pub fn execute(cli: Cli) -> Result<Value, ServiceError> {
             json!({"factor_set":set,"formula_version":analytics_factor::alpha158::version(set),"factors":registry.all().collect::<Vec<_>>(),"audit":if matches!(set,analytics_core::research_quality::FactorSet::Gtja191){serde_json::to_value(analytics_factor::audit::entries()).map_err(invalid)?}else{json!([])}}),
         );
     }
+    if let Command::Storage(storage::StorageCommand::Migrate {
+        command: storage::MigrationCommand::Show { plan },
+    }) = &cli.command
+    {
+        let root = analytics_workflow::service::resolve_workspace(cli.workspace.clone())?;
+        let w = Workspace::open(root).map_err(invalid)?;
+        return analytics_storage::migration_store::MigrationStore::open(
+            &w.database_path().map_err(invalid)?,
+        )
+        .map_err(invalid)?
+        .get(&plan.to_string())
+        .map_err(invalid)?
+        .ok_or_else(|| invalid("migration plan not found"));
+    }
+    if let Command::Storage(storage::StorageCommand::MigrateJson { rollback }) = &cli.command {
+        let root = analytics_workflow::service::resolve_workspace(cli.workspace.clone())?;
+        let mut migration =
+            analytics_workflow::storage_management::json_migration::JsonToSqliteMigration::open(
+                &root,
+            )
+            .map_err(invalid)?;
+        if let Some(id) = rollback {
+            return migration.rollback(*id).map_err(invalid);
+        }
+        return serde_json::to_value(
+            migration
+                .execute(&analytics_core::task::TaskContext::default())
+                .map_err(invalid)?,
+        )
+        .map_err(invalid);
+    }
     if let Command::SelfCheck { output } = &cli.command {
         let output = output.clone();
         return std::thread::spawn(move || {

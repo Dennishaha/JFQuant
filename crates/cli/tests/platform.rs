@@ -194,8 +194,13 @@ fn storage_cli_migration_and_export_share_worker_and_preserve_business_bytes() {
         .unwrap();
     let preview = s.client.wait(task, Some(20)).unwrap()["results"].clone();
     assert_eq!(preview["blockers"], json!([]), "{preview}");
-    let exact = w.resolve(preview["members_manifest"].as_str().unwrap());
-    let full: Value = serde_json::from_slice(&std::fs::read(exact).unwrap()).unwrap();
+    let full = s.json(&[
+        "storage",
+        "migrate",
+        "show",
+        "--plan",
+        preview["id"].as_str().unwrap(),
+    ]);
     assert!(full["packages"][0]["members"].is_array());
     assert!(preview["packages"][0]["members"].is_u64());
     let plan = preview["id"].as_str().unwrap();

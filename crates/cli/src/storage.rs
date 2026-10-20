@@ -4,6 +4,12 @@ use analytics_workflow::storage_management::{StorageInventory, StorageRequest};
 
 #[derive(Debug, Subcommand)]
 pub enum StorageCommand {
+    /// Import legacy JSON metadata once, offline with backup and a durable journal.
+    MigrateJson {
+        /// Restore one import before any subsequent authoritative metadata change.
+        #[arg(long)]
+        rollback: Option<Uuid>,
+    },
     /// Submit a metadata-only workspace scan; inspect using jobs wait/results.
     Scan {
         #[arg(long, value_enum, default_value = "overview")]
@@ -56,6 +62,11 @@ pub enum StorageCommand {
 }
 #[derive(Debug, Subcommand)]
 pub enum MigrationCommand {
+    /// Read exact persisted migration packages and candidates directly from SQLite.
+    Show {
+        #[arg(long)]
+        plan: Uuid,
+    },
     /// Read durable migration results and retry identifiers.
     History,
     Plan {
@@ -94,7 +105,11 @@ pub(super) enum Action {
 }
 pub(super) fn prepare(client: &Client, command: StorageCommand) -> Result<Action, ServiceError> {
     let task = match command {
+        StorageCommand::MigrateJson { .. } => {
+            return Err(invalid("JSON migration must run offline"));
+        }
         StorageCommand::Migrate { command } => match command {
+            MigrationCommand::Show { .. } => return Err(invalid("plan show is handled locally")),
             MigrationCommand::History => {
                 return Ok(Action::Read(client.call(Rpc::StorageMigrations)?));
             }

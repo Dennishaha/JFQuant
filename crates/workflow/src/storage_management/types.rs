@@ -64,7 +64,7 @@ pub struct MigrationPreview {
     pub workspace: PathBuf,
     pub scan_id: Uuid,
     pub created_at: String,
-    pub members_manifest: PathBuf,
+    pub members_database: PathBuf,
     pub packages: Vec<MigrationPackagePreview>,
     /// Distinct original-byte hashes, rather than file paths or filesystem identities.
     pub unique_objects: u64,
@@ -89,10 +89,7 @@ impl From<&MigrationPlan> for MigrationPreview {
             workspace: plan.workspace.clone(),
             scan_id: plan.scan_id,
             created_at: plan.created_at.clone(),
-            members_manifest: PathBuf::from(format!(
-                ".jfquant/storage/migration-plans/{}.json",
-                plan.id
-            )),
+            members_database: PathBuf::from(analytics_storage::database::INDEX),
             packages: plan
                 .packages
                 .iter()

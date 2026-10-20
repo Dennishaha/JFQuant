@@ -79,7 +79,9 @@ pub fn snapshot(w: &Workspace, job: &Job) -> Result<Value> {
     for id in &job.plan().sources {
         crate::storage_management::require_available(w, *id, "predictions")?;
         let root = w.resolve(format!(".jfquant/runs/{id}"));
-        let run: crate::RunRecord = serde_json::from_slice(&fs::read(root.join("run.json"))?)?;
+        let run: crate::RunRecord = serde_json::from_slice(
+            &analytics_storage::evidence_store::read(root.join("run.json"))?,
+        )?;
         if run.id != *id
             || run.status != RunStatus::Succeeded
             || run.read_only
@@ -88,7 +90,9 @@ pub fn snapshot(w: &Workspace, job: &Job) -> Result<Value> {
         {
             return Err("combined_source_requires_current_native_stock_task".into());
         }
-        let summary: Value = serde_json::from_slice(&fs::read(root.join("summary.json"))?)?;
+        let summary: Value = serde_json::from_slice(&analytics_storage::evidence_store::read(
+            root.join("summary.json"),
+        )?)?;
         validate_result(&summary)?;
         if summary["kind"] == "combined" || summary["execution"].get("combined_sources").is_some() {
             return Err("combined_source_recursion_forbidden".into());
@@ -128,16 +132,20 @@ pub fn execute(
         context.check()?;
         let root = w.resolve(format!(".jfquant/runs/{id}"));
         crate::allocation::verify_artifacts(&root)?;
-        let r: ResearchRequest =
-            serde_json::from_slice(&fs::read(root.join("research-request.json"))?)?;
-        let summary: Value = serde_json::from_slice(&fs::read(root.join("summary.json"))?)?;
+        let r: ResearchRequest = serde_json::from_slice(&analytics_storage::evidence_store::read(
+            root.join("research-request.json"),
+        )?)?;
+        let summary: Value = serde_json::from_slice(&analytics_storage::evidence_store::read(
+            root.join("summary.json"),
+        )?)?;
         let identity = json!({"market":summary["execution"]["market_content_sha256"],"events":summary["execution"]["corporate_action_sha256"],"policy":r.corporate_event_policy.unwrap_or_default(),"rights":r.rights_policy,"action_policy":r.action_policy,"event_check_policy":r.event_check_policy});
         if contract.as_ref().is_some_and(|c| c != &identity) {
             return Err("combined_sources_market_calendar_or_event_contract_mismatch".into());
         }
         contract = Some(identity);
-        let reference: Value =
-            serde_json::from_slice(&fs::read(root.join("reference-account.json"))?)?;
+        let reference: Value = serde_json::from_slice(&analytics_storage::evidence_store::read(
+            root.join("reference-account.json"),
+        )?)?;
         let rows = reference["rows"]
             .as_array()
             .ok_or("combined_reference_rows_missing")?;
@@ -154,8 +162,9 @@ pub fn execute(
         if first > plan.range.start || last < plan.range.end {
             return Err("combined_source_does_not_cover_formal_range".into());
         }
-        let allocation: Value =
-            serde_json::from_slice(&fs::read(root.join("allocation_report.json"))?)?;
+        let allocation: Value = serde_json::from_slice(&analytics_storage::evidence_store::read(
+            root.join("allocation_report.json"),
+        )?)?;
         for t in allocation["targets"]
             .as_array()
             .ok_or("combined_targets_missing")?
@@ -255,8 +264,9 @@ pub fn execute(
     }
     let mut execution = json!({"mode":"akquant_ex_date","accounting_version":"rust-filled-trade-ledger-v1","market_content_sha256":crate::market_content_hash(&request.data_root)?,"corporate_action_sha256":file_hash(request.corporate_actions.as_ref().unwrap())?,"execution_checks_sha256":file_hash(&output.join("execution_checks.json"))?,"execution_dependencies_sha256":file_hash(&output.join("execution-dependencies.json"))?,"event_check_policy":request.event_check_policy,"initial_cash_cny":request.initial_cash_cny,"market_rules":request.market_rules,"research_config":request.config,"combined_sources":frozen,"corporate_event_policy":request.corporate_event_policy,"runtime_signature":crate::research::worker::runtime_signature(),"dependency_signature":crate::research::worker::dependency_signature()});
     if output.join("rights_input.json").exists() {
-        let l: analytics_core::rights_account::Ledger =
-            serde_json::from_slice(&fs::read(output.join("rights_input.json"))?)?;
+        let l: analytics_core::rights_account::Ledger = serde_json::from_slice(
+            &analytics_storage::evidence_store::read(output.join("rights_input.json"))?,
+        )?;
         execution["accounting_version"] = "rust-filled-trade-ledger-events-v3".into();
         execution["rights_input_sha256"] = file_hash(&output.join("rights_input.json"))?.into();
         execution["rights_policy"] = serde_json::to_value(l.policy)?;
@@ -301,12 +311,13 @@ pub fn execute(
     crate::allocation::publish_artifacts(&output)?;
     execution["allocation_components"] = crate::allocation::component_signatures();
     execution["allocation_display"] = crate::allocation::display(&output)?;
-    execution["allocation_artifacts"] =
-        serde_json::from_slice(&fs::read(output.join("allocation-manifest.json"))?)?;
+    execution["allocation_artifacts"] = serde_json::from_slice(
+        &analytics_storage::evidence_store::read(output.join("allocation-manifest.json"))?,
+    )?;
     save(output.join("execution.json"), &execution)?;
     let factor_signature = crate::signature(&frozen)?;
     let signature = crate::signature(&(&factor_signature, &execution))?;
-    let summary = json!({"schema_version":RESEARCH_SCHEMA_VERSION,"kind":"combined","skipped_events":[],"skipped_event_count":0,"event_simulation_complete":false,"backtest_status":if days.iter().any(|d|d.turnover>0.){"completed"}else{"no_valid_trades"},"signature":signature,"factor_signature":factor_signature,"execution":execution,"aggregate":portfolio::performance(&days),"fold_reports":[],"annual_reports":[],"execution_diagnostics":{"corporate_events":if output.join("corporate_event_report.json").exists(){serde_json::from_slice::<Value>(&fs::read(output.join("corporate_event_report.json"))?)?}else{Value::Null}},"reference_return_basis":"fractional zero-fee targets; actual account includes execution fees","source_selection_warning":"retrospective source strategy choice"});
+    let summary = json!({"schema_version":RESEARCH_SCHEMA_VERSION,"kind":"combined","skipped_events":[],"skipped_event_count":0,"event_simulation_complete":false,"backtest_status":if days.iter().any(|d|d.turnover>0.){"completed"}else{"no_valid_trades"},"signature":signature,"factor_signature":factor_signature,"execution":execution,"aggregate":portfolio::performance(&days),"fold_reports":[],"annual_reports":[],"execution_diagnostics":{"corporate_events":if output.join("corporate_event_report.json").exists(){serde_json::from_slice::<Value>(&analytics_storage::evidence_store::read(output.join("corporate_event_report.json"))?)?}else{Value::Null}},"reference_return_basis":"fractional zero-fee targets; actual account includes execution fees","source_selection_warning":"retrospective source strategy choice"});
     save(output.join("daily.json"), &days)?;
     save(output.join("fold_reports.json"), &json!([]))?;
     save(output.join("annual_reports.json"), &json!([]))?;
@@ -381,9 +392,10 @@ mod tests {
         w.finish(&mut run, RunStatus::Succeeded, None).unwrap();
         super::super::verification::report(&w, run.id).unwrap();
         let root = w.resolve(&run.output);
-        let report: Value =
-            serde_json::from_slice(&fs::read(root.join("allocation_report.json")).unwrap())
-                .unwrap();
+        let report: Value = serde_json::from_slice(
+            &analytics_storage::evidence_store::read(root.join("allocation_report.json")).unwrap(),
+        )
+        .unwrap();
         assert!(report["targets"].as_array().unwrap().iter().all(|t| {
             t["weights"]
                 .as_object()
@@ -394,12 +406,15 @@ mod tests {
                 <= 0.98 + 1e-6
         }));
         assert!(!root.join("fold-0000/model.txt").exists());
-        let combined_bytes = fs::read(root.join("combined-input.json")).unwrap();
+        let combined_bytes =
+            analytics_storage::evidence_store::read(root.join("combined-input.json")).unwrap();
         fs::write(root.join("combined-input.json"), b"{}").unwrap();
         assert!(crate::allocation::verify_artifacts(&root).is_err());
         fs::write(root.join("combined-input.json"), &combined_bytes).unwrap();
-        let bytes = fs::read(root.join("allocation_report.json")).unwrap();
-        let manifest = fs::read(root.join("allocation-manifest.json")).unwrap();
+        let bytes =
+            analytics_storage::evidence_store::read(root.join("allocation_report.json")).unwrap();
+        let manifest =
+            analytics_storage::evidence_store::read(root.join("allocation-manifest.json")).unwrap();
         let mut changed = report.clone();
         changed["decisions"][0]["mapping"][0][0] = json!(0.123);
         save(root.join("allocation_report.json"), &changed).unwrap();

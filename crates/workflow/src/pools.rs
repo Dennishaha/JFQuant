@@ -1,5 +1,5 @@
 //! Immutable pool catalog and resolution shared by App, CLI and the research worker.
-use crate::{Result, Workspace, atomic_json, signature, version};
+use crate::{Result, Workspace, signature, version};
 use analytics_core::{
     Date,
     pool::{PoolDefinition, PoolMembership},
@@ -29,11 +29,12 @@ impl Workspace {
             signature,
             definition,
         };
-        let path = self.resolve(format!(".jfquant/pools/{id}.json"));
-        if path.exists() {
+        let store = analytics_storage::metadata::ConfigStore::open(&self.database_path()?)?;
+        let key = format!(".jfquant/pools/{id}.json");
+        if store.get::<PoolVersion>(&key)?.is_some() {
             return self.pool(&id);
         }
-        atomic_json(&path, &item)?;
+        store.set(&key, "pool", &item)?;
         Ok(item)
     }
     /// Read a pool version, rejecting modified content and invalid identities.
@@ -44,9 +45,10 @@ impl Workspace {
         {
             return Err("invalid pool version ID".into());
         }
-        let p: PoolVersion = serde_json::from_slice(&fs::read(
-            self.resolve(format!(".jfquant/pools/{id}.json")),
-        )?)?;
+        let p: PoolVersion =
+            analytics_storage::metadata::ConfigStore::open(&self.database_path()?)?
+                .get(&format!(".jfquant/pools/{id}.json"))?
+                .ok_or("pool not found")?;
         p.definition.validate()?;
         let hash = signature(&p.definition)?;
         if p.id != id || p.signature != hash || format!("pool-{}", &hash[7..23]) != id {
@@ -56,20 +58,11 @@ impl Workspace {
     }
     /// List independently validated pool versions.
     pub fn pools(&self) -> Result<Vec<PoolVersion>> {
-        let root = self.resolve(".jfquant/pools");
-        if !root.exists() {
-            return Ok(vec![]);
-        }
-        let mut out = vec![];
-        for e in fs::read_dir(root)? {
-            let p = e?.path();
-            if p.extension().is_some_and(|e| e == "json") {
-                let id = p
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .ok_or("invalid pool path")?;
-                out.push(self.pool(id)?);
-            }
+        let entries: Vec<PoolVersion> =
+            analytics_storage::metadata::ConfigStore::open(&self.database_path()?)?.list("pool")?;
+        let mut out = Vec::new();
+        for p in entries {
+            out.push(self.pool(&p.id)?);
         }
         out.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(out)

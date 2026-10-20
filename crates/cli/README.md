@@ -430,8 +430,30 @@ For `research replay-predictions --allocation allocation.json`, use the same com
 
 `storage export --resource ID --output NEW_DIRECTORY`提交生成原始文件独立包的任务，拒绝覆盖已有目录。协议45缓存重建、旧未执行计划重预览；现有事务继续恢复。真实工作区先预览，未经显式确认不执行迁移。实现及恢复细节见[存储管理](../workflow/src/storage_management/README.md)。验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli storage_`。
 
-迁移预览返回轻量`MigrationPreview`，`packages[].members`为精确成员数，`members_manifest`指向工作区相对完整计划JSON；可用`jq '.packages[].members' "$JFQUANT_WORKSPACE/.jfquant/storage/migration-plans/PLAN_ID.json"`查看精确文件，不通过RPC传输巨型清单。回执区分新增对象、移除原文、正文逻辑变化及磁盘差；业务恢复失败时先修复磁盘/权限，再`jfquant service restart`完成权威恢复。
+迁移预览返回轻量`MigrationPreview`，`packages[].members`为精确成员数，`members_database`指向工作区数据库。`jfquant storage migrate show --plan PLAN_ID`直接查询完整成员；精确成员不通过RPC传输。回执区分新增对象、移除原文、正文逻辑变化及磁盘差；业务恢复失败时先修复磁盘/权限，再`jfquant service restart`完成恢复。
 
-迁移预览返回文件条目数和`unique_objects`（按原文字节SHA256去重）；前者包括历史副本，均不含目录。完整成员路径在`members_manifest`指向的计划JSON中。新证据由生产者明确登记manifest与归属。
+迁移预览的文件条目数包括历史副本；`unique_objects`按原文字节SHA256去重，均不含目录。新证据由生产者明确登记manifest与归属。
 
 发布构建的容量、耗时、峰值内存及压缩计算验收见[SQLite首版实测](../workflow/src/storage_management/README.md#2026-10-20-sqlite-首版验收)；全量索引重建存在额外耗时，不保证压缩能减少所有小文件的分配空间。
+
+## JSON元数据一次性迁移（协议47）
+
+新CLI提供离线`storage migrate-json`，取得独占租约后备份原数据库/JSON、事务导入SQLite v2、
+校验后移除原JSON；正常入口不读旧元数据。旧服务须先用匹配版本的CLI等待任务结束并停止，
+再用新CLI迁移。原字节与journal保留在工作区中，不提交Git。提交前失败保留原文件并回滚SQL，
+提交后重试命令或启动恢复会按提交凭据完成操作。
+
+```bash
+export JFQUANT_WORKSPACE=/absolute/workspace
+jfquant service stop
+jfquant storage migrate-json
+# 仅迁移后尚无新元数据写入时可撤销：
+# jfquant storage migrate-json --rollback IMPORT_UUID
+jfquant storage scan --level resources --threads 4
+jfquant jobs wait TASK_UUID --timeout 600
+jfquant storage migrate show --plan PLAN_UUID
+DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli
+```
+
+数据库中的迁移计划可用`storage migrate show`直接读取，不需要启动服务。完整字段、备份位置、
+恢复边界和性能复现见[存储管理](../workflow/src/storage_management/README.md#json元数据拆表协议47)。

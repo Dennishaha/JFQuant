@@ -25,4 +25,5 @@ parquet.workspace = true
 thiserror.workspace = true
 rust_decimal = { version = "=1.43.0", default-features = false, features = ["std", "serde-with-str"] }
 
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 tempfile = "3.23"

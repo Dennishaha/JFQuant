@@ -232,71 +232,8 @@ impl ResearchTemplate {
         profiles::WorkflowDocument::write(self, path)
     }
 }
-/// A verified local input version. Corporate action readiness is separate from download success.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DataVersion {
-    /// Stable ID.
-    pub id: String,
-    /// market or actions.
-    pub kind: String,
-    /// Workspace-relative dataset root or action JSON path.
-    pub path: PathBuf,
-    /// Acquisition/provenance fingerprint.
-    pub signature: String,
-    /// First covered date when known.
-    pub start: Option<String>,
-    /// Last covered date when known.
-    pub end: Option<String>,
-    /// Complete source identity/provenance or coverage details.
-    pub details: Value,
-}
-/// Durable terminal and transient run states.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunStatus {
-    /// Work is executing.
-    Running,
-    /// Finished normally.
-    Succeeded,
-    /// Failed without corrupting other runs.
-    Failed,
-    /// Input coverage blocks research.
-    Blocked,
-    /// User cancelled.
-    Cancelled,
-    /// Process stopped before recording completion.
-    Interrupted,
-    /// Historical artifacts registered read-only.
-    Imported,
-}
-/// One local task record; input snapshots are never overwritten by data updates.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RunRecord {
-    /// Record schema, currently 1.
-    pub schema_version: u32,
-    /// Task/run UUID.
-    pub id: Uuid,
-    /// Display operation.
-    pub operation: String,
-    /// UTC creation time.
-    pub started_at: String,
-    /// UTC terminal time.
-    pub finished_at: Option<String>,
-    /// Durable task state.
-    pub status: RunStatus,
-    /// Frozen request and data versions.
-    pub request: Value,
-    /// Request signature.
-    pub signature: String,
-    /// Workspace-relative output location.
-    pub output: PathBuf,
-    /// Last task stage.
-    pub stage: String,
-    /// Failure or incomplete-data explanation.
-    pub error: Option<String>,
-    /// Read-only imported run marker.
-    pub read_only: bool,
-}
+pub use analytics_storage::catalog::CatalogEntry as DataVersion;
+pub use analytics_storage::run_store::{RunRecord, RunStatus};
 /// An operation selectable in the data or research UI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]

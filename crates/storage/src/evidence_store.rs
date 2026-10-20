@@ -74,13 +74,12 @@ impl Default for Registry {
         }
     }
 }
-#[derive(Clone)]
-struct Cached {
-    stamp: Option<FileStamp>,
-    registry: Registry,
-    maps: BTreeMap<String, (FileStamp, PackageMap)>,
+struct Reader {
+    db: crate::package_store::PackageStore,
+    version: i64,
+    validated: BTreeSet<String>,
 }
-thread_local! { static CACHE:RefCell<BTreeMap<PathBuf,Cached>>=const { RefCell::new(BTreeMap::new()) }; }
+thread_local! { static CACHE:RefCell<BTreeMap<PathBuf,Reader>>=const { RefCell::new(BTreeMap::new()) }; }
 pub fn invalidate(root: &Path) {
     CACHE.with(|c| {
         c.borrow_mut().remove(root);
@@ -104,25 +103,10 @@ pub fn owned(root: &Path, relative: &Path) -> io::Result<PathBuf> {
     Ok(p)
 }
 pub fn registry(root: &Path) -> io::Result<Registry> {
-    let path = owned(root, Path::new(REGISTRY))?;
-    if !path.try_exists()? {
-        return Ok(Registry::default());
-    }
-    let r: Registry = serde_json::from_slice(&fs::read(path)?).map_err(invalid)?;
-    if r.schema_version != 1 {
-        return Err(invalid("unsupported registry format"));
-    }
-    for (id, l) in &r.packages {
-        if id.len() != 64
-            || !id.bytes().all(|b| b.is_ascii_hexdigit())
-            || !safe(&l.root)
-            || !l.map_sha256.starts_with("sha256:")
-        {
-            return Err(invalid("invalid package locator"));
-        }
-    }
-    Ok(r)
+    crate::package_store::PackageStore::open(&owned(root, Path::new(crate::database::INDEX))?)?
+        .registry()
 }
+/// Legacy logical identifier retained for diagnostics; maps live in SQLite.
 pub fn map_path(root: &Path, id: &str) -> io::Result<PathBuf> {
     if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(invalid("invalid package ID"));
@@ -133,40 +117,37 @@ pub fn map_path(root: &Path, id: &str) -> io::Result<PathBuf> {
     )
 }
 pub fn load_map(root: &Path, id: &str, locator: &PackageLocator) -> io::Result<PackageMap> {
-    let bytes = fs::read(map_path(root, id)?)?;
-    if digest(&bytes) != locator.map_sha256 {
+    let map =
+        crate::package_store::PackageStore::open(&owned(root, Path::new(crate::database::INDEX))?)?
+            .get(id)?
+            .ok_or_else(|| invalid("package map unavailable"))?;
+    if map.root != locator.root {
         return Err(invalid("package map changed"));
-    }
-    let map: PackageMap = serde_json::from_slice(&bytes).map_err(invalid)?;
-    if map.schema_version != 1
-        || map.id != id
-        || map.root != locator.root
-        || !safe(&map.root)
-        || !safe(&map.identity_root)
-        || !safe(&map.manifest)
-        || map.members.is_empty()
-    {
-        return Err(invalid("invalid package map"));
-    }
-    for (p, o) in &map.members {
-        if !safe(p)
-            || p == &map.manifest
-            || o.sha256.len() != 71
-            || !o.sha256.starts_with("sha256:")
-            || !o.sha256[7..].bytes().all(|b| b.is_ascii_hexdigit())
-        {
-            return Err(invalid("invalid object member"));
-        }
     }
     Ok(map)
 }
 pub fn maps(root: &Path) -> io::Result<Vec<PackageMap>> {
-    let r = registry(root)?;
-    r.packages
+    let db =
+        crate::package_store::PackageStore::open(&owned(root, Path::new(crate::database::INDEX))?)?;
+    db.registry()?
+        .packages
         .iter()
         .filter(|(_, l)| !l.released)
-        .map(|(id, l)| load_map(root, id, l))
+        .map(|(id, locator)| {
+            let map = db.get(id)?.ok_or_else(|| invalid("package missing"))?;
+            if map.root != locator.root {
+                return Err(invalid("package root changed"));
+            }
+            Ok(map)
+        })
         .collect()
+}
+/// Publish membership and released locators in one transaction.
+pub fn publish(root: &Path, maps: &[PackageMap], registry: &Registry) -> io::Result<()> {
+    crate::package_store::PackageStore::open(&owned(root, Path::new(crate::database::INDEX))?)?
+        .publish(maps, registry)?;
+    invalidate(root);
+    Ok(())
 }
 fn workspace(path: &Path) -> io::Result<Option<(PathBuf, PathBuf)>> {
     let absolute = if path.is_absolute() {
@@ -228,50 +209,56 @@ fn locate(path: &Path) -> io::Result<Option<(PathBuf, ObjectRef)>> {
     let Some((root, relative)) = workspace(path)? else {
         return Ok(None);
     };
-    let registry_path = owned(&root, Path::new(REGISTRY))?;
-    let stamp = match FileStamp::read(&registry_path) {
-        Ok(s) => Some(s),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-        Err(e) => return Err(e),
-    };
-    CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        if cache.get(&root).is_none_or(|v| v.stamp != stamp) {
+    CACHE.with(|c| {
+        let mut cache = c.borrow_mut();
+        if !cache.contains_key(&root) {
+            let db = crate::package_store::PackageStore::open(&owned(
+                &root,
+                Path::new(crate::database::INDEX),
+            )?)?;
+            let version = db.version()?;
             cache.insert(
                 root.clone(),
-                Cached {
-                    stamp,
-                    registry: registry(&root)?,
-                    maps: BTreeMap::new(),
+                Reader {
+                    db,
+                    version,
+                    validated: BTreeSet::new(),
                 },
             );
         }
-        let cached = cache.get_mut(&root).unwrap();
-        let entry = cached
-            .registry
+        let reader = cache.get_mut(&root).unwrap();
+        let version = reader.db.version()?;
+        if reader.version != version {
+            reader.validated.clear();
+            reader.version = version;
+        }
+        let registry = reader.db.registry()?;
+        let entry = registry
             .packages
             .iter()
             .filter(|(_, l)| relative.starts_with(&l.root))
-            .max_by_key(|(_, l)| l.root.components().count())
-            .map(|(id, l)| (id.clone(), l.clone()));
+            .max_by_key(|(_, l)| l.root.components().count());
         let Some((id, locator)) = entry else {
             return Ok(None);
         };
         if locator.released {
             return Err(invalid("相关产物已释放"));
         }
-        let map_stamp = FileStamp::read(&map_path(&root, &id)?)
-            .map_err(|e| invalid(format!("package map unavailable: {e}")))?;
-        if cached.maps.get(&id).is_none_or(|(s, _)| s != &map_stamp) {
-            cached
-                .maps
-                .insert(id.clone(), (map_stamp, load_map(&root, &id, &locator)?));
+        if !reader.validated.contains(id) {
+            let map = reader
+                .db
+                .get(id)?
+                .ok_or_else(|| invalid("missing package map"))?;
+            if map.root != locator.root {
+                return Err(invalid("package root changed"));
+            }
+            reader.validated.insert(id.clone());
         }
-        let map = &cached.maps[&id].1;
-        let member = relative.strip_prefix(&map.root).map_err(invalid)?;
-        Ok(map.members.get(member).cloned().map(|o| (root, o)))
+        let member = relative.strip_prefix(&locator.root).map_err(invalid)?;
+        Ok(reader.db.member(id, member)?.map(|o| (root, o)))
     })
 }
+
 pub fn object_path(root: &Path, hash: &str) -> io::Result<PathBuf> {
     if hash.len() != 71
         || !hash.starts_with("sha256:")
@@ -352,6 +339,9 @@ pub fn open_object(root: &Path, object: &ObjectRef) -> io::Result<Box<dyn Read>>
     }))
 }
 pub fn open(path: &Path) -> io::Result<Box<dyn Read>> {
+    if let Some(bytes) = crate::metadata::projection(path)? {
+        return Ok(Box::new(std::io::Cursor::new(bytes)));
+    }
     match locate(path)? {
         Some((root, o)) => open_object(&root, &o),
         None => Ok(Box::new(fs::File::open(path)?)),
@@ -361,6 +351,12 @@ pub fn reference(path: &Path) -> io::Result<Option<(PathBuf, ObjectRef)>> {
     locate(path)
 }
 pub fn is_file(path: &Path) -> io::Result<bool> {
+    match crate::metadata::projection(path) {
+        Ok(Some(_)) => return Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+        _ => {}
+    }
     Ok(locate(path)?.is_some() || path.is_file())
 }
 pub fn read(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {

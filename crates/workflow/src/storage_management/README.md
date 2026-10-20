@@ -74,7 +74,7 @@ jfquant storage history
 
 - `overview`仅遍历元数据并汇总整个工作区（包括target）；目录桶取父目录前两层，桶间互斥，不能假定target全部可清理。普通文件不保留明细，仅多链接文件记录去重身份。
 - `resources`增加生产者manifest与成员识别，不执行引用分析。两级`dependencies_checked=false`，可释放空间为未评估；选择状态仅为候选，以plan核验结果为准。
-- `plan/apply`仍完整扫描并验证引用与文件身份；未知JSON仍参与安全发现。元数据直接哈希原始字节，资源名/路径使用任务内索引；SQLite全量重建，不新增文件监听或增量扫描。清理后只将摘要标记stale，用户重新扫描更新占用。
+- `plan/apply`仍完整扫描并验证引用与文件身份；未知JSON仍参与安全发现。元数据直接哈希原始字节，资源名/路径使用任务内索引；SQLite扫描代次全量重建，权威元数据保持；不新增文件监听或增量扫描。清理后只将摘要标记stale，用户重新扫描更新占用。
 - 默认`min(available_parallelism,4)`，可显式1—8线程。专用线程池只处理目录与文件metadata，生产者解析仍串行；不共享数据库/模型句柄。
 - `Rpc::StorageSnapshot`返回可空的轻量快照：工作区、scan_id、level、phase、时间/耗时、finished/complete、目录计数、占用及诊断。每秒最多一次中间持久化，开始/结束额外写入最终状态。各阶段每秒报告进度，取消保留上次完整摘要。摘要查询不打开SQLite或加载文件清单；缺失缓存是正常空状态。
 - `Rpc::StorageInventory`仅读取最近完成的摘要。`finished`与`complete`分别表示任务结束与扫描完整，不能互相替代。目录统计是扫描期间观测值，APFS共享块仍为估计，无法提供文件系统原子快照。
@@ -143,7 +143,7 @@ jfquant storage export --resource RESOURCE_ID --output NEW_DIRECTORY
 jfquant jobs wait TASK_ID
 ```
 
-预览会写入可重建索引及计划，不改业务文件。执行仅接受计划ID与显式确认；无确认参数拒绝提交任务。`.jfquant/storage/migration-plans/`保存计划，`migrations/ID/journal.json`保存原文件身份、对象创建意图和提交状态。执行前重验生产者、原始文件及注册表；流式写入、同步、核验对象后暂存原文，持久化提交再发布映射和删除暂存。提交前失败/取消回滚；提交后通过重启服务或重试同一计划继续释放，逐项失败保留pending_deletion。启动恢复完成前不接收业务请求；SQLite更新失败不影响权威恢复。迁移提交令旧扫描/预览过期。
+预览会写入可重建索引及计划，不改业务文件。执行仅接受计划ID与显式确认；无确认参数拒绝提交任务。`index.sqlite`中的migration_plans、migration_packages及migration_candidates保存计划，`migrations/ID/journal.json`保存原文件身份、对象创建意图和提交状态。执行前重验生产者、原始文件及注册表；流式写入、同步、核验对象后暂存原文，持久化提交再发布映射和删除暂存。提交前失败/取消回滚；提交后通过重启服务或重试同一计划继续释放，逐项失败保留pending_deletion。启动恢复完成前不接收业务请求；SQLite更新失败时保留journal，恢复成功后才释放原文件。迁移提交令旧扫描/预览过期。
 
 导出使用临时目录核验全部原文字节及树哈希后原子发布；拒绝覆盖已有目录、源包内部和工作区管理目录。输出含原始manifest与原文，可独立读取。已迁移工作区整体移动使用相对映射；维护归档同时移动映射并保留已知run别名与原身份根。
 
@@ -158,7 +158,7 @@ jfquant jobs wait TASK_ID
 
 ### 大计划与回执查询
 
-`MigrationPreview`是任务返回的轻量结果：保留计划ID、工作区/scan_id、包根、资源ID、文件条目数、唯一原文对象数、容量、阻断和`members_manifest`。精确成员、FileStamp与对象映射仍保存在该字段引用的完整计划文件中；App提供复制清单路径，CLI可直接查看JSON。成员清单不再重复塞入任务outcome和事件，不扩大64MiB RPC帧，也不增加通用分页。此分离覆盖几十万成员的默认“全部证据”预览。
+`MigrationPreview`是任务返回的轻量结果：保留计划ID、工作区/scan_id、包根、资源ID、文件条目数、唯一原文对象数、容量、阻断和`members_database`。精确成员、FileStamp与对象映射保存在数据库中；App提供复制计划ID，CLI通过`storage migrate show --plan ID`直接查询完整内容。成员清单不重复塞入任务outcome和事件，不扩大64MiB RPC帧。
 
 `storage migrate history`只读小型`result.json`回执；删除依据始终为journal、当前生产者和包映射。启动恢复仍校验完整journal，并按其权威结果重建缺失或损坏的回执缓存。结果分别记录`object_bytes_added`、`deleted`、`evidence_logical_bytes_delta`和磁盘可用空间前后值。正文逻辑变化针对选中原文inode及新对象，不含索引、映射或日志；不应作为全工作区净节省或APFS实际回收承诺。
 
@@ -266,3 +266,122 @@ python3 -B crates/workflow/checks/storage_evidence_benchmark.py --binary "$PWD/t
 复现：先执行本组件上述发布构建及证据基准命令。真实只读计时在没有其他服务占用的工作区，前台使用`/usr/bin/time -l target/release/jfquant --workspace ROOT service serve`；另一终端依次运行`storage migrate plan`、`jobs wait TASK_ID`、`service stop`（各命令带相同`--workspace ROOT`）。进度阶段时间见任务`events.jsonl`，RSS和内存足迹见服务退出时的time结果；不执行真实`migrate apply`。
 
 回归共507项Rust测试及1项文档测试通过，3项原有ignored保持；共享只读记录修改后额外复跑workflow全部199项通过。相关crate全target Clippy `-D warnings`、格式、架构检查（0 violation）、依赖收据校验及App/CLI原生构建通过。生成的计划、索引、样本和日志均不提交。
+
+## JSON元数据拆表：协议47
+
+`index.sqlite`的schema v2现在同时保存权威元数据和可重建的扫描代次。不能删除整个数据库。
+Catalog、运行记录（含归档）、证据包映射/注册表、证据迁移计划，以及来源策略、共享UI状态、
+旧配置迁移记录、股票池统一写入SQLite；行情、公司行动和模型的业务manifest继续使用自己的格式。
+`MigrationPreview.members_database`指向数据库，`id`定位完整计划；App复制计划ID，
+`jfquant storage migrate show --plan ID`直接读取完整成员，避免通过RPC传输大型清单。
+
+```mermaid
+flowchart TD
+ L[取得离线工作区租约] --> S[checkpoint后备份index.sqlite]
+ S --> B[逐份同步原JSON与SHA256]
+ B --> T[同一SQL事务插入全部实体及提交凭据]
+ T -->|失败或取消| R[事务回滚，原JSON保留]
+ T -->|提交| D[记录删除意图并删除已备份原JSON]
+ D --> F[完成日志]
+ D -->|退出或删除失败| C[按SQL提交凭据继续恢复]
+```
+
+一次性执行，正常入口不做双读兼容：
+
+```bash
+export JFQUANT_WORKSPACE=/absolute/workspace
+# 用仍匹配当前工作区服务版本的旧CLI停止服务；必须先等待正在执行的任务结束。
+jfquant service status
+jfquant service stop
+# 使用新构建的CLI执行，命令自身取得独占租约；有其他进程持有租约会直接报错。
+jfquant storage migrate-json
+jfquant service status
+jfquant storage scan --level resources --threads 4
+jfquant jobs wait TASK_UUID --timeout 600
+jfquant storage migrate show --plan PLAN_UUID
+```
+
+原数据库快照和逐份JSON保存在`.jfquant/archive/json-migration-UUID/`，日志及清单位于
+`.jfquant/storage/json-migration-UUID/{journal.jsonl,manifest.json}`。每次备份、插入、提交、删除
+均记录；文件删除前复核原文件与备份哈希。备份只用于恢复，不作为新目录/运行来源或未知引用。
+提交前失败/取消回滚全部SQL写入，原文件未删除；提交后由数据库`json_imports`提交凭据决定
+继续删除，重启恢复不重复插入。原文件被外部改动或备份损坏时停止，保留现场供修复。
+重复执行不会重复导入已迁移数据。
+
+迁移后尚无新的权威元数据写入时，可执行`jfquant storage migrate-json --rollback IMPORT_UUID`：
+先完整验证备份和目标路径，原子恢复全部JSON，再在同一事务删除本次导入行（含级联子表）。
+中途中断由恢复继续；SQL修订计数确保不会删除后来新增或修改的记录。迁移后已启动任务或
+修改配置时拒绝回滚，保留数据库和备份。回滚完成后可重新执行迁移。原数据库快照保留供诊断，
+自动回滚不覆盖其他扫描代次或已有记录。JSON缺字段、未知状态/版本、重复身份、映射/注册表不匹配、
+越界路径、非维护别名的符号链接及整数溢出均拒绝。不要手工删提交凭据或数据库。
+
+Catalog资源盘点只读结构化头信息，详情修订号参与清理指纹；运行请求、配置值及包成员也参与
+依赖保护与指纹。管理任务的阶段变化不使自己的预览失效。证据计划的FileStamp、原/存储字节、
+manifest哈希、registry指纹和成员顺序均保留。现有永久释放journal仍是可用性状态的权威提交；
+其恢复必须成功同步SQL包映射后才释放原文件。
+
+```bash
+DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-storage --test catalog_store_tests
+DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow json_migration --lib
+DUCKDB_DOWNLOAD_LIB=1 cargo nextest run --workspace
+DUCKDB_DOWNLOAD_LIB=1 cargo clippy --workspace --all-targets -- -D warnings
+# 迁移前后分别执行；相同机器、相同数据，不清系统缓存。stdout保存到工作区外。
+python3 crates/workflow/checks/benchmark-json-storage.py --workspace "$JFQUANT_WORKSPACE" --mode json
+python3 crates/workflow/checks/benchmark-json-storage.py --workspace "$JFQUANT_WORKSPACE" --mode sqlite
+```
+
+脚本报告Catalog头查询、当前代次运行请求加载的中位耗时及进程峰值RSS；不把不同查询范围
+或热缓存结果解释为通用倍数。完整盘点还包括文件遍历、生产者校验和依赖分析，应另外记录
+`storage scan --level resources`耗时及服务峰值RSS。回归覆盖迁移全字段/原字节、外键级联、
+v1升级、冲突回滚、取消、提交后崩溃恢复、原文件改动保护、归档、原文校验和真实回测。
+
+### 2026-10-20 本机迁移与查询测量
+
+本工作区实际导入24个Catalog、251条运行记录（含归档）、7份配置，共282份JSON；原字节备份、
+逐字段/原运行字节比对、SQLite quick_check与foreign_key_check全部通过。实际工作区当时没有旧
+证据包映射或迁移计划文件；这两类由带真实原文对象的迁移fixture覆盖，包括非规范排版的映射
+哈希、资源顺序、FileStamp、null及所有计划字段。
+
+同一Python脚本、各5次、24个Catalog和208条当前代次运行，未清系统缓存：
+
+| 查询 | JSON中位耗时 | SQLite中位耗时 |
+|---|---:|---:|
+| Catalog头信息（无需嵌套详情） | 6.896 ms | 0.011 ms |
+| 当前代次完整运行请求 | 155.505 ms | 114.765 ms |
+
+脚本进程峰值RSS由260.2 MiB变为250.3 MiB。以上仅为本机热查询结果，尤其头查询省去了
+详情解析，不能推广为所有Catalog详情查询的倍数；完整运行请求加载实测约1.35倍。
+迁移前全仓盘点1772175个文件耗时627.04秒，但与源码构建和文档修改重叠，产生changed
+诊断，不能作为严格的全量盘点性能基线，也不能据此宣称全量盘点或服务内存改善。
+
+
+真实研究任务采样还发现旧进度回调会为每条消息先读取`run.json`视图，再解析完整请求。
+现改为按UUID追加事件并更新SQL stage，进度热路径不构造JSON投影；原字节投影仅供实际
+来源哈希、导出和记录读取。回调不改写冻结request_json。
+
+迁移后实际CLI读取数据版本、两个股票池和来源策略成功。历史模型的公式/operator收据未通过
+当前校验，旧预测重放被阻断；没有改写这些历史模型或放宽门禁。使用其原训练请求（相同158项
+特征顺序、2019–2022训练及2023验证）生成独立新模型，再按原2024回测区间完成242个交易日，
+`research verify`返回`consistent`。所有新任务及阶段只写SQL，不重新生成run.json。
+
+```bash
+# 本机验收任务；ID只在此工作区存在。
+jfquant jobs status b9af6cc8-37ee-4330-957d-472dfdd525c2
+jfquant research verify --task 75e22b32-f9bc-44d9-b2da-eba1d0423fa3
+```
+
+最终源码验收：576项Rust测试通过，3项既有测试跳过；Python侧34项测试中33项通过、1项跳过；
+格式检查、全仓Clippy、Rustdoc和App/CLI构建通过。
+
+最终完整盘点（开发构建、4线程、macOS/APFS）处理1811108个文件，耗时352.73秒，
+服务进程采样峰值RSS为1215.5 MiB；`complete=true`、诊断0，服务返回空闲。
+前一次扫描发现13项分配块数变化，逐项确认inode、字节长度和mtime/ctime均一致；
+待分配值稳定后重新完整扫描通过，文件校验规则保持原有严格比较。
+由于迁移前基线与构建重叠、两次盘点的文件数量及缓存状态不同，不据两者直接计算全量加速比。
+本次完整盘点的绝对内存占用仍较高，查询脚本的内存下降不能推广到整个服务。
+
+```bash
+# 本机最终完整验收记录
+jfquant jobs status bacb44c7-48d9-409d-be68-40568ff430ad
+jfquant storage list
+```

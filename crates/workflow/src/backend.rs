@@ -910,7 +910,8 @@ impl Worker {
     fn summarize(&mut self, task: Uuid, artifact: &PipelineArtifact) -> Result<RunSummary, String> {
         let metrics_json = std::fs::read_to_string(&artifact.training.metrics_path).ok();
         let mut importance = Vec::new();
-        if let Ok(bytes) = std::fs::read(&artifact.training.feature_importance_path)
+        if let Ok(bytes) =
+            analytics_storage::evidence_store::read(&artifact.training.feature_importance_path)
             && let Ok(gains) = serde_json::from_slice::<Vec<f64>>(&bytes)
         {
             let names = crate::research::load_manifest(&artifact.training.manifest_path)
@@ -1022,10 +1023,7 @@ fn persist_progress(root: Option<&std::path::Path>, task: Uuid, message: &str) {
     if let Some(root) = root {
         let result = (|| -> crate::Result<()> {
             let w = crate::Workspace::open(root)?;
-            let run: crate::RunRecord = serde_json::from_slice(&std::fs::read(
-                root.join(format!(".jfquant/runs/{task}/run.json")),
-            )?)?;
-            w.progress(&run, message)
+            w.task_progress(task, message)
         })();
         if let Err(e) = result {
             eprintln!("task log write failed: {e}");

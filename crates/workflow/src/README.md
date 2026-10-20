@@ -105,3 +105,9 @@ Regression compares the optimized sets against the original observation-by-obser
 
 
 `research/backtest/allocation_admission.rs` builds date-local endpoint qualification before training without changing the training pool. `allocation.rs` owns `STOCK_EXPOSURE`, strict candidate policy/tolerance config, target and append-journal verification; the worker consumes that single exposure contract. `allocation_migration.rs` is the only reader of previous allocation formats, with a separate admission-revision transaction journal. See the workflow README for formats, diagnostics and acceptance commands.
+
+
+`storage_management::json_migration::JsonToSqliteMigration`提供显式离线JSON导入、备份、
+事务回滚及提交后恢复。Workspace及依赖发现使用storage的Catalog/Run/Config/Package/
+MigrationStore，连接不进入UI。SQL schema v2与服务协议47的格式及验收见
+[存储管理](storage_management/README.md#json元数据拆表协议47)。

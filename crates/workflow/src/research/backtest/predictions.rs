@@ -9,7 +9,9 @@ pub(super) fn training_source(source: &Path) -> Result<(PathBuf, Option<String>)
         if current.join("training.json").is_file() {
             return Ok((current, None));
         }
-        let run: serde_json::Value = serde_json::from_slice(&fs::read(current.join("run.json"))?)?;
+        let run: serde_json::Value = serde_json::from_slice(
+            &analytics_storage::evidence_store::read(current.join("run.json"))?,
+        )?;
         let frozen = run["request"]
             .get("workflow_snapshot")
             .unwrap_or(&run["request"]);
@@ -37,10 +39,11 @@ pub(super) fn training_source(source: &Path) -> Result<(PathBuf, Option<String>)
     Err("prediction provenance cycle or excessive depth".into())
 }
 fn identity(request: &ResearchRequest, factors: &str, folds: &[ResolvedFold]) -> Result<String> {
-    let execution: serde_json::Value = fs::read(request.output.join("execution.json"))
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default();
+    let execution: serde_json::Value =
+        analytics_storage::evidence_store::read(request.output.join("execution.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
     if execution["independent"]["contract"] == "independent-v1" {
         return crate::signature(&(
             "independent-prediction-v1",
@@ -53,7 +56,7 @@ fn identity(request: &ResearchRequest, factors: &str, folds: &[ResolvedFold]) ->
     }
     if let Some(source) = &request.reuse_predictions {
         let (training_root, expected) = training_source(source)?;
-        let bytes = fs::read(training_root.join("training.json"))?;
+        let bytes = analytics_storage::evidence_store::read(training_root.join("training.json"))?;
         if expected.is_some_and(|hash| {
             hash != format!(
                 "sha256:{:x}",
@@ -76,8 +79,9 @@ fn identity(request: &ResearchRequest, factors: &str, folds: &[ResolvedFold]) ->
             )
             || training["schema_version"] != artifacts::TRAINING_SCHEMA_VERSION
             || training["status"] != "trained"
-            || serde_json::from_slice::<serde_json::Value>(&fs::read(source.join("summary.json"))?)?
-                ["factor_signature"]
+            || serde_json::from_slice::<serde_json::Value>(
+                &analytics_storage::evidence_store::read(source.join("summary.json"))?,
+            )?["factor_signature"]
                 != factors
             || training["resolved_folds"] != serde_json::to_value(folds)?
             || training["feature_order"] != serde_json::to_value(&request.config.factor_ids)?
@@ -100,8 +104,9 @@ fn identity(request: &ResearchRequest, factors: &str, folds: &[ResolvedFold]) ->
                     .ok_or("prediction producer missing")?
             ))?))
         );
-        let published: serde_json::Value =
-            serde_json::from_slice(&fs::read(source.join("prediction_manifest.json"))?)?;
+        let published: serde_json::Value = serde_json::from_slice(
+            &analytics_storage::evidence_store::read(source.join("prediction_manifest.json"))?,
+        )?;
         if published["signature"] != key
             || published["status"] != "completed"
             || published["sha256"] != file_hash(&source.join("predictions.parquet"))?
@@ -111,8 +116,9 @@ fn identity(request: &ResearchRequest, factors: &str, folds: &[ResolvedFold]) ->
         return Ok(key);
     }
     let source = request.reuse_training.as_ref().unwrap_or(&request.output);
-    let training: serde_json::Value =
-        serde_json::from_slice(&fs::read(source.join("training.json"))?)?;
+    let training: serde_json::Value = serde_json::from_slice(
+        &analytics_storage::evidence_store::read(source.join("training.json"))?,
+    )?;
     validate_training_artifact(&training)?;
     for (i, model) in training["models"]
         .as_array()
@@ -188,8 +194,9 @@ pub(super) fn publish(
         request.output.join("sample_selection.json"),
         staging.join("sample_selection.json"),
     )?;
-    let admission: analytics_core::admission::AdmissionReport =
-        serde_json::from_slice(&fs::read(request.output.join("admission.json"))?)?;
+    let admission: analytics_core::admission::AdmissionReport = serde_json::from_slice(
+        &analytics_storage::evidence_store::read(request.output.join("admission.json"))?,
+    )?;
     let decisions = admission
         .decisions
         .into_iter()
@@ -269,15 +276,17 @@ pub(super) fn restore(
     if !dir.join("manifest.json").is_file() {
         return Ok(None);
     }
-    let m: artifacts::PredictionCacheManifest =
-        serde_json::from_slice(&fs::read(dir.join("manifest.json"))?)?;
+    let m: artifacts::PredictionCacheManifest = serde_json::from_slice(
+        &analytics_storage::evidence_store::read(dir.join("manifest.json"))?,
+    )?;
     if m.schema_version != 1 || m.signature != key {
         return Err("prediction cache identity mismatch".into());
     }
     let hashes = m.files;
     if let Some(source) = &request.reuse_predictions {
-        let published: serde_json::Value =
-            serde_json::from_slice(&fs::read(source.join("prediction_manifest.json"))?)?;
+        let published: serde_json::Value = serde_json::from_slice(
+            &analytics_storage::evidence_store::read(source.join("prediction_manifest.json"))?,
+        )?;
         if published["sha256"]
             != hashes
                 .get("predictions.parquet")
@@ -381,12 +390,15 @@ pub(super) fn restore(
             return Err("prediction date/security/duplicate identity invalid".into());
         }
     }
-    let reports: Vec<FoldReport> =
-        serde_json::from_slice(&fs::read(dir.join("fold_reports.json"))?)?;
+    let reports: Vec<FoldReport> = serde_json::from_slice(
+        &analytics_storage::evidence_store::read(dir.join("fold_reports.json"))?,
+    )?;
     if reports.len() != folds.len() || reports.iter().any(|r| r.performance.is_some()) {
         return Err("prediction cache fold phase mismatch".into());
     }
-    let selection = serde_json::from_slice(&fs::read(dir.join("sample_selection.json"))?)?;
+    let selection = serde_json::from_slice(&analytics_storage::evidence_store::read(
+        dir.join("sample_selection.json"),
+    )?)?;
     fs::create_dir_all(request.output.join("sample_masks"))?;
     for name in hashes.keys() {
         fs::copy(dir.join(name), request.output.join(name))?;

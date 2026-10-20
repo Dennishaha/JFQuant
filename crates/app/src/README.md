@@ -186,3 +186,8 @@ EvaluateFactors后台任务，`state.rs`只接收当前活动任务的FactorsEva
 公司行动当前阻断、历史失败和覆盖审核入口见 [platform](platform/README.md)；客户端仅展示共享任务报告，不自行判断历史覆盖。
 
 The Storage navigation target renders shared workspace capacity reports, selection and permanent-deletion previews through `platform/storage`; the reducer invalidates stale asynchronous run views after task completion. [Storage panel responsibilities](platform/README.md).
+
+
+证据优化预览使用`MigrationPreview.members_database`及计划ID定位完整成员；界面复制计划ID。
+元数据加载仍在worker内进行，服务协议47。迁移、备份、恢复和验收见
+[组件README](../README.md#sqlite元数据与迁移预览协议47)。

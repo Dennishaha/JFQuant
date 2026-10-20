@@ -26,7 +26,7 @@ use std::{
 };
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 46;
+pub const PROTOCOL_VERSION: u32 = 47;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TaskRequest {
@@ -1479,7 +1479,7 @@ mod protocol_tests {
     use super::*;
     #[test]
     fn only_current_protocol_is_decoded_without_downgrading_old_requests() {
-        for version in [1, 43, 44, 45, PROTOCOL_VERSION + 1] {
+        for version in [1, 43, 44, 45, 46, PROTOCOL_VERSION + 1] {
             let raw = json!({"version":version,"request":{"method":"retired_rpc"}});
             assert_eq!(
                 decode_message(&raw.to_string()).err().unwrap().code,

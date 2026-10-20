@@ -22,6 +22,22 @@ HiThink 为默认主源，由 Rust 直接调用 REST；通达信备用，维持�
 
 # analytics-storage
 
+## 工作区元数据数据库（Schema Version 2）
+
+`catalog::CatalogStore` 提供索引化的不可变数据目录和反向 evidence 查找。替代了原有的 `.jfquant/catalog/*.json` 文件扫描，支持按 kind、日期范围查询，按 evidence hash 反向查找所属 catalog。
+
+`run_store::RunStore` 管理运行记录，替代分散的 `run.json` 文件。支持按状态查询、进度更新、归档操作。
+
+`package_store::PackageStore` 管理 evidence store 的 package maps，替代 `.jfquant/storage/packages/*.json`。维护 package 到 resources 和 members 的映射关系。
+
+`metadata::ConfigStore` 统一管理工作区配置，替代零散的配置 JSON 文件（source-policy.json, shared-ui-jobs.json 等）。
+
+所有元数据存储在 `.jfquant/storage/index.sqlite`（Schema Version 2），使用 WAL 模式、foreign keys 约束和自动 revision tracking。与 Version 1 的文件系统扫描索引共存，通过 `database::open()` 自动升级。
+
+**迁移**: 使用 CLI 命令 `storage migrate-json` 将现有 JSON 文件一次性迁移到 SQLite，原始文件备份到 `.jfquant/archive/json-migration-{uuid}/`。支持回滚（`--rollback <uuid>`）。迁移过程使用事务日志（journal.jsonl）记录所有操作，保证崩溃恢复。
+
+验收：`cargo test -p analytics-storage --test catalog_store_tests`。
+
 ## 工作区空间元数据
 
 `filesystem::{inventory, FileStamp, available_bytes}` 提供不跟随符号链接的元数据盘点、文件身份、逻辑与分配空间，以及磁盘可用容量。扫描保留权限和跨挂载点诊断，不把未读内容当作零占用；不读取行情内容、不执行删除。分类、依赖和清理事务由 [工作流存储管理](../workflow/src/storage_management/README.md) 负责。验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow storage_ --lib`。
@@ -369,3 +385,43 @@ CLI `data three-factors --market VERSION --inputs FILE` 和 App“数据更新�
 发布构建的容量、耗时、峰值内存及压缩计算验收见[SQLite首版实测](../workflow/src/storage_management/README.md#2026-10-20-sqlite-首版验收)；全量索引重建存在额外耗时，不保证压缩能减少所有小文件的分配空间。
 
 `evidence_store::tree_hash_with_members`为原始证据树在一次读取中同时生成既有树哈希和叶子SHA256，回调提供读取前后保持一致的FileStamp；业务树哈希规则不变。工作流仅对已确认身份复用叶子哈希，压缩估算缓存限定本次任务。验收：`cargo test -p analytics-storage storage_tree_inspection`。
+
+## 工作区元数据 SQLite v2
+
+`database`统一管理`.jfquant/storage/index.sqlite`，通过事务把v1升级到v2；未知新版本拒绝。
+`catalog::CatalogStore`支持种类、日期区间、路径头信息和证据哈希反查；`headers`不解析大型
+`details_json`。`run_store::RunStore`保存7种实际状态、冻结请求、阶段、错误及归档位置。
+`package_store::PackageStore`原子发布包、资源、成员和释放状态，按路径/对象哈希建索引；
+`migration_store::MigrationStore`拆出计划包及候选文件，保持FileStamp和对象顺序；
+`metadata::ConfigStore`保存策略、UI状态、迁移记录和不可变股票池。所有连接仅属于调用线程。
+
+```mermaid
+flowchart LR
+ JSON[旧JSON] --> M[workflow显式离线迁移]
+ M --> B[原字节备份与事务日志]
+ M --> DB[index.sqlite v2]
+ DB --> C[CatalogStore / RunStore / ConfigStore]
+ DB --> P[PackageStore / MigrationStore]
+ DB --> I[独立扫描代次缓存]
+```
+
+这是权威数据库，不能删除整个文件来重建扫描缓存。`Index::begin/prune`仅处理扫描表；
+SQLite外键开启，32MiB页缓存、WAL和短元数据事务。扫描缓存仍按4096次操作提交，
+扫描占用写锁时阶段更新可跳过本次SQL写入，完整事件仍追加到events.jsonl，终态必须持久化。
+证据成员使用线程本地读连接和`data_version`失效机制；首次访问校验包完整性，随后按路径查询，
+不在每次原文读取时载入整个映射。工作区迁移后普通入口不再读取旧元数据JSON。
+
+`metadata::projection`提供数据库运行记录的JSON字节视图，用于既有来源哈希及导出；
+迁移时`original_json`保留旧运行记录的精确字节，状态更新后由当前结构生成投影。
+包的原始映射哈希与规范化结构完整性哈希分别保存；成员顺序、null、公式版本和特征序不变。
+SQL版本2与业务RunRecord/PackageMap版本1是不同的版本空间，不改写业务版本。
+
+验收（仓库根目录，无需原生库）：
+
+```bash
+cargo test -p analytics-storage --test catalog_store_tests
+cargo test -p analytics-storage --lib
+cargo clippy -p analytics-storage --all-targets -- -D warnings
+```
+
+迁移命令、回滚/恢复边界与性能复现见[工作区存储管理](../workflow/src/storage_management/README.md#json元数据拆表协议47)。

@@ -31,12 +31,7 @@ fn txn(w: &Workspace, id: Uuid) -> Result<PathBuf> {
     )
 }
 fn registry_hash(w: &Workspace) -> Result<String> {
-    let p = owned_path(w, Path::new(store::REGISTRY))?;
-    Ok(store::digest(&match fs::read(p) {
-        Ok(b) => b,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => vec![],
-        Err(e) => return Err(e.into()),
-    }))
+    super::json::pretty_signature(&store::registry(w.root())?)
 }
 fn fingerprint(plan: &MigrationPlan) -> Result<String> {
     super::json::signature(&(&plan.packages, &plan.registry_sha256))
@@ -446,13 +441,8 @@ pub(super) fn plan(w: &Workspace, ids: &[String], context: &TaskContext) -> Resu
     }
     let plan = assemble(w, inventory.scan_id, packages, blockers)?;
     reporter.finish(&inventory)?;
-    cleanup::durable_write(
-        &owned_path(
-            w,
-            &PathBuf::from(format!(".jfquant/storage/migration-plans/{}.json", plan.id)),
-        )?,
-        &plan,
-    )?;
+    analytics_storage::migration_store::MigrationStore::open(&w.database_path()?)?
+        .save(&serde_json::to_value(&plan)?)?;
     Ok(plan)
 }
 fn validate(w: &Workspace, j: &Journal) -> Result<()> {
@@ -589,11 +579,15 @@ fn finish(w: &Workspace, root: &Path, j: &mut Journal) -> Result<MigrationResult
             )?;
         }
     }
-    for package in &j.plan.packages {
-        cleanup::durable_write(&store::map_path(w.root(), &package.map.id)?, &package.map)?;
-    }
-    cleanup::durable_write(&owned_path(w, Path::new(store::REGISTRY))?, &j.registry)?;
-    store::invalidate(w.root());
+    store::publish(
+        w.root(),
+        &j.plan
+            .packages
+            .iter()
+            .map(|p| p.map.clone())
+            .collect::<Vec<_>>(),
+        &j.registry,
+    )?;
     let mut errors = BTreeMap::new();
     let mut removed = vec![];
     for (i, m) in all_members(j).enumerate() {
@@ -654,6 +648,14 @@ fn finish(w: &Workspace, root: &Path, j: &mut Journal) -> Result<MigrationResult
     }
     .into();
     save(root, j)?;
+    analytics_storage::migration_store::MigrationStore::open(&w.database_path()?)?.status(
+        &j.plan.id.to_string(),
+        if j.result.completed {
+            "Completed"
+        } else {
+            "InProgress"
+        },
+    )?;
     super::mark_stale(w)?;
     Ok(j.result.clone())
 }
@@ -675,10 +677,11 @@ pub(super) fn apply(w: &Workspace, id: Uuid, context: &TaskContext) -> Result<Mi
         rollback(w, &root, &mut j)?;
         return Ok(j.result);
     }
-    let plan: MigrationPlan = read(&owned_path(
-        w,
-        &PathBuf::from(format!(".jfquant/storage/migration-plans/{id}.json")),
-    )?)?;
+    let plan: MigrationPlan = serde_json::from_value(
+        analytics_storage::migration_store::MigrationStore::open(&w.database_path()?)?
+            .get(&id.to_string())?
+            .ok_or("migration plan not found")?,
+    )?;
     if plan.id != id
         || plan.workspace != w.root()
         || plan.schema_version != 1
@@ -771,6 +774,8 @@ pub(super) fn apply(w: &Workspace, id: Uuid, context: &TaskContext) -> Result<Mi
     fs::create_dir_all(root.join("pending"))?;
     fs::create_dir_all(root.join("created"))?;
     save(&root, &j)?;
+    analytics_storage::migration_store::MigrationStore::open(&w.database_path()?)?
+        .status(&j.plan.id.to_string(), "InProgress")?;
     activity.phase("生成、同步并核验共享证据对象");
     let prepared = (|| -> Result<()> {
         let mut seen = BTreeSet::new();
@@ -985,7 +990,7 @@ pub(super) fn release_packages(w: &Workspace, resources: &[String]) -> Result<()
         }
     }
     if changed {
-        cleanup::durable_write(&owned_path(w, Path::new(store::REGISTRY))?, &registry)?;
+        store::publish(w.root(), &[], &registry)?;
         store::invalidate(w.root());
     }
     Ok(())
@@ -1058,13 +1063,8 @@ pub(super) fn published(
     if !plan.blockers.is_empty() {
         return Err(format!("publication_storage_blocked:{}", plan.blockers.join("; ")).into());
     }
-    cleanup::durable_write(
-        &owned_path(
-            w,
-            &PathBuf::from(format!(".jfquant/storage/migration-plans/{}.json", plan.id)),
-        )?,
-        &plan,
-    )?;
+    analytics_storage::migration_store::MigrationStore::open(&w.database_path()?)?
+        .save(&serde_json::to_value(&plan)?)?;
     let result = apply(w, plan.id, context)?;
     if !result.completed {
         return Err("publication_storage_pending: restart to finish migration".into());
@@ -1082,11 +1082,12 @@ pub(super) fn archive_packages(root: &Path, source: &Path, destination: &Path) -
     if entries.is_empty() {
         return Ok(());
     }
+    let mut maps = vec![];
     for (id, locator) in entries {
         let mut map = store::load_map(root, &id, &locator)?;
         map.root = destination.join(map.root.strip_prefix(source)?);
         map.id = store::package_id(&map.root)?;
-        cleanup::durable_write(&store::map_path(root, &map.id)?, &map)?;
+        maps.push(map.clone());
         registry.packages.remove(&id);
         registry.packages.insert(
             map.id.clone(),
@@ -1097,7 +1098,7 @@ pub(super) fn archive_packages(root: &Path, source: &Path, destination: &Path) -
             },
         );
     }
-    cleanup::durable_write(&store::owned(root, Path::new(store::REGISTRY))?, &registry)?;
+    store::publish(root, &maps, &registry)?;
     store::invalidate(root);
     Ok(())
 }

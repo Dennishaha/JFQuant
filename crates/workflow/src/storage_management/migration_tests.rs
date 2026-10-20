@@ -277,7 +277,7 @@ fn storage_migration_deduplicates_preserves_bytes_hashes_and_exports_independent
     );
     assert!(ActionBundle::read(&output.join("actions.json")).is_ok());
     assert!(export(&w, &resources[0].id, &output, &context()).is_err());
-    fs::remove_file(w.resolve(".jfquant/storage/index.sqlite")).unwrap();
+    rusqlite::Connection::open(w.database_path().unwrap()).unwrap().execute_batch("DELETE FROM records; DELETE FROM owners; DELETE FROM resources; DELETE FROM generations; DELETE FROM metadata WHERE key='latest';").unwrap();
     let rebuilt = inventory::scan(&w, &context()).unwrap();
     assert!(rebuilt.complete, "{:?}", rebuilt.diagnostics);
     assert!(
@@ -294,7 +294,7 @@ fn storage_migration_deduplicates_preserves_bytes_hashes_and_exports_independent
     assert!(
         serde_json::to_vec(&preview).unwrap().len() < serde_json::to_vec(&p).unwrap().len() / 2
     );
-    assert!(w.resolve(&preview.members_manifest).is_file());
+    assert!(w.resolve(&preview.members_database).is_file());
     let json = serde_json::to_value(&p).unwrap();
     assert!(json["packages"][0]["members"].is_array());
 }
@@ -359,11 +359,10 @@ fn storage_migration_recovers_before_and_after_commit_and_partial_map_publicatio
         let committed = phase >= 2;
         let (root, journal) = crashed(&w, plan, if committed { count } else { phase }, committed);
         if phase >= 3 {
-            cleanup::durable_write(
-                &store::map_path(w.root(), &journal.plan.packages[0].map.id).unwrap(),
-                &journal.plan.packages[0].map,
-            )
-            .unwrap();
+            analytics_storage::package_store::PackageStore::open(&w.database_path().unwrap())
+                .unwrap()
+                .save(&journal.plan.packages[0].map, false)
+                .unwrap();
         }
         if phase == 4 {
             fs::remove_file(root.join("pending/0")).unwrap();
@@ -403,8 +402,13 @@ fn storage_migration_failed_delete_stays_pending_then_recovers_and_bad_map_is_pr
     fs::remove_dir(root.join("pending/0")).unwrap();
     fs::rename(root.join("held"), root.join("pending/0")).unwrap();
     recover(&w).unwrap();
-    let mapping = store::map_path(w.root(), &j.plan.packages[0].map.id).unwrap();
-    fs::write(mapping, b"corrupt").unwrap();
+    rusqlite::Connection::open(w.database_path().unwrap())
+        .unwrap()
+        .execute(
+            "UPDATE package_maps SET integrity_sha256='corrupt' WHERE id=?1",
+            [&j.plan.packages[0].map.id],
+        )
+        .unwrap();
     let raw = w.resolve(j.plan.packages[0].members[0].path.clone());
     fs::write(&raw, b"old copy").unwrap();
     assert!(store::read(raw).is_err());

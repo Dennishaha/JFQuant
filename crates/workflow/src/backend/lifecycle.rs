@@ -9,7 +9,9 @@ impl Worker {
         body: impl FnOnce(&mut Self) -> Result<(), String>,
     ) {
         if let Some(root) = &self.root
-            && let Ok(bytes) = std::fs::read(root.join(format!(".jfquant/runs/{task}/run.json")))
+            && let Ok(bytes) = analytics_storage::evidence_store::read(
+                root.join(format!(".jfquant/runs/{task}/run.json")),
+            )
         {
             self.active_record = serde_json::from_slice(&bytes).ok();
             self.record_request = None;
@@ -51,7 +53,7 @@ impl Worker {
             let persisted = (|| -> crate::Result<()> {
                 let w = Workspace::open(self.root.as_ref().ok_or("workspace missing")?)?;
                 let readiness = w.resolve(&record.output).join("execution_readiness.json");
-                let blocked = std::fs::read(readiness)
+                let blocked = analytics_storage::evidence_store::read(readiness)
                     .ok()
                     .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
                     .is_some_and(|v| v["ready"] == false);

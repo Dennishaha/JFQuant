@@ -179,7 +179,7 @@ fn validate_profile_references(
             )
             .into());
         }
-        let bytes = fs::read(&referenced)?;
+        let bytes = analytics_storage::evidence_store::read(&referenced)?;
         let mut template = crate::ResearchTemplate::default();
         if field == "factors" {
             serde_json::from_slice::<crate::profiles::FactorProfile>(&bytes)?
@@ -224,7 +224,7 @@ fn plan(root: &Path, external: &[PathBuf]) -> Result<Journal> {
             continue;
         }
         let result = (|| -> Result<()> {
-            let old: Value = serde_json::from_slice(&fs::read(&p)?)?;
+            let old: Value = serde_json::from_slice(&analytics_storage::evidence_store::read(&p)?)?;
             validate_profile_references(root, &p, &old, &j.owned_configs)?;
             if let Some(new) = convert(&old)? {
                 j.changes.push(Change {
@@ -252,8 +252,10 @@ fn plan(root: &Path, external: &[PathBuf]) -> Result<Journal> {
                 name,
                 ".factor-cache" | ".factor-shards-v1" | ".predictions-v1" | ".factor-artifacts-v2"
             );
-            let research = if p.join("run.json").is_file() {
-                let v: Value = serde_json::from_slice(&fs::read(p.join("run.json"))?)?;
+            let research = if analytics_storage::evidence_store::is_file(&p.join("run.json"))? {
+                let v: Value = serde_json::from_slice(&analytics_storage::evidence_store::read(
+                    p.join("run.json"),
+                )?)?;
                 let op = v["request"]["request"]["operation"].as_str().unwrap_or("");
                 matches!(
                     op,
@@ -268,7 +270,9 @@ fn plan(root: &Path, external: &[PathBuf]) -> Result<Journal> {
                         | "compare_allocations"
                 )
             } else if p.join("data_audit.json").is_file() {
-                let audit: Value = serde_json::from_slice(&fs::read(p.join("data_audit.json"))?)?;
+                let audit: Value = serde_json::from_slice(
+                    &analytics_storage::evidence_store::read(p.join("data_audit.json"))?,
+                )?;
                 audit.get("research_signature").is_some() && audit.get("formula_version").is_some()
             } else {
                 false
@@ -297,8 +301,8 @@ fn journal_path(root: &Path) -> PathBuf {
 pub(crate) fn require_complete(root: &Path) -> Result<()> {
     let old = root.join(".jfquant/allocation-migration.json");
     let mut explicit = BTreeMap::new();
-    if old.is_file() {
-        let j: Journal = serde_json::from_slice(&fs::read(old)?)?;
+    if analytics_storage::evidence_store::is_file(&old)? {
+        let j: Journal = serde_json::from_slice(&analytics_storage::evidence_store::read(old)?)?;
         if (!j.complete || j.rolling_back) && !j.rolled_back {
             return Err(
                 "previous_allocation_migration_incomplete: finish with the previous binary".into(),
@@ -308,7 +312,7 @@ pub(crate) fn require_complete(root: &Path) -> Result<()> {
     }
     let p = journal_path(root);
     if p.exists() {
-        let j: Journal = serde_json::from_slice(&fs::read(p)?)?;
+        let j: Journal = serde_json::from_slice(&analytics_storage::evidence_store::read(p)?)?;
         explicit.extend(j.owned_configs.clone());
         if (!j.complete || j.rolling_back) && !j.rolled_back {
             return Err(
@@ -326,7 +330,8 @@ pub(crate) fn require_complete(root: &Path) -> Result<()> {
             .keys()
             .filter(|p| p.extension().is_some_and(|e| e == "json"))
         {
-            let value: Value = serde_json::from_slice(&fs::read(path)?)?;
+            let value: Value =
+                serde_json::from_slice(&analytics_storage::evidence_store::read(path)?)?;
             validate_profile_references(root, path, &value, &explicit)?;
             if convert(&value)?.is_some() {
                 return Err(format!("allocation_migration_required:{}", path.display()).into());
@@ -338,7 +343,9 @@ pub(crate) fn require_complete(root: &Path) -> Result<()> {
 /// Preview, apply/resume, or roll back the explicitly selected local workspace.
 pub fn run(root: &Path, external: &[PathBuf], apply: bool, rollback: bool) -> Result<Value> {
     let root = fs::canonicalize(root)?;
-    let marker: Value = serde_json::from_slice(&fs::read(root.join(".jfquant/workspace.json"))?)?;
+    let marker: Value = serde_json::from_slice(&analytics_storage::evidence_store::read(
+        root.join(".jfquant/workspace.json"),
+    )?)?;
     if marker["schema_version"] != 1 {
         return Err("migration_workspace_version_unsupported".into());
     }
@@ -349,7 +356,9 @@ pub fn run(root: &Path, external: &[PathBuf], apply: bool, rollback: bool) -> Re
     let _lease = w.lease()?;
     let p = journal_path(&root);
     let existing = if p.exists() {
-        Some(serde_json::from_slice::<Journal>(&fs::read(&p)?)?)
+        Some(serde_json::from_slice::<Journal>(
+            &analytics_storage::evidence_store::read(&p)?,
+        )?)
     } else {
         None
     };
@@ -373,7 +382,8 @@ pub fn run(root: &Path, external: &[PathBuf], apply: bool, rollback: bool) -> Re
             }
         }
         for c in &j.changes {
-            let v: Value = serde_json::from_slice(&fs::read(&c.path)?)?;
+            let v: Value =
+                serde_json::from_slice(&analytics_storage::evidence_store::read(&c.path)?)?;
             if v != c.new && !(j.rolling_back && v == c.old) {
                 return Err("rollback_blocked_by_changed_configuration".into());
             }
@@ -419,6 +429,13 @@ pub fn run(root: &Path, external: &[PathBuf], apply: bool, rollback: bool) -> Re
                 }
                 fs::rename(&m.destination, &m.source)?;
             }
+            analytics_storage::run_store::RunStore::open(
+                &root.join(analytics_storage::database::INDEX),
+            )?
+            .archive(
+                m.destination.strip_prefix(&root)?,
+                m.source.strip_prefix(&root)?,
+            )?;
         }
         j.rolling_back = false;
         j.rolled_back = true;
@@ -443,7 +460,7 @@ pub fn run(root: &Path, external: &[PathBuf], apply: bool, rollback: bool) -> Re
     fs::create_dir_all(&archive)?;
     atomic_json(&archive.join("manifest.json"), &j)?;
     for c in &j.changes {
-        let v: Value = serde_json::from_slice(&fs::read(&c.path)?)?;
+        let v: Value = serde_json::from_slice(&analytics_storage::evidence_store::read(&c.path)?)?;
         if v != c.old && v != c.new {
             return Err("migration_configuration_changed".into());
         }
@@ -464,6 +481,13 @@ pub fn run(root: &Path, external: &[PathBuf], apply: bool, rollback: bool) -> Re
             fs::create_dir_all(m.destination.parent().ok_or("migration_archive_parent")?)?;
             fs::rename(&m.source, &m.destination)?;
         }
+        analytics_storage::run_store::RunStore::open(
+            &root.join(analytics_storage::database::INDEX),
+        )?
+        .archive(
+            m.source.strip_prefix(&root)?,
+            m.destination.strip_prefix(&root)?,
+        )?;
     }
     for c in &j.changes {
         atomic_json(&c.path, &c.new)?;
@@ -498,22 +522,29 @@ mod tests {
                 == 1
         );
         assert_eq!(
-            serde_json::from_slice::<Value>(&fs::read(&config).unwrap()).unwrap(),
+            serde_json::from_slice::<Value>(
+                &analytics_storage::evidence_store::read(&config).unwrap()
+            )
+            .unwrap(),
             old
         );
         assert_eq!(run(root, &[], true, false).unwrap()["complete"], true);
         let t: crate::ResearchTemplate =
-            serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+            serde_json::from_slice(&analytics_storage::evidence_store::read(&config).unwrap())
+                .unwrap();
         t.validate().unwrap();
         assert_eq!(t.config.allocation.max_stock_weight, 1.);
         assert_eq!(
-            fs::read(root.join("data/raw.bin")).unwrap(),
+            analytics_storage::evidence_store::read(root.join("data/raw.bin")).unwrap(),
             b"unchanged evidence"
         );
         assert_eq!(run(root, &[], true, false).unwrap()["changed"], false);
         assert_eq!(run(root, &[], false, true).unwrap()["rolled_back"], true);
         assert_eq!(
-            serde_json::from_slice::<Value>(&fs::read(config).unwrap()).unwrap(),
+            serde_json::from_slice::<Value>(
+                &analytics_storage::evidence_store::read(config).unwrap()
+            )
+            .unwrap(),
             old
         );
     }
@@ -561,11 +592,21 @@ mod tests {
         let id = uuid::Uuid::new_v4();
         let artifact = root.join(format!(".jfquant/runs/{id}"));
         fs::create_dir_all(&artifact).unwrap();
-        atomic_json(
-            &artifact.join("run.json"),
-            &json!({"request":{"request":{"operation":"research"}}}),
-        )
-        .unwrap();
+        let record = crate::RunRecord {
+            schema_version: 1,
+            id,
+            operation: "research".into(),
+            started_at: crate::now(),
+            finished_at: Some(crate::now()),
+            status: crate::RunStatus::Succeeded,
+            request: json!({"request":{"operation":"research"}}),
+            signature: "fixture".into(),
+            output: artifact.strip_prefix(root).unwrap().into(),
+            stage: "done".into(),
+            error: None,
+            read_only: false,
+        };
+        w.save_run(&record).unwrap();
         fs::write(artifact.join("model.txt"), b"model bytes").unwrap();
         let mut j = plan(root, &[]).unwrap();
         assert_eq!(j.moves.len(), 1);
@@ -599,7 +640,7 @@ mod tests {
         fs::rename(&j.moves[0].destination, &artifact).unwrap();
         assert_eq!(run(root, &[], false, true).unwrap()["rolled_back"], true);
         assert_eq!(
-            fs::read(artifact.join("model.txt")).unwrap(),
+            analytics_storage::evidence_store::read(artifact.join("model.txt")).unwrap(),
             b"model bytes"
         );
         assert_eq!(run(root, &[], false, true).unwrap()["changed"], false);
@@ -629,11 +670,14 @@ mod tests {
         );
         assert!(!cache.exists() && !named.exists());
         assert_eq!(
-            fs::read(evidence.join("source.html")).unwrap(),
+            analytics_storage::evidence_store::read(evidence.join("source.html")).unwrap(),
             b"primary event evidence"
         );
         run(w.root(), &[], false, true).unwrap();
-        assert_eq!(fs::read(cache.join("old.bin")).unwrap(), b"factor cache");
+        assert_eq!(
+            analytics_storage::evidence_store::read(cache.join("old.bin")).unwrap(),
+            b"factor cache"
+        );
     }
     #[test]
     fn external_workflow_profiles_require_an_explicit_file_list() {
@@ -642,7 +686,9 @@ mod tests {
         let w = Workspace::open(root.path()).unwrap();
         let path = external.path().join("workflow.json");
         crate::ResearchTemplate::default().write(&path).unwrap();
-        let mut old: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let mut old: Value =
+            serde_json::from_slice(&analytics_storage::evidence_store::read(&path).unwrap())
+                .unwrap();
         let factors = external.path().join(old["factors"].as_str().unwrap());
         let target = external.path().join(old["target"].as_str().unwrap());
         old["schema_version"] = 10.into();

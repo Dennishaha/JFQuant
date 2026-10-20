@@ -89,11 +89,11 @@ impl Index {
         if let Some(p) = path.parent() {
             std::fs::create_dir_all(p)?;
         }
-        let db = Connection::open(path).map_err(err)?;
+        let db = crate::database::open(path)?;
         let version: i64 = db
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .map_err(err)?;
-        if !matches!(version, 0 | 1) {
+        if !matches!(version, 0..=2) {
             return Err(err("unsupported cache schema; rebuild required"));
         }
         db.busy_timeout(std::time::Duration::from_secs(2))
@@ -111,7 +111,7 @@ impl Index {
             CREATE INDEX IF NOT EXISTS json_paths ON records(scan,kind,path) WHERE filename IS NOT NULL;
             CREATE INDEX IF NOT EXISTS named_paths ON records(scan,kind,filename,path) WHERE filename IS NOT NULL;
             CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
-            PRAGMA user_version=1; BEGIN IMMEDIATE;").map_err(err)?;
+            BEGIN IMMEDIATE;").map_err(err)?;
         let cancel = analytics_core::task::TaskContext::current().cancel;
         let sql_cancel = cancel.clone();
         db.progress_handler(1024, Some(move || sql_cancel.load(Ordering::Relaxed)))

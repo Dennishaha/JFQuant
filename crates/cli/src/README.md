@@ -256,3 +256,8 @@ jfquant --workspace W data revise-actions --actions ACTIONS --request VALIDATED_
 后继证券补采可通过修订4的 `structured_manifest` 引用已注册、完整核验的 HiThink 公司行动包；允许空 events/coverage_reviews 的纯附件修订。仅接受已有已发布事件指向、原包未查询过的后继证券，拒绝覆盖旧证券、无关证券、采集失败和未解决冲突；原文按哈希继承并在后续读取核验。可先用 `draft --request ... --task ...` 预览，再用原有 revise-actions 发布，不修改原任务和原模型。
 
 `storage` translates scan/list/plan/apply/history into the shared storage workflow and cached control reads. Apply requires a persisted plan UUID and an explicit permanent-deletion flag; no client-side file deletion. [Contracts and acceptance](../../workflow/src/storage_management/README.md).
+
+
+`storage migrate-json`在连接服务前执行离线JSON元数据迁移；`storage migrate show --plan UUID`
+在本进程查询完整SQL成员。轻量预览使用`members_database`，服务协议47拒绝旧版。
+命令、数据流、备份/恢复边界及验收见[CLI README](../README.md#json元数据一次性迁移协议47)。

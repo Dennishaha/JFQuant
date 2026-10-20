@@ -37,12 +37,13 @@ pub(super) fn execute(
                 .transpose()?;
             let r = research_request(w, run, template, &m, a.as_ref(), true)?;
             crate::research::backtest::run_with_context(&r, context)?;
-            details = serde_json::from_slice(&fs::read(
+            details = serde_json::from_slice(&analytics_storage::evidence_store::read(
                 w.resolve(&run.output).join("input-check.json"),
             )?)?;
-            let readiness: serde_json::Value = serde_json::from_slice(&fs::read(
-                w.resolve(&run.output).join("execution_readiness.json"),
-            )?)?;
+            let readiness: serde_json::Value =
+                serde_json::from_slice(&analytics_storage::evidence_store::read(
+                    w.resolve(&run.output).join("execution_readiness.json"),
+                )?)?;
             details["resolved_folds"] = readiness["resolved_folds"].clone();
         }
         WorkflowRequest::PrepareResearchData {
@@ -95,9 +96,9 @@ pub(super) fn execute(
                 if run.request["prediction_source_hashes"][name]
                     != format!(
                         "sha256:{:x}",
-                        analytics_core::hash::Hex(Sha256::digest(fs::read(
-                            source_root.join(name)
-                        )?))
+                        analytics_core::hash::Hex(Sha256::digest(
+                            analytics_storage::evidence_store::read(source_root.join(name))?
+                        ))
                     )
                 {
                     return Err("prediction source changed after task submission".into());
@@ -148,9 +149,9 @@ pub(super) fn execute(
             if let Some(expected) = run.request.get("training_artifact_sha256") {
                 let actual = format!(
                     "sha256:{:x}",
-                    analytics_core::hash::Hex(Sha256::digest(fs::read(
-                        source.join("training.json")
-                    )?))
+                    analytics_core::hash::Hex(Sha256::digest(
+                        analytics_storage::evidence_store::read(source.join("training.json"))?
+                    ))
                 );
                 if expected != &json!(actual) {
                     return Err("training_artifact_damaged".into());

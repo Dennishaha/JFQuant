@@ -23,15 +23,17 @@ pub(crate) fn freeze(w: &Workspace, task: Uuid) -> Result<Value> {
     {
         return Err("task context must belong to this workspace".into());
     }
-    let record: RunRecord = serde_json::from_slice(&fs::read(root.join("run.json"))?)?;
+    let record: RunRecord = serde_json::from_slice(&analytics_storage::evidence_store::read(
+        root.join("run.json"),
+    )?)?;
     if record.id != task || record.finished_at.is_none() {
         return Err("action status requires a terminal task".into());
     }
     let mut hashes = BTreeMap::new();
     for name in FILES {
         let path = root.join(name);
-        if path.is_file() {
-            if fs::symlink_metadata(&path)?.file_type().is_symlink() {
+        if analytics_storage::evidence_store::is_file(&path)? {
+            if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
                 return Err("task context cannot contain links".into());
             }
             hashes.insert(*name, analytics_storage::market_view::file_hash(&path)?);
@@ -40,7 +42,9 @@ pub(crate) fn freeze(w: &Workspace, task: Uuid) -> Result<Value> {
     Ok(json!({"task":task,"files":hashes}))
 }
 fn load(path: &std::path::Path) -> Result<Value> {
-    Ok(serde_json::from_slice(&fs::read(path)?)?)
+    Ok(serde_json::from_slice(
+        &analytics_storage::evidence_store::read(path)?,
+    )?)
 }
 fn task_versions(record: &Value) -> &Value {
     if record["request"]["inputs"].is_array() {

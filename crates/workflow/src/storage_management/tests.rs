@@ -211,7 +211,8 @@ fn storage_preserves_task_summary_curve_and_signed_record_after_release() {
     let temp = tempfile::tempdir().unwrap();
     let w = Workspace::open(temp.path()).unwrap();
     let run = completed_run(&w);
-    let original = fs::read(w.resolve(run.output.join("run.json"))).unwrap();
+    let original =
+        analytics_storage::evidence_store::read(w.resolve(run.output.join("run.json"))).unwrap();
     let expected = w.results(&run).unwrap();
     let id = resource(&w, &run.output).id;
     let p = saved_plan(&w, &[id]);
@@ -219,7 +220,7 @@ fn storage_preserves_task_summary_curve_and_signed_record_after_release() {
     apply(&w, p.id, &context()).unwrap();
     assert_eq!(w.results(&run).unwrap(), expected);
     assert_eq!(
-        fs::read(w.resolve(run.output.join("run.json"))).unwrap(),
+        analytics_storage::evidence_store::read(w.resolve(run.output.join("run.json"))).unwrap(),
         original
     );
     let view = crate::views::run(w.root(), run.id).unwrap();
@@ -341,8 +342,11 @@ fn storage_original_data_can_be_released_with_only_historical_provenance() {
             .contains("released")
     );
     assert!(
-        w.resolve(format!(".jfquant/catalog/{}.json", market.id))
-            .is_file()
+        analytics_storage::catalog::CatalogStore::open(&w.database_path().unwrap())
+            .unwrap()
+            .get(&market.id)
+            .unwrap()
+            .is_some()
     );
 }
 #[test]
@@ -381,7 +385,12 @@ fn storage_redownload_registers_new_identity_without_resurrecting_old_inputs() {
     let saved: Vec<_> = p
         .files
         .iter()
-        .map(|f| (f.path.clone(), fs::read(w.resolve(&f.path)).unwrap()))
+        .map(|f| {
+            (
+                f.path.clone(),
+                analytics_storage::evidence_store::read(w.resolve(&f.path)).unwrap(),
+            )
+        })
         .collect();
     apply(&w, p.id, &context()).unwrap();
     assert!(
@@ -426,11 +435,10 @@ fn storage_market_view_integrity_dependency_blocks_partial_deletion() {
         end: None,
         details: json!({}),
     };
-    atomic_json(
-        &w.resolve(".jfquant/catalog/market-view-fixture.json"),
-        &view,
-    )
-    .unwrap();
+    analytics_storage::catalog::CatalogStore::open(&w.database_path().unwrap())
+        .unwrap()
+        .insert(&view)
+        .unwrap();
     let b = resource(&w, &base.path);
     let v = resource(&w, &root);
     assert!(
@@ -572,7 +580,8 @@ fn storage_archive_aliases_count_once_and_release_preserves_alias_record() {
     let p = saved_plan(&w, std::slice::from_ref(&resource.id));
     assert!(p.blockers.is_empty(), "{:?}", p.blockers);
     apply(&w, p.id, &context()).unwrap();
-    assert!(w.resolve(run.output.join("run.json")).is_file());
+    assert!(w.run(run.id).unwrap().is_some());
+    assert!(!w.resolve(run.output.join("run.json")).is_file());
     assert!(historical_view(&w, run.id).unwrap().is_some());
 }
 #[test]
@@ -649,7 +658,9 @@ fn storage_releasing_real_models_preserves_verified_prediction_replay_and_histor
     crate::execute(&w, &request, &run, &c).unwrap();
     w.finish(&mut run, RunStatus::Succeeded, None).unwrap();
     let original = w.results(&run).unwrap();
-    let descriptor = fs::read(w.resolve(run.output.join("training.json"))).unwrap();
+    let descriptor =
+        analytics_storage::evidence_store::read(w.resolve(run.output.join("training.json")))
+            .unwrap();
     let model = resource(&w, &run.output.join("training.json"));
     let p = saved_plan(&w, &[model.id]);
     assert!(p.blockers.is_empty(), "{:?}", p.blockers);
@@ -663,7 +674,8 @@ fn storage_releasing_real_models_preserves_verified_prediction_replay_and_histor
     );
     assert!(!w.resolve(run.output.join("fold-0000/model.txt")).exists());
     assert_eq!(
-        fs::read(w.resolve(run.output.join("training.json"))).unwrap(),
+        analytics_storage::evidence_store::read(w.resolve(run.output.join("training.json")))
+            .unwrap(),
         descriptor
     );
     assert_eq!(
@@ -754,12 +766,15 @@ fn storage_live_snapshot_finishes_and_cancellation_preserves_previous_summary() 
     let snapshot = snapshot(&w).unwrap().unwrap();
     assert!(snapshot.finished && snapshot.complete);
     assert_eq!(snapshot.scan_id, ctx.id);
-    let previous = fs::read(w.resolve(".jfquant/storage/inventory.json")).unwrap();
+    let previous =
+        analytics_storage::evidence_store::read(w.resolve(".jfquant/storage/inventory.json"))
+            .unwrap();
     let cancelled = context();
     cancelled.cancel.store(true, Ordering::Relaxed);
     assert!(execute(&w, &request, &run, &cancelled).is_err());
     assert_eq!(
-        fs::read(w.resolve(".jfquant/storage/inventory.json")).unwrap(),
+        analytics_storage::evidence_store::read(w.resolve(".jfquant/storage/inventory.json"))
+            .unwrap(),
         previous
     );
     let stopped = super::snapshot(&w).unwrap().unwrap();
@@ -775,11 +790,9 @@ fn storage_own_progress_writes_do_not_invalidate_dependency_verification() {
     let record = w
         .begin(id, "扫描", json!({"request":{"operation":"storage"}}))
         .unwrap();
-    let output = w.resolve(record.output.join("run.json"));
+    let progress_workspace = w.clone();
     let ctx = TaskContext::new(id, Arc::new(AtomicBool::new(false)), move |stage| {
-        let mut record = record.clone();
-        record.stage = stage.into();
-        atomic_json(&output, &record).unwrap();
+        progress_workspace.progress(&record, stage).unwrap();
     });
     let inventory = inventory::scan_with(&w, &ctx, ScanLevel::Resources, 4, true, None).unwrap();
     assert!(inventory.complete, "{:?}", inventory.diagnostics);
@@ -838,7 +851,9 @@ fn storage_startup_finishes_interrupted_progress_without_replacing_completed_inv
         &context(),
     )
     .unwrap();
-    let previous = fs::read(w.resolve(".jfquant/storage/inventory.json")).unwrap();
+    let previous =
+        analytics_storage::evidence_store::read(w.resolve(".jfquant/storage/inventory.json"))
+            .unwrap();
     let mut progress = snapshot(&w).unwrap().unwrap();
     progress.finished = false;
     progress.complete = false;
@@ -852,12 +867,16 @@ fn storage_startup_finishes_interrupted_progress_without_replacing_completed_inv
     assert_eq!(recovered.progress.total, progress.progress.total);
     assert!(!recovered.diagnostics.is_empty());
     assert_eq!(
-        fs::read(w.resolve(".jfquant/storage/inventory.json")).unwrap(),
+        analytics_storage::evidence_store::read(w.resolve(".jfquant/storage/inventory.json"))
+            .unwrap(),
         previous
     );
-    let once = fs::read(&path).unwrap();
+    let once = analytics_storage::evidence_store::read(&path).unwrap();
     recover_snapshot(&w).unwrap();
-    assert_eq!(fs::read(&path).unwrap(), once);
+    assert_eq!(
+        analytics_storage::evidence_store::read(&path).unwrap(),
+        once
+    );
     file(
         &w,
         ".jfquant/storage/snapshot.json",

@@ -291,6 +291,7 @@ dependencies = [
  "arrow-schema 60.0.0",
  "chrono",
  "parquet",
+ "rusqlite",
  "rust_decimal",
  "rustix 1.1.5",
  "serde",

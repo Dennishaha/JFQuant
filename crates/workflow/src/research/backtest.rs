@@ -853,7 +853,9 @@ pub fn run_with_context(
 fn file_hash(path: &Path) -> Result<String> {
     Ok(format!(
         "sha256:{:x}",
-        analytics_core::hash::Hex(Sha256::digest(fs::read(path)?))
+        analytics_core::hash::Hex(Sha256::digest(analytics_storage::evidence_store::read(
+            path
+        )?))
     ))
 }
 fn adjustment_basis_signature(

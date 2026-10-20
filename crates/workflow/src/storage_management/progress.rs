@@ -53,23 +53,22 @@ impl Reporter {
                     if last.elapsed() < Duration::from_secs(1) {
                         continue;
                     }
-                    let mut state = state.lock().unwrap();
-                    state.snapshot.updated_at = crate::now();
-                    state.snapshot.elapsed_ms = started.elapsed().as_millis() as u64;
+                    let mut guard = state.lock().unwrap();
+                    guard.snapshot.updated_at = crate::now();
+                    guard.snapshot.elapsed_ms = started.elapsed().as_millis() as u64;
                     let message = format!(
                         "{} · {} 个文件 · {} 个目录已完成 · {:.1} 秒",
-                        state.snapshot.phase,
-                        state.snapshot.progress.total.files,
-                        state.snapshot.progress.completed_directories,
+                        guard.snapshot.phase,
+                        guard.snapshot.progress.total.files,
+                        guard.snapshot.progress.completed_directories,
                         started.elapsed().as_secs_f64()
                     );
-                    let result =
-                        context
-                            .report(message)
-                            .map_err(|e| e.to_string())
-                            .and_then(|_| {
-                                atomic_json(&path, &state.snapshot).map_err(|e| e.to_string())
-                            });
+                    drop(guard);
+                    let report = context.report(message);
+                    let mut state = state.lock().unwrap();
+                    let result = report.map_err(|e| e.to_string()).and_then(|_| {
+                        atomic_json(&path, &state.snapshot).map_err(|e| e.to_string())
+                    });
                     if let Err(e) = result {
                         state.error = Some(e);
                         break;

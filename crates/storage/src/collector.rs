@@ -1468,9 +1468,6 @@ mod tdx_evidence_tests {
             members,
         };
         let bytes = serde_json::to_vec_pretty(&map).unwrap();
-        let path = store::map_path(workspace, &id).unwrap();
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, &bytes).unwrap();
         let mut registry = store::Registry::default();
         registry.packages.insert(
             id,
@@ -1480,11 +1477,7 @@ mod tdx_evidence_tests {
                 released: false,
             },
         );
-        fs::write(
-            workspace.join(store::REGISTRY),
-            serde_json::to_vec_pretty(&registry).unwrap(),
-        )
-        .unwrap();
+        store::publish(workspace, &[map], &registry).unwrap();
         fs::remove_dir_all(root.join("raw")).unwrap();
         assert_eq!(verify_http_receipts(&root, &evidence).unwrap().len(), 2);
         fs::create_dir_all(root.join("raw")).unwrap();

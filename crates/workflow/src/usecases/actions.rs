@@ -49,9 +49,10 @@ pub(super) fn execute(
             verify_action_evidence(&source_path, &ActionBundle::read(&source_path)?)?;
             let mut roots = Vec::new();
             for task in evidence_tasks {
-                let record: RunRecord = serde_json::from_slice(&fs::read(
-                    w.resolve(format!(".jfquant/runs/{task}/run.json")),
-                )?)?;
+                let record: RunRecord =
+                    serde_json::from_slice(&analytics_storage::evidence_store::read(
+                        w.resolve(format!(".jfquant/runs/{task}/run.json")),
+                    )?)?;
                 let root = reconciliation_evidence_root(w, *task, &record)?;
                 if run.request["reconciliation_evidence"][task.to_string()]["sha256"]
                     != market_content_hash(&root)?

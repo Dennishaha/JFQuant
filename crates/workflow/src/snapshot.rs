@@ -2,7 +2,6 @@
 use crate::{Result, RunRecord, WorkflowRequest, Workspace, market_content_hash};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::fs;
 
 /// Snapshot selected input versions when creating a run, rather than resolving them later.
 pub fn snapshot(workspace: &Workspace, request: &WorkflowRequest) -> Result<Value> {
@@ -146,8 +145,9 @@ pub fn snapshot(workspace: &Workspace, request: &WorkflowRequest) -> Result<Valu
         request: crate::indices::IndexOperation::Import { path },
     } = request
     {
-        let config: analytics_core::indices::IndexConfig =
-            serde_json::from_slice(&fs::read(workspace.resolve(path))?)?;
+        let config: analytics_core::indices::IndexConfig = serde_json::from_slice(
+            &analytics_storage::evidence_store::read(workspace.resolve(path))?,
+        )?;
         config.validate()?;
         frozen["index_import"] = serde_json::to_value(config)?;
     }
@@ -206,7 +206,9 @@ pub fn snapshot(workspace: &Workspace, request: &WorkflowRequest) -> Result<Valu
                 name.into(),
                 format!(
                     "sha256:{:x}",
-                    analytics_core::hash::Hex(Sha256::digest(fs::read(root.join(name))?))
+                    analytics_core::hash::Hex(Sha256::digest(
+                        analytics_storage::evidence_store::read(root.join(name))?
+                    ))
                 )
                 .into(),
             );
@@ -219,9 +221,10 @@ pub fn snapshot(workspace: &Workspace, request: &WorkflowRequest) -> Result<Valu
     if let WorkflowRequest::ReconcileActions { evidence_tasks, .. } = request {
         let mut evidence = serde_json::Map::new();
         for task in evidence_tasks {
-            let record: RunRecord = serde_json::from_slice(&fs::read(
-                workspace.resolve(format!(".jfquant/runs/{task}/run.json")),
-            )?)?;
+            let record: RunRecord =
+                serde_json::from_slice(&analytics_storage::evidence_store::read(
+                    workspace.resolve(format!(".jfquant/runs/{task}/run.json")),
+                )?)?;
             let root = reconciliation_evidence_root(workspace, *task, &record)?;
             evidence.insert(
                 task.to_string(),
@@ -248,7 +251,9 @@ pub fn snapshot(workspace: &Workspace, request: &WorkflowRequest) -> Result<Valu
         }
         frozen["training_artifact_sha256"] = json!(format!(
             "sha256:{:x}",
-            analytics_core::hash::Hex(Sha256::digest(fs::read(artifact_path)?))
+            analytics_core::hash::Hex(Sha256::digest(analytics_storage::evidence_store::read(
+                artifact_path
+            )?))
         ));
     }
     Ok(frozen)

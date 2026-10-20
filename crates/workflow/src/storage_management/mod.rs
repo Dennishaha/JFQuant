@@ -5,6 +5,7 @@ mod dependencies;
 mod history;
 mod inventory;
 mod json;
+pub mod json_migration;
 mod members;
 mod migration;
 mod progress;
@@ -26,10 +27,9 @@ pub use types::*;
 use uuid::Uuid;
 
 pub(crate) fn read<T: DeserializeOwned>(path: &Path) -> Result<T> {
-    Ok(serde_json::from_reader(std::io::BufReader::with_capacity(
-        64 * 1024,
-        fs::File::open(path)?,
-    ))?)
+    Ok(serde_json::from_slice(
+        &analytics_storage::evidence_store::read(path)?,
+    )?)
 }
 pub(crate) fn safe_relative(path: &Path) -> bool {
     !path.as_os_str().is_empty() && path.components().all(|c| matches!(c, Component::Normal(_)))
@@ -224,6 +224,7 @@ mod tests;
 
 /// Recover authoritative cleanup and migration journals before accepting work.
 pub fn recover(w: &Workspace) -> Result<()> {
+    json_migration::recover(w)?;
     migration::recover(w)?;
     cleanup::recover(w)
 }

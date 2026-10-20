@@ -35,7 +35,7 @@ flowchart TD
 
 ## 当前主程序版本边界
 
-App、CLI 与工作区服务统一使用协议45；采集协议16、研究worker4、研究模板12。
+App、CLI 与工作区服务统一使用协议47；采集协议16、研究worker4、研究模板12。
 正常入口拒绝旧协议和旧输入格式，历史数据升级通过显式本地迁移执行。
 版本权威定义与组件入口见[工作流组件](crates/workflow/src/README.md)。
 
@@ -102,3 +102,8 @@ crates/app/packaging/package-macos.sh
 股票评分后支持等权、最小方差、风险预算及滚动样本外校准的均值方差；多策略引用冻结目标，通过一个AKQuant账户净额成交。98%为目标仓位，实际漂移、拒单和锁定资产单独披露。参考账允许分数股且无费用，不能代替扣费收益。
 
 股票优化支持显式的逐日完整历史资格检查，在排序前筛选并记录排除原因；校准仅排除已确认停牌标签，未知缺价仍阻断。App 提供方法与常用约束控件。研究结果22、回测计划4、模板12；旧配置需显式离线迁移，细节及复现命令见 [workflow](crates/workflow/README.md#allocation-admission-revision)。
+
+
+Catalog、任务记录、证据包映射、迁移计划及共享配置现存于SQLite schema v2。旧工作区须先停止
+旧服务，再用新CLI执行`jfquant storage migrate-json`。原数据库和JSON有完整备份；迁移后
+不能删除`index.sqlite`来重建扫描缓存。[离线迁移与验收](crates/workflow/src/storage_management/README.md#json元数据拆表协议47)。

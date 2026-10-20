@@ -9,13 +9,14 @@ use chrono::Datelike;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     path::Path,
 };
 use uuid::Uuid;
 
 fn read(path: &Path) -> Result<Value> {
-    Ok(serde_json::from_slice(&fs::read(path)?)?)
+    Ok(serde_json::from_slice(
+        &analytics_storage::evidence_store::read(path)?,
+    )?)
 }
 
 /// Summarize a refresh without modifying tasks, checkpoints, credentials or stock pools.

@@ -210,3 +210,11 @@ HiThink 公司行动查询失败按未知证券、参数、认证、权限、限
 `filesystem` provides metadata-only file identity, allocation and free-space reads without following symlinks. Workspace resource ownership and deletion stay in workflow. [Storage management](../../workflow/src/storage_management/README.md).
 
 `evidence_store::tree_hash_with_members`核验原始文件身份并同时返回树摘要/叶子哈希，供迁移预览避免重复读取。普通对象视图仍使用`tree_hash`；编码、路径排序和业务身份规则不变。
+
+## 权威元数据接口
+
+`database.rs`及`../migrations/002_catalog_tables.sql`定义SQLite v2；`catalog.rs`、
+`run_store.rs`、`package_store.rs`、`migration_store.rs`、`metadata.rs`负责各实体的事务存取。
+`index.rs`的代次清理不得删除这些权威表。`evidence_store`通过SQL映射查原文对象，
+保留业务manifest/哈希验证及维护命令创建的归档别名。接口、数据流和可复现验收见
+[组件README](../README.md#工作区元数据-sqlite-v2)。

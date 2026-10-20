@@ -5,7 +5,9 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 fn read(root: &Path, name: &str) -> Result<Value> {
-    Ok(serde_json::from_slice(&fs::read(root.join(name))?)?)
+    Ok(serde_json::from_slice(
+        &analytics_storage::evidence_store::read(root.join(name))?,
+    )?)
 }
 fn number(value: &Value) -> Result<f64> {
     value
@@ -104,8 +106,9 @@ pub fn report(workspace: &Workspace, task_id: Uuid) -> Result<Value> {
         {
             return Err("rights_projection_hash_mismatch".into());
         }
-        let input: analytics_core::rights_account::Ledger =
-            serde_json::from_slice(&fs::read(root.join("rights_input.json"))?)?;
+        let input: analytics_core::rights_account::Ledger = serde_json::from_slice(
+            &analytics_storage::evidence_store::read(root.join("rights_input.json"))?,
+        )?;
         input.validate()?;
         if serde_json::to_value(input.corporate.policy)?
             != summary["execution"]["corporate_event_policy"]
@@ -210,7 +213,9 @@ pub fn report(workspace: &Workspace, task_id: Uuid) -> Result<Value> {
                 name,
                 format!(
                     "sha256:{:x}",
-                    analytics_core::hash::Hex(Sha256::digest(fs::read(root.join(name))?))
+                    analytics_core::hash::Hex(Sha256::digest(
+                        analytics_storage::evidence_store::read(root.join(name))?
+                    ))
                 ),
             ))
         })
@@ -249,8 +254,9 @@ fn artifacts(root: &Path, summary: &Value) -> Result<Value> {
         {
             return Err("rights_projection_hash_mismatch".into());
         }
-        let input: analytics_core::rights_account::Ledger =
-            serde_json::from_slice(&fs::read(root.join("rights_input.json"))?)?;
+        let input: analytics_core::rights_account::Ledger = serde_json::from_slice(
+            &analytics_storage::evidence_store::read(root.join("rights_input.json"))?,
+        )?;
         input.validate()?;
         let native: analytics_core::rights_account::Ledger =
             serde_json::from_value(read(root, "rights_state.json")?)?;

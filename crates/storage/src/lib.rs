@@ -13,9 +13,13 @@
 
 pub mod acquisition;
 pub mod bigquant;
+/// Indexed immutable data versions and evidence hashes.
+pub mod catalog;
 pub mod collector;
 pub mod corporate_actions;
 pub mod daily;
+/// Shared SQLite schema and worker-owned connection settings.
+pub mod database;
 /// Shared immutable evidence and original-byte filesystem views.
 pub mod evidence_store;
 pub mod hithink;
@@ -25,10 +29,18 @@ pub mod index;
 pub mod manifest_metadata;
 pub mod membership_history;
 pub mod membership_history_material;
+/// Workspace configuration and stable provenance projections.
+pub mod metadata;
+/// Normalized evidence migration plans and candidate files.
+pub mod migration_store;
 pub mod msci;
+/// Normalized immutable evidence package membership.
+pub mod package_store;
 /// Production Parquet encoding without schema changes.
 pub mod parquet_options;
 pub mod qlib;
+/// Durable current and archived workflow runs.
+pub mod run_store;
 pub mod tdx_status;
 pub mod three_factor;
 pub mod trading_status;

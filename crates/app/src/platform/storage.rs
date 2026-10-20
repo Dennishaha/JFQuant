@@ -815,10 +815,9 @@ fn migration_preview(
                 ui.label(format!("{} · {} 个文件条目", p.root.display(), p.members));
             }
         });
-        let members_path = plan.workspace.join(&plan.members_manifest);
-        ui.label(format!("精确成员清单：{}", members_path.display()));
-        if ui.button("复制精确清单路径").clicked() {
-            ui.ctx().copy_text(members_path.display().to_string());
+        ui.label(format!("完整成员已保存 · 计划 {}", plan.id));
+        if ui.button("复制计划 ID").clicked() {
+            ui.ctx().copy_text(plan.id.to_string());
         }
         ui.checkbox(
             &mut tools.migration_confirmed,
@@ -949,7 +948,7 @@ mod tests {
             workspace: w.root().into(),
             scan_id: old.scan_id,
             created_at: old.scanned_at.clone(),
-            members_manifest: ".jfquant/storage/migration-plans/old.json".into(),
+            members_database: ".jfquant/storage/index.sqlite".into(),
             packages: vec![],
             unique_objects: 0,
             blockers: vec![],

@@ -268,6 +268,12 @@ fn finish(root: &Path, journal_path: &Path, mut journal: Journal) -> Result<serd
             source.strip_prefix(root)?,
             destination.strip_prefix(root)?,
         )?;
+        if !id.starts_with('.') {
+            analytics_storage::run_store::RunStore::open(
+                &root.join(analytics_storage::database::INDEX),
+            )?
+            .archive(source.strip_prefix(root)?, destination.strip_prefix(root)?)?;
+        }
         if id.starts_with('.') {
             continue;
         }

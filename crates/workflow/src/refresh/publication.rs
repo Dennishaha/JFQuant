@@ -35,9 +35,12 @@ pub(super) fn reuse_shards(
             return Err("shard_reuse_plan_pending".into());
         }
         let source_run = source_workspace.resolve(format!(".jfquant/runs/{source_id}"));
-        let original: RunRecord = serde_json::from_slice(&fs::read(source_run.join("run.json"))?)?;
-        let source: RefreshPlan =
-            serde_json::from_slice(&fs::read(source_run.join("refresh-plan.json"))?)?;
+        let original: RunRecord = serde_json::from_slice(
+            &analytics_storage::evidence_store::read(source_run.join("run.json"))?,
+        )?;
+        let source: RefreshPlan = serde_json::from_slice(
+            &analytics_storage::evidence_store::read(source_run.join("refresh-plan.json"))?,
+        )?;
         let original_request = &original.request["request"]["request"];
         if source.history != plan.history
             || (request.mode != RefreshMode::Actions
@@ -54,7 +57,9 @@ pub(super) fn reuse_shards(
             .unwrap_or(source_id);
         let source_root = source_workspace.resolve(format!(".jfquant/staging/refresh-{owner}"));
         let progress: Value = if source_run.join("refresh-progress.json").exists() {
-            serde_json::from_slice(&fs::read(source_run.join("refresh-progress.json"))?)?
+            serde_json::from_slice(&analytics_storage::evidence_store::read(
+                source_run.join("refresh-progress.json"),
+            )?)?
         } else {
             json!({"outcomes":{}})
         };
@@ -72,15 +77,17 @@ pub(super) fn reuse_shards(
                         continue;
                     }
                     if provider == Provider::Tdxaidata {
-                        let owner: Value =
-                            serde_json::from_slice(&fs::read(from.join("owner.json"))?)?;
+                        let owner: Value = serde_json::from_slice(
+                            &analytics_storage::evidence_store::read(from.join("owner.json"))?,
+                        )?;
                         if owner["collector_signature"] != collector::collector_signature() {
                             continue;
                         }
                     }
                     if provider == Provider::Hithink {
-                        let owner: Value =
-                            serde_json::from_slice(&fs::read(from.join("owner.json"))?)?;
+                        let owner: Value = serde_json::from_slice(
+                            &analytics_storage::evidence_store::read(from.join("owner.json"))?,
+                        )?;
                         if owner["collector_signature"]
                             != analytics_storage::hithink::producer_signature()
                         {
@@ -141,7 +148,9 @@ pub fn execute(
     fs::create_dir_all(&staging)?;
     let identity = json!({"schema_version":1,"plan_signature":signature(&p)?,"mode":request.mode,"collector_signature":collector::collector_signature()});
     let owner_path = staging.join("refresh-owner.json");
-    if owner_path.exists() && serde_json::from_slice::<Value>(&fs::read(&owner_path)?)? != identity
+    if owner_path.exists()
+        && serde_json::from_slice::<Value>(&analytics_storage::evidence_store::read(&owner_path)?)?
+            != identity
     {
         return Err("refresh_checkpoint_owner_mismatch".into());
     }

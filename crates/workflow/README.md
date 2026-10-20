@@ -456,3 +456,19 @@ DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow recipes_validate_order_ve
 新行动/公告生产者在成功发布时显式登记准确manifest及数据版本/任务归属，不依赖catalog扫描、UUID子串或目录存在性推测。迁移预览区分文件条目与按原文SHA256去重的唯一对象。
 
 迁移预览按任务复用已核验内容的压缩估算，复合树一次读取计算树/叶子哈希；扫描阶段在原线程内共享只读任务记录，避免深拷贝冻结请求。管理JSON采用64KiB缓冲读写、计数和签名，保持原格式和指纹。协议46不变，无业务数据迁移。验收/测量见[存储管理](src/storage_management/README.md#迁移预览读取与序列化优化)。
+
+## JSON元数据数据库（协议47）
+
+工作区Catalog、运行记录/归档位置、证据包、迁移计划与共享配置切换到SQLite schema v2。
+`Workspace::datasets/runs/run/save_run`、股票池和来源策略通过所属Store读写；构建仍使用
+`DUCKDB_DOWNLOAD_LIB=1 cargo build -p analytics-cli -p analytics-desktop`。旧JSON仅通过
+显式离线`jfquant storage migrate-json`导入，正常入口提示迁移，拒绝静默空目录。
+迁移先取得工作区租约并备份；事务失败原文件保留，提交后崩溃按SQL凭据恢复。
+原运行记录字节和全部冻结特征、公式、schema哈希保留；DuckDB/LightGBM仍只在worker内。
+
+`MigrationPreview`使用`members_database`及计划ID定位完整成员；服务协议47拒绝旧客户端。
+运行状态仍为已有7种业务状态，业务记录格式不因SQL版本改变。盘点使用Catalog头查询和
+修订指纹，配置/运行请求/包成员仍进入依赖保护。工作区DB包含权威数据，不得整体删除重建。
+
+验收：`DUCKDB_DOWNLOAD_LIB=1 cargo nextest run --workspace`及Clippy、Rustdoc；
+迁移、备份、恢复及基准命令见[所属组件](src/storage_management/README.md#json元数据拆表协议47)。

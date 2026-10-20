@@ -81,15 +81,11 @@ impl Workspace {
             end,
             details,
         };
-        let dest = self
-            .root
-            .join(".jfquant/catalog")
-            .join(format!("{id}.json"));
-        if dest.exists() {
-            let old: DataVersion = serde_json::from_slice(&fs::read(&dest)?)?;
+        let mut store = analytics_storage::catalog::CatalogStore::open(&self.database_path()?)?;
+        if let Some(old) = store.get(&id)? {
             return Ok(old);
         }
-        atomic_json(&dest, &data)?;
+        store.insert(&data)?;
         Ok(data)
     }
 }

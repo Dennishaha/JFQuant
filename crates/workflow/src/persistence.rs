@@ -64,6 +64,9 @@ pub(crate) fn verify_action_evidence(path: &Path, book: &ActionBundle) -> Result
     Ok(())
 }
 pub(crate) fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
+    if analytics_storage::metadata::write_projection(path, value)? {
+        return Ok(());
+    }
     fs::create_dir_all(path.parent().ok_or("missing parent")?)?;
     let part = path.with_extension(format!("{}.tmp", Uuid::new_v4()));
     let mut f = fs::OpenOptions::new()

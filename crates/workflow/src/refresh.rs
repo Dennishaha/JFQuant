@@ -90,9 +90,9 @@ impl SourcePolicy {
         Ok(())
     }
     pub fn load(w: &Workspace) -> Result<Self> {
-        let p = w.resolve(".jfquant/source-policy.json");
-        let value = if p.exists() {
-            let raw: Value = serde_json::from_slice(&fs::read(p)?)?;
+        let raw = analytics_storage::metadata::ConfigStore::open(&w.database_path()?)?
+            .get::<Value>(".jfquant/source-policy.json")?;
+        let value = if let Some(raw) = raw {
             analytics_core::source_map::reject_removed_sources(&raw)?;
             serde_json::from_value(raw)?
         } else {
@@ -550,14 +550,28 @@ mod retired_policy_tests {
         let workspace = Workspace::open(temp.path()).unwrap();
         let path = workspace.resolve(".jfquant/source-policy.json");
         let bytes = br#"{"schema_version":2,"priorities":{"quotes":["eastmoney"]}}"#;
-        fs::write(&path, bytes).unwrap();
+        analytics_storage::metadata::ConfigStore::open(&workspace.database_path().unwrap())
+            .unwrap()
+            .set(
+                ".jfquant/source-policy.json",
+                "policy",
+                &serde_json::from_slice::<Value>(bytes).unwrap(),
+            )
+            .unwrap();
         assert!(
             SourcePolicy::load(&workspace)
                 .unwrap_err()
                 .to_string()
                 .contains("removed_provider")
         );
-        assert_eq!(fs::read(path).unwrap(), bytes);
+        let stored: Value =
+            analytics_storage::metadata::ConfigStore::open(&workspace.database_path().unwrap())
+                .unwrap()
+                .get(".jfquant/source-policy.json")
+                .unwrap()
+                .unwrap();
+        assert_eq!(stored, serde_json::from_slice::<Value>(bytes).unwrap());
+        assert!(!path.exists());
     }
 }
 

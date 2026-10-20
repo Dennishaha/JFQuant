@@ -189,57 +189,24 @@ pub(crate) fn management_run(record: &RunRecord) -> bool {
     record.request["request"]["operation"] == "storage"
 }
 fn load_runs(r: &mut Registry<'_>) -> Result<()> {
-    let paths: Vec<_> = r
-        .files
-        .named("run.json")
-        .into_iter()
-        .filter(|p| p.starts_with(".jfquant/runs") || p.starts_with(".jfquant/archive"))
-        .collect();
-    for p in paths {
-        if p.starts_with(&r.active_root) {
-            continue;
+    r.runs = analytics_storage::run_store::RunStore::open(&r.w.database_path()?)?.load_all()?;
+    r.runs.retain(|p, _| !p.starts_with(&r.active_root));
+    for (root, run) in &r.runs {
+        if !management_run(run) {
+            r.metadata
+                .insert(root.join("run.json"), crate::signature(run.as_ref())?);
         }
-        let Ok(value) = r.metadata(&p) else { continue };
-        let Ok(run) = serde_json::from_value::<RunRecord>(value) else {
-            continue;
-        };
-        if run.schema_version != 1
-            || p.parent()
-                .and_then(|p| p.file_name())
-                .and_then(|s| s.to_str())
-                != Some(run.id.to_string().as_str())
-        {
-            continue;
-        }
-        if management_run(&run) {
-            r.metadata.remove(&p);
-        }
-        r.runs.insert(p.parent().unwrap().to_owned(), Rc::new(run));
     }
+
     Ok(())
 }
 fn data_packages(r: &mut Registry<'_>) -> Result<()> {
-    let catalog_paths: Vec<_> = r
-        .files
-        .under(Path::new(".jfquant/catalog"))
-        .into_iter()
-        .filter(|p| p.extension().is_some_and(|e| e == "json"))
-        .collect();
-    for cp in catalog_paths {
-        let value = match r.metadata(&cp) {
-            Ok(v) => v,
-            Err(e) => {
-                r.diagnostics.push(format!("{}: {e}", cp.display()));
-                continue;
-            }
-        };
-        let d: crate::DataVersion = match serde_json::from_value(value) {
-            Ok(d) => d,
-            Err(e) => {
-                r.diagnostics.push(format!("{}: {e}", cp.display()));
-                continue;
-            }
-        };
+    let store = analytics_storage::catalog::CatalogStore::open(&r.w.database_path()?)?;
+    r.metadata.insert(
+        PathBuf::from("sqlite/catalog-revision"),
+        store.revision()?.to_string(),
+    );
+    for d in store.headers(None)? {
         if !safe_relative(&d.path) {
             r.diagnostics.push(format!("{}: unsafe catalog path", d.id));
             continue;
@@ -1046,6 +1013,10 @@ pub(crate) fn scan_with(
         roots: BTreeMap::new(),
     };
     for map in analytics_storage::evidence_store::maps(w.root())? {
+        r.metadata.insert(
+            PathBuf::from(format!("sqlite/package/{}", map.id)),
+            crate::signature(&map)?,
+        );
         r.object_identities
             .insert(map.root.clone(), map.identity_root.clone());
         for (relative, object) in &map.members {
@@ -1066,13 +1037,6 @@ pub(crate) fn scan_with(
                 physical.strip_prefix(w.root())?.into(),
             );
         }
-        let mapping = analytics_storage::evidence_store::map_path(w.root(), &map.id)?;
-        r.metadata(mapping.strip_prefix(w.root())?)?;
-    }
-    if w.resolve(analytics_storage::evidence_store::REGISTRY)
-        .exists()
-    {
-        r.metadata(Path::new(analytics_storage::evidence_store::REGISTRY))?;
     }
     load_runs(&mut r)?;
     data_packages(&mut r)?;

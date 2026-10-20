@@ -34,3 +34,9 @@ bash crates/workflow/checks/acceptance.sh
 
 Do not rebuild/package the shared Python environment concurrently with this suite;
 training/GUI tests use bounded deadlines and require a stable interpreter tree.
+
+
+`benchmark-json-storage.py --workspace /absolute/workspace --mode json|sqlite [--iterations 5]`
+只读比较迁移前后Catalog头信息与当前代次运行请求查询，中位耗时和进程峰值RSS以JSON输出。
+两种模式分进程运行，不清系统缓存；应在离线稳定样本上执行并将输出保存在工作区外。
+完整盘点仍需单独测量；[方法及迁移步骤](../src/storage_management/README.md#json元数据拆表协议47)。

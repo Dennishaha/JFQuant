@@ -28,6 +28,9 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
+      - name: Build collector Python environment
+        run: ./crates/storage/collectors/build-collector.sh
+
       - name: Generate coverage report
         run: |
           cargo llvm-cov --workspace --lcov --output-path lcov.info

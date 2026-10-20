@@ -1,5 +1,6 @@
 //! Refresh actions stage.
 use super::*;
+use analytics_storage::evidence_store::io_fs as fs;
 pub(super) fn reference_route(
     p: &RefreshPlan,
     base: &DailyDataset,
@@ -572,6 +573,13 @@ pub(super) fn refresh_actions(
     let published = w.resolve(format!("data/refresh-actions-{}", run.id));
     fs::rename(&dest, &published)?;
     result.actions = Some(w.register(&published.join("actions.json"))?);
+    crate::storage_management::publish_evidence(
+        w,
+        &published.join("actions.json"),
+        result.actions.as_ref(),
+        run,
+        context,
+    )?;
     result.account = json!({"status":"not_run","code":"account_path_not_run","action_securities":book.queried_symbols.len(),"missing_cash_dates":book.actions.iter().filter(|a|a.cash()>0.&&a.pay_date.is_none()).count(),"missing_listing_dates":book.actions.iter().filter(|a|a.shares()>0.&&a.listing_date.is_none()).count(),"execution_issues":book.execution_issues});
     Ok(())
 }

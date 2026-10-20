@@ -56,20 +56,37 @@ pub(crate) fn validate(w: &Workspace, journal: &Journal) -> Result<()> {
         .collect();
     let mut paths = BTreeSet::new();
     for file in &journal.plan.files {
+        if file.path.starts_with(".jfquant/objects") {
+            let name = file
+                .path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .ok_or("storage_invalid_object_path")?;
+            let expected = analytics_storage::evidence_store::object_path(
+                w.root(),
+                &format!("sha256:{name}"),
+            )?;
+            if expected.strip_prefix(w.root())? != file.path {
+                return Err("storage_invalid_object_path".into());
+            }
+        }
         if !safe_relative(&file.path)
             || file.path.starts_with(".jfquant/storage")
             || file.path.file_name().is_some_and(|n| n == "run.json")
             || !(file.path.starts_with("data")
                 || file.path.starts_with(".jfquant/runs")
                 || file.path.starts_with(".jfquant/archive")
-                || file.path.starts_with(".jfquant/staging"))
+                || file.path.starts_with(".jfquant/staging")
+                || file.path.starts_with(".jfquant/objects/sha256"))
             || file.owners.is_empty()
             || !file.owners.iter().all(|id| ids.contains(id))
             || !paths.insert(&file.path)
         {
             return Err("storage_invalid_journal_path".into());
         }
-        owned_path(w, &file.path)?;
+        if !matches!(journal.result.status.as_str(), "completed" | "rolled_back") {
+            owned_path(w, &file.path)?;
+        }
     }
     Ok(())
 }
@@ -110,6 +127,7 @@ fn rollback(w: &Workspace, root: &Path, journal: &mut Journal) -> Result<()> {
     save(root, journal)
 }
 fn purge(w: &Workspace, root: &Path, journal: &mut Journal) -> Result<CleanupResult> {
+    super::migration::release_packages(w, &journal.result.resources)?;
     journal.result.errors.clear();
     let mut removed = vec![];
     for (i, file) in journal.plan.files.iter().enumerate() {
@@ -186,7 +204,7 @@ pub fn apply(w: &Workspace, id: Uuid, context: &TaskContext) -> Result<CleanupRe
         w,
         &PathBuf::from(format!(".jfquant/storage/plans/{id}.json")),
     )?)?;
-    if !plan.metadata_fingerprint.starts_with("storage-v2:") {
+    if !plan.metadata_fingerprint.starts_with("storage-v3:") {
         return Err("storage_plan_stale: 存储扫描规则已更新，请重新预览".into());
     }
     if plan.schema_version != 1

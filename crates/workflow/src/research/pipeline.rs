@@ -847,8 +847,12 @@ fn write_predictions(path: &Path, rows: &[(String, Date)], predictions: &[Vec<f6
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut writer = ArrowWriter::try_new(File::create(path)?, schema, None)
-        .map_err(|error| PipelineError::Arrow(error.to_string()))?;
+    let mut writer = ArrowWriter::try_new(
+        File::create(path)?,
+        schema,
+        Some(analytics_storage::parquet_options::writer_properties()),
+    )
+    .map_err(|error| PipelineError::Arrow(error.to_string()))?;
     writer
         .write(&batch)
         .map_err(|error| PipelineError::Arrow(error.to_string()))?;

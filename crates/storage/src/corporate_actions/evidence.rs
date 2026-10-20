@@ -224,24 +224,7 @@ fn publish_manifest(
 }
 /// Copy an evidence tree without links, checking cancellation on every entry.
 pub fn copy_tree(source: &Path, output: &Path) -> io::Result<()> {
-    fs::create_dir(output)?;
-    for entry in fs::read_dir(source)? {
-        TaskContext::current().check()?;
-        let e = entry?;
-        // SDK credentials are neither evidence nor resumable checkpoints.
-        if e.file_name() == ".tdx-runtime" {
-            continue;
-        }
-        let ty = e.file_type()?;
-        if ty.is_dir() {
-            copy_tree(&e.path(), &output.join(e.file_name()))?;
-        } else if ty.is_file() {
-            fs::copy(e.path(), output.join(e.file_name()))?;
-        } else {
-            return Err(invalid("evidence tree contains a link"));
-        }
-    }
-    Ok(())
+    crate::evidence_store::copy_tree(source, output)
 }
 /// Recover only checksum-verified completed announcement shards from a partial batch.
 /// The manifest retains the incomplete batch identity and never invents coverage.

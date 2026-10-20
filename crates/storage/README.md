@@ -266,7 +266,7 @@ CNY 价格指数。HiThink 接受确切供应商代码（或转换明确的 SH/S
 `DailyDataset::index_config` 从所选快照解析定义，不读取可编辑目录。
 验收：`cargo test -p analytics-storage runtime_index`；TDX fixture 见 `collectors/tests/test_tdx.py`。
 
-本次指数接入格式已收敛：AdjustmentRecord 仅接受格式4（`index_input` 必填，普通证券及内置目录指数显式为 null，自定义指数冻结完整合同）；SourceMap 仅接受格式2，指数无可下单证券身份；CollectionRequest 必须显式包含 `index_inputs`（可为空对象）。正常读取不升级旧版本、不猜测缺失字段。旧快照只作历史留存，显式离线转换后必须以新内容哈希重新登记，原始响应及采集器身份不得改写成当前版本。服务协议45、采集协议16拒绝旧检查点；格式更新不等于来源准入通过。
+本次指数接入格式已收敛：AdjustmentRecord 仅接受格式4（`index_input` 必填，普通证券及内置目录指数显式为 null，自定义指数冻结完整合同）；SourceMap 仅接受格式2，指数无可下单证券身份；CollectionRequest 必须显式包含 `index_inputs`（可为空对象）。正常读取不升级旧版本、不猜测缺失字段。旧快照只作历史留存，显式离线转换后必须以新内容哈希重新登记，原始响应及采集器身份不得改写成当前版本。服务协议46、采集协议16拒绝旧检查点；格式更新不等于来源准入通过。
 
 ## 历史成员原文核验
 
@@ -347,3 +347,15 @@ CLI `data three-factors --market VERSION --inputs FILE` 和 App“数据更新�
 ### 并行元数据遍历
 
 `filesystem::walk(root, threads, overview, update)`支持1—8线程、有界目录队列和批量结果通道；队列满时在当前线程深度优先处理，取消会关闭结果通道并等待所有线程退出。一次metadata读取生成文件类型与FileStamp。总览保留目录聚合及多链接文件身份，不保留普通文件路径；硬链接按字典序最小的目录桶归属。符号链接不跟随，目录变化、权限与跨文件系统错误进入诊断。回调每100ms检查取消，持久化由workflow每秒节流。验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-storage storage_parallel_`。
+
+## SQLite与压缩证据
+
+`index::{Index, DiskMap, CacheRecord, ResourceKey}`提供独立于遍历器的可重建SQLite缓存；内置SQLite、WAL、线程内连接与有界批次。`filesystem::walk_stream`把元数据批次交给协调线程写入，不保留全部文件对象。证据`evidence_store::{open, read, copy, logical_files, copy_tree, tree_hash}`同时处理原始包与权威映射指向的压缩对象，读取核验原文长度/SHA256，缺失不回退。对象格式1与迁移恢复、导出命令见[存储管理](../workflow/src/storage_management/README.md#sqlite-索引与共享证据协议46)。
+
+`parquet_options::writer_properties()`为新Rust生产文件设置Zstd level1；BigQuant Python整理入口同等级，既有文件不重写。构建`cargo check -p analytics-storage`；验收`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-storage storage_`，包含索引代次、错误传播、对象编码与收据原文一致性。
+
+`evidence_store::prepare_object`为事务保留创建对象的硬链接凭据，调用方负责同步目录并在提交/回滚后移除；独立`create_object`自行同步并移除临时文件。未知对象仅凭内容哈希相同不能认领删除。编码基准：`DUCKDB_DOWNLOAD_LIB=1 cargo build --release -p analytics-storage --example storage_encoding_benchmark`，仅向新建输出目录写入样本并核验逻辑值。
+
+索引连接使用任务取消标记的SQLite progress handler，长SQL可中断；取消只回滚当前缓存批次，已完成扫描和权威证据事务不受影响。验收：`cargo test -p analytics-storage storage_sqlite_cancel`。
+
+发布构建的容量、耗时、峰值内存及压缩计算验收见[SQLite首版实测](../workflow/src/storage_management/README.md#2026-10-20-sqlite-首版验收)；全量索引重建存在额外耗时，不保证压缩能减少所有小文件的分配空间。

@@ -6,8 +6,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
-    fs,
-    io::{self, Read},
+    fs, io,
     path::{Path, PathBuf},
 };
 fn invalid(e: impl std::fmt::Display) -> io::Error {
@@ -36,55 +35,24 @@ pub struct MarketView {
 }
 /// Digest all regular files in deterministic relative-path order, rejecting links.
 pub fn tree_hash(root: &Path) -> io::Result<String> {
-    fn files(root: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
-        for e in fs::read_dir(root)? {
-            let e = e?;
-            let ty = e.file_type()?;
-            if ty.is_dir() {
-                files(&e.path(), out)?;
-            } else if ty.is_file() {
-                out.push(e.path());
-            } else {
-                return Err(invalid("data versions cannot contain links"));
-            }
-        }
-        Ok(())
-    }
-    let mut paths = vec![];
-    files(root, &mut paths)?;
-    paths.sort();
-    let mut h = Sha256::new();
-    let mut buf = vec![0; 1024 * 1024];
-    for p in paths {
-        analytics_core::task::TaskContext::current().check()?;
-        let r = p
-            .strip_prefix(root)
-            .map_err(invalid)?
-            .to_str()
-            .ok_or_else(|| invalid("non-UTF8 data path"))?;
-        h.update((r.len() as u64).to_le_bytes());
-        h.update(r.as_bytes());
-        let mut f = fs::File::open(p)?;
-        h.update(f.metadata()?.len().to_le_bytes());
-        loop {
-            analytics_core::task::TaskContext::current().check()?;
-            let n = f.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            h.update(&buf[..n]);
-        }
-    }
-    Ok(format!(
-        "sha256:{:x}",
-        analytics_core::hash::Hex(h.finalize())
-    ))
+    crate::evidence_store::tree_hash(root)
 }
 /// Exact digest of one frozen file.
 pub fn file_hash(p: &Path) -> io::Result<String> {
+    let mut input = crate::evidence_store::open(p)?;
+    let mut hash = Sha256::new();
+    let mut buffer = [0u8; 65536];
+    loop {
+        analytics_core::task::TaskContext::current().check()?;
+        let n = std::io::Read::read(&mut input, &mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        hash.update(&buffer[..n]);
+    }
     Ok(format!(
         "sha256:{:x}",
-        analytics_core::hash::Hex(Sha256::digest(fs::read(p)?))
+        analytics_core::hash::Hex(hash.finalize())
     ))
 }
 impl MarketView {

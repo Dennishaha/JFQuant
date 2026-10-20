@@ -81,11 +81,11 @@ cargo clippy -p analytics-cli --all-targets -- -D warnings
 
 ## 动态股票池与 Python 采集接口
 
-当前模板schema 12、研究结果版本见 RESEARCH_SCHEMA_VERSION、服务协议45；GTJA191公式为v5。解析后配置包含 `pool_version`、`benchmark` 和 `pool_exit_policy`（磁盘保存于TargetProfile）；默认 `builtin:csi500` / `SH000905`，沪深300模板使用 `builtin:csi300` / `SH000300`。自选和集合组合引用不可变pool版本，冻结成员区间、人工日期调整及输入哈希；模型manifest和缓存签名包含这些研究输入。原schema结果明确拒绝，历史状态和日志仍可查看，不转换旧文件。
+当前模板schema 12、研究结果版本见 RESEARCH_SCHEMA_VERSION、服务协议46；GTJA191公式为v5。解析后配置包含 `pool_version`、`benchmark` 和 `pool_exit_policy`（磁盘保存于TargetProfile）；默认 `builtin:csi500` / `SH000905`，沪深300模板使用 `builtin:csi300` / `SH000300`。自选和集合组合引用不可变pool版本，冻结成员区间、人工日期调整及输入哈希；模型manifest和缓存签名包含这些研究输入。原schema结果明确拒绝，历史状态和日志仍可查看，不转换旧文件。
 
 ```mermaid
 flowchart LR
-  CLIENT["App / jfquant"] --> SERVICE["协议45公共服务"]
+  CLIENT["App / jfquant"] --> SERVICE["协议46公共服务"]
   SERVICE --> POOL["保存/预览不可变股票池"]
   SERVICE --> COLLECT["Rust HiThink REST / 监督内置Python备用采集"]
   COLLECT --> SNAPSHOT["验证后的Parquet版本与公司行动候选"]

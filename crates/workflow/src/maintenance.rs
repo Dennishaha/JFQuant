@@ -1,10 +1,10 @@
 //! Offline, recoverable archival of derived runs. Original inputs are never deleted.
 use crate::{Result, Workspace, atomic_json};
+use analytics_storage::evidence_store::io_fs as fs;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
-    fs,
     io::Read,
     path::{Path, PathBuf},
 };
@@ -195,6 +195,13 @@ pub fn apply(path: &Path) -> Result<serde_json::Value> {
     let root = root(path)?;
     let workspace = Workspace { root: root.clone() };
     let _lease = workspace.lease()?;
+    crate::storage_management::recover(&workspace)?;
+    if crate::storage_management::cleanup_history(&workspace)?
+        .iter()
+        .any(|r| r.committed && r.completed_at.is_none())
+    {
+        return Err("storage_cleanup_pending: 完成已有空间释放后再归档".into());
+    }
     let journal_path = root.join(".jfquant/maintenance.json");
     let previous = if journal_path.exists() {
         Some(serde_json::from_slice::<Journal>(&fs::read(
@@ -256,6 +263,11 @@ fn finish(root: &Path, journal_path: &Path, mut journal: Journal) -> Result<serd
         if !destination.exists() {
             fs::rename(&source, &destination)?;
         }
+        crate::storage_management::archive_packages(
+            root,
+            source.strip_prefix(root)?,
+            destination.strip_prefix(root)?,
+        )?;
         if id.starts_with('.') {
             continue;
         }

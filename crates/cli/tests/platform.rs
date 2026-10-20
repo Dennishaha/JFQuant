@@ -159,6 +159,91 @@ fn storage_cli_scan_preview_and_permanent_release_share_service_results() {
     );
 }
 #[test]
+fn storage_cli_migration_and_export_share_worker_and_preserve_business_bytes() {
+    let s = Sandbox::new();
+    let w = Workspace::open(&s.client.root).unwrap();
+    let (_, actions, _) = analytics_workflow::demo::create_canonical(&w).unwrap();
+    let manifest = w.resolve(&actions.path);
+    std::fs::create_dir_all(manifest.parent().unwrap().join("raw")).unwrap();
+    let payload = b"{ \"audit\": \"original immutable evidence\" }\n";
+    std::fs::write(manifest.parent().unwrap().join("raw/audit.json"), payload).unwrap();
+    let mut value: Value = serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+    value["raw_sha256"]["audit.json"] = analytics_storage::evidence_store::digest(payload).into();
+    std::fs::write(&manifest, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    let actions = w.register(&manifest).unwrap();
+    let original = std::fs::read(w.resolve(&actions.path)).unwrap();
+    let scan = s.json(&["storage", "scan", "--level", "resources"])["task_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    s.client.wait(scan, Some(20)).unwrap();
+    let inventory = s.json(&["storage", "list", "--category", "evidence"]);
+    let id = inventory["resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == actions.id)
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
+    let task = s.json(&["storage", "migrate", "plan", "--resource", id])["task_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let preview = s.client.wait(task, Some(20)).unwrap()["results"].clone();
+    assert_eq!(preview["blockers"], json!([]), "{preview}");
+    let exact = w.resolve(preview["members_manifest"].as_str().unwrap());
+    let full: Value = serde_json::from_slice(&std::fs::read(exact).unwrap()).unwrap();
+    assert!(full["packages"][0]["members"].is_array());
+    assert!(preview["packages"][0]["members"].is_u64());
+    let plan = preview["id"].as_str().unwrap();
+    assert!(
+        !s.cli(&["storage", "migrate", "apply", "--plan", plan])
+            .status
+            .success()
+    );
+    let task = s.json(&[
+        "storage",
+        "migrate",
+        "apply",
+        "--plan",
+        plan,
+        "--confirm-rewrite",
+    ])["task_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let result = s.client.wait(task, Some(20)).unwrap();
+    assert_eq!(result["results"]["status"], "completed", "{result}");
+    assert_eq!(s.json(&["storage", "migrate", "history"])[0]["plan"], plan);
+    assert_eq!(std::fs::read(w.resolve(&actions.path)).unwrap(), original);
+    assert!(
+        analytics_storage::corporate_actions::ActionBundle::read(&w.resolve(&actions.path)).is_ok()
+    );
+    let output = s.temp.path().join("exported");
+    let task = s.json(&[
+        "storage",
+        "export",
+        "--resource",
+        id,
+        "--output",
+        output.to_str().unwrap(),
+    ])["task_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let exported = s.client.wait(task, Some(20)).unwrap();
+    assert_eq!(exported["results"]["original_bytes_verified"], true);
+    assert!(
+        analytics_storage::corporate_actions::ActionBundle::read(&output.join("actions.json"))
+            .is_ok()
+    );
+}
+#[test]
 fn three_factor_capture_cli_exposes_temporal_policy_and_validates_before_network() {
     let s = Sandbox::new();
     let help = s.cli(&["data", "three-factor-inputs", "--help"]);

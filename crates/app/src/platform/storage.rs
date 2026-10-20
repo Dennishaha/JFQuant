@@ -3,8 +3,8 @@ use super::*;
 use analytics_workflow::{
     service::{Client, Rpc},
     storage_management::{
-        CleanupPlan, CleanupResult, ResourceCategory, ScanLevel, ScanSnapshot, StorageInventory,
-        StorageRequest, default_threads,
+        CleanupPlan, CleanupResult, MigrationPreview, MigrationResult, ResourceCategory,
+        ResourceQuery, ScanLevel, ScanSnapshot, StorageInventory, StorageRequest, default_threads,
     },
 };
 use std::{
@@ -17,6 +17,7 @@ type SnapshotReply = Receiver<
             Option<StorageInventory>,
             Vec<CleanupResult>,
             Option<ScanSnapshot>,
+            Vec<MigrationResult>,
         ),
         String,
     >,
@@ -32,6 +33,9 @@ pub(crate) struct StorageTools {
     read: Option<(PathBuf, SnapshotReply)>,
     selected: BTreeSet<String>,
     plan: Option<CleanupPlan>,
+    migration_plan: Option<MigrationPreview>,
+    migration_confirmed: bool,
+    migration_result: Option<MigrationResult>,
     confirmed: bool,
     search: String,
     task: String,
@@ -49,6 +53,36 @@ impl StorageTools {
             return;
         }
         self.read = None;
+        if value.get("original_reference_bytes").is_some() {
+            if let Ok(plan) = serde_json::from_value::<MigrationPreview>(value.clone())
+                && plan.workspace == root
+                && self.snapshot.as_ref().is_none_or(|snapshot| {
+                    snapshot.scan_id == plan.scan_id || snapshot.started_at <= plan.created_at
+                })
+            {
+                self.migration_plan = Some(plan);
+                self.migration_confirmed = false;
+            }
+            return;
+        }
+        if value.get("completed").is_some()
+            && value.get("plan").is_some()
+            && value.get("workspace").is_some()
+        {
+            if let Ok(result) = serde_json::from_value::<MigrationResult>(value.clone())
+                && result.workspace == root
+            {
+                self.migration_result = Some(result);
+                self.migration_plan = None;
+                self.migration_confirmed = false;
+                self.stale = true;
+                self.refresh = true;
+                self.selected.clear();
+                self.plan = None;
+                self.confirmed = false;
+            }
+            return;
+        }
         if value.get("scanned_at").is_some() {
             if let Ok(snapshot) = serde_json::from_value::<StorageInventory>(value.clone())
                 && snapshot.workspace == root
@@ -65,6 +99,8 @@ impl StorageTools {
                 self.stale = false;
                 self.plan = None;
                 self.confirmed = false;
+                self.migration_plan = None;
+                self.migration_confirmed = false;
             }
         } else if value.get("fingerprint").is_some() {
             if let Ok(plan) = serde_json::from_value::<CleanupPlan>(value.clone())
@@ -95,6 +131,14 @@ impl StorageTools {
     fn request_read(&mut self, root: PathBuf) {
         let (tx, rx) = channel();
         let path = root.clone();
+        let query = ResourceQuery {
+            category: self.category,
+            task: self.task.parse().ok(),
+            search: (!self.search.is_empty()).then(|| self.search.clone()),
+            modified_before: (!self.before.is_empty()).then(|| self.before.clone()),
+            newest: self.newest,
+            status: None,
+        };
         std::thread::spawn(move || {
             let result = (|| {
                 let client = Client::connect(&path).map_err(|e| e.to_string())?;
@@ -106,7 +150,20 @@ impl StorageTools {
                 )
                 .map_err(|e| e.to_string())?;
                 let snapshot = match client.call(Rpc::StorageInventory) {
-                    Ok(value) => Some(serde_json::from_value(value).map_err(|e| e.to_string())?),
+                    Ok(value) => {
+                        let mut inventory: StorageInventory =
+                            serde_json::from_value(value).map_err(|e| e.to_string())?;
+                        inventory.resources = serde_json::from_value(
+                            client
+                                .call(Rpc::StorageResources {
+                                    scan_id: inventory.scan_id,
+                                    query,
+                                })
+                                .map_err(|e| e.to_string())?,
+                        )
+                        .map_err(|e| e.to_string())?;
+                        Some(inventory)
+                    }
                     Err(e)
                         if e.message.contains("No such file")
                             || e.message.contains("storage_inventory_format") =>
@@ -121,7 +178,13 @@ impl StorageTools {
                         .map_err(|e| e.to_string())?,
                 )
                 .map_err(|e| e.to_string())?;
-                Ok((snapshot, history, progress))
+                let migrations = serde_json::from_value(
+                    client
+                        .call(Rpc::StorageMigrations)
+                        .map_err(|e| e.to_string())?,
+                )
+                .map_err(|e| e.to_string())?;
+                Ok((snapshot, history, progress, migrations))
             })();
             let _ = tx.send(result);
         });
@@ -136,7 +199,7 @@ impl StorageTools {
             Ok(result) => {
                 if key == root {
                     match result {
-                        Ok((snapshot, history, progress)) => {
+                        Ok((snapshot, history, progress, migrations)) => {
                             if let Some(snapshot) = snapshot
                                 && snapshot.workspace == root
                                 && self
@@ -149,6 +212,8 @@ impl StorageTools {
                                         || (!old.stale && snapshot.stale)
                                 }) {
                                     self.selected.clear();
+                                    self.migration_plan = None;
+                                    self.migration_confirmed = false;
                                     self.plan = None;
                                     self.confirmed = false;
                                 }
@@ -162,6 +227,9 @@ impl StorageTools {
                                     .is_none_or(|old| progress.updated_at >= old.updated_at)
                             {
                                 self.snapshot = Some(progress);
+                            }
+                            if let Some(result) = migrations.first() {
+                                self.migration_result = Some(result.clone());
                             }
                             self.history = history;
                             self.error = None;
@@ -260,6 +328,14 @@ pub fn storage_panel(
             tools.initial_scan = true;
         }
         if ui
+            .add_enabled(enabled, egui::Button::new("优化存储：预览全部证据"))
+            .clicked()
+        {
+            tools.migration_plan = None;
+            tools.migration_confirmed = false;
+            request = Some(StorageRequest::MigrationPlan { resources: vec![] });
+        }
+        if ui
             .add_enabled(
                 enabled && tools.read.is_none(),
                 egui::Button::new("读取上次扫描及清理记录"),
@@ -311,12 +387,23 @@ pub fn storage_panel(
     }
     if let Some(inventory) = &tools.inventory {
         overview(ui, inventory, tools.stale || inventory.stale);
+        if let Some(evidence) = &inventory.evidence {
+            ui.label(format!(
+                "共享证据：原文引用量 {} · 唯一原文 {} · 对象保存量 {}",
+                bytes(evidence.original_reference_bytes),
+                bytes(evidence.unique_original_bytes),
+                bytes(evidence.object_storage_bytes)
+            ));
+        }
+
         filters(ui, tools);
         let changed = resource_rows(ui, tools, enabled);
         let inventory = tools.inventory.as_ref().unwrap();
         if changed {
             tools.plan = None;
             tools.confirmed = false;
+            tools.migration_plan = None;
+            tools.migration_confirmed = false;
         }
         if ui
             .add_enabled(
@@ -336,6 +423,9 @@ pub fn storage_panel(
         });
     } else {
         ui.label("首次使用请扫描工作区，或读取上次完成的扫描。");
+    }
+    if let Some(next) = migration_preview(ui, tools, enabled) {
+        request = Some(next);
     }
     if let Some(next) = cleanup_preview(ui, tools, enabled) {
         request = Some(next);
@@ -678,6 +768,107 @@ fn filters(ui: &mut egui::Ui, tools: &mut StorageTools) {
     });
 }
 
+fn migration_preview(
+    ui: &mut egui::Ui,
+    tools: &mut StorageTools,
+    enabled: bool,
+) -> Option<StorageRequest> {
+    let mut request = None;
+    if let Some(plan) = &tools.migration_plan {
+        ui.separator();
+        ui.heading("证据存储优化预览");
+        ui.label(format!(
+            "{} 个证据包 · {} 个文件条目 · {} 个唯一对象 · 原文引用量 {} · 唯一原文 {}",
+            plan.packages.len(),
+            plan.packages.iter().map(|p| p.members).sum::<u64>(),
+            plan.unique_objects,
+            bytes(plan.original_reference_bytes),
+            bytes(plan.unique_original_bytes)
+        ));
+        ui.label(format!(
+            "预计对象保存量 {} · 预计证据正文逻辑节省 {} · 额外空间预算 {}",
+            bytes(plan.object_storage_bytes),
+            bytes(plan.estimated_logical_savings),
+            bytes(plan.additional_space_required)
+        ));
+        ui.label("原文、任务和核验身份保留。相同内容共享保存，原文文件在提交后移除；磁盘实际收益可能受 APFS 共享块影响。");
+        for blocker in &plan.blockers {
+            ui.colored_label(crate::theme::semantic(ui.ctx()).error, blocker);
+        }
+        if !plan.blockers.is_empty()
+            && !plan.packages.is_empty()
+            && ui
+                .add_enabled(enabled, egui::Button::new("仅重新预览下列可迁移证据包"))
+                .clicked()
+        {
+            request = Some(StorageRequest::MigrationPlan {
+                resources: plan
+                    .packages
+                    .iter()
+                    .flat_map(|p| p.resources.clone())
+                    .collect(),
+            });
+            tools.migration_confirmed = false;
+        }
+        ui.collapsing("将迁移的证据包", |ui| {
+            for p in &plan.packages {
+                ui.label(format!("{} · {} 个文件条目", p.root.display(), p.members));
+            }
+        });
+        let members_path = plan.workspace.join(&plan.members_manifest);
+        ui.label(format!("精确成员清单：{}", members_path.display()));
+        if ui.button("复制精确清单路径").clicked() {
+            ui.ctx().copy_text(members_path.display().to_string());
+        }
+        ui.checkbox(
+            &mut tools.migration_confirmed,
+            "我确认按此预览迁移存放方式并释放原文件占用。",
+        );
+        if ui
+            .add_enabled(
+                enabled
+                    && tools.migration_confirmed
+                    && plan.blockers.is_empty()
+                    && !plan.packages.is_empty(),
+                egui::Button::new("确认优化存储"),
+            )
+            .clicked()
+        {
+            request = Some(StorageRequest::MigrationApply { plan: plan.id });
+            tools.migration_confirmed = false;
+        }
+    }
+    if let Some(result) = &tools.migration_result {
+        ui.label(format!(
+            "存储优化：{} · 已移除原文件 {}",
+            result.status,
+            bytes(result.deleted.logical_bytes)
+        ));
+        let change = result.evidence_logical_bytes_delta;
+        ui.label(format!(
+            "新增对象 {} · 证据正文逻辑{} {}（不含索引、映射与事务记录）",
+            bytes(result.object_bytes_added),
+            if change < 0 { "减少" } else { "增加" },
+            bytes(change.unsigned_abs())
+        ));
+        if let (Some(before), Some(after)) = (result.available_before, result.available_after) {
+            ui.label(format!("磁盘可用：{} → {}", bytes(before), bytes(after)));
+        }
+        for (path, error) in &result.errors {
+            ui.label(format!("{}：{error}", path.display()));
+        }
+        if result.committed
+            && !result.completed
+            && ui
+                .add_enabled(enabled, egui::Button::new("继续完成存储迁移"))
+                .clicked()
+        {
+            request = Some(StorageRequest::MigrationApply { plan: result.plan });
+        }
+    }
+    request
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -753,8 +944,26 @@ mod tests {
         };
         tools.accept(w.root(), &serde_json::to_value(&old).unwrap());
         assert_eq!(tools.inventory.as_ref().unwrap().scan_id, newer.scan_id);
+        let preview = MigrationPreview {
+            id: uuid::Uuid::new_v4(),
+            workspace: w.root().into(),
+            scan_id: old.scan_id,
+            created_at: old.scanned_at.clone(),
+            members_manifest: ".jfquant/storage/migration-plans/old.json".into(),
+            packages: vec![],
+            unique_objects: 0,
+            blockers: vec![],
+            original_reference_bytes: 0,
+            original_file_usage: Default::default(),
+            unique_original_bytes: 0,
+            object_storage_bytes: 0,
+            additional_space_required: 0,
+            estimated_logical_savings: 0,
+        };
+        tools.accept(w.root(), &serde_json::to_value(preview).unwrap());
+        assert!(tools.migration_plan.is_none());
         let (tx, rx) = channel();
-        tx.send(Ok((Some(old), vec![], None))).unwrap();
+        tx.send(Ok((Some(old), vec![], None, vec![]))).unwrap();
         tools.read = Some((w.root().to_owned(), rx));
         tools.poll(w.root(), &egui::Context::default());
         assert_eq!(tools.inventory.as_ref().unwrap().scan_id, newer.scan_id);
@@ -789,7 +998,7 @@ mod tests {
         let mut stale = original;
         stale.stale = true;
         let (tx, rx) = channel();
-        tx.send(Ok((Some(stale), vec![], None))).unwrap();
+        tx.send(Ok((Some(stale), vec![], None, vec![]))).unwrap();
         tools.read = Some((w.root().to_owned(), rx));
         tools.poll(w.root(), &egui::Context::default());
         assert!(tools.inventory.as_ref().unwrap().stale);

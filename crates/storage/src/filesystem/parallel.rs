@@ -182,7 +182,26 @@ pub fn walk(
     root: &Path,
     threads: usize,
     overview: bool,
+    update: impl FnMut(&WalkProgress, &[String]) -> io::Result<()>,
+) -> io::Result<WalkResult> {
+    walk_impl(root, threads, overview, !overview, update, |_| Ok(()))
+}
+/// Stream bounded file batches to the coordinator's sink without retaining file objects.
+pub fn walk_stream(
+    root: &Path,
+    threads: usize,
+    update: impl FnMut(&WalkProgress, &[String]) -> io::Result<()>,
+    sink: impl FnMut(&[FileEntry]) -> io::Result<()>,
+) -> io::Result<WalkResult> {
+    walk_impl(root, threads, false, false, update, sink)
+}
+fn walk_impl(
+    root: &Path,
+    threads: usize,
+    overview: bool,
+    retain_files: bool,
     mut update: impl FnMut(&WalkProgress, &[String]) -> io::Result<()>,
+    mut sink: impl FnMut(&[FileEntry]) -> io::Result<()>,
 ) -> io::Result<WalkResult> {
     if !(1..=8).contains(&threads) {
         return Err(io::Error::new(
@@ -221,6 +240,12 @@ pub fn walk(
         loop {
             match rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(Event::Files(files)) => {
+                    if let Err(e) = sink(&files) {
+                        failure = Some(e);
+                        walker.stop.store(true, Ordering::Relaxed);
+                        walker.queue.1.notify_all();
+                        break;
+                    }
                     for file in files {
                         let bucket: PathBuf = file
                             .path
@@ -269,7 +294,7 @@ pub fn walk(
                             usage.logical_bytes += file.stamp.bytes;
                             usage.allocated_bytes += file.stamp.allocated;
                         }
-                        if !overview {
+                        if retain_files {
                             inventory.files.push(file);
                         }
                     }

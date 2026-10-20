@@ -26,7 +26,11 @@ fn path_reference(
             .ok()
             .and_then(|p| p.strip_prefix(r.w.root()).ok().map(Path::to_owned))
             .unwrap_or(relative);
-    if let Some(target) = r.target(&resolved) {
+    if let Some(targets) = r.logical_owners.get(&resolved).cloned() {
+        for target in targets {
+            r.reference(source, &target, kind, reason);
+        }
+    } else if let Some(target) = r.target(&resolved) {
         r.reference(source, &target, kind, reason);
     } else if kind == ReferenceKind::Integrity {
         r.protect(
@@ -58,7 +62,7 @@ pub(crate) fn discover(r: &mut Registry<'_>, context: &TaskContext) -> Result<()
         if resource.category == ResourceCategory::Market && !resource.temporary {
             for name in ["market_view.json", "market_supplement.json"] {
                 let p = resource.path.join(name);
-                if !r.files.contains_key(&p) {
+                if !r.contains(&p) {
                     continue;
                 }
                 let v = match r.metadata(&p) {
@@ -124,7 +128,7 @@ pub(crate) fn discover(r: &mut Registry<'_>, context: &TaskContext) -> Result<()
                     .find(|(_, run)| run.id == task)
                     .map(|(root, _)| root.clone());
                 if let Some(root) = task_root {
-                    if r.files.contains_key(&root.join("summary.json"))
+                    if r.contains(&root.join("summary.json"))
                         && let Some(backtest) = r
                             .resources
                             .values()
@@ -145,7 +149,7 @@ pub(crate) fn discover(r: &mut Registry<'_>, context: &TaskContext) -> Result<()
                     let mut current = root;
                     for _ in 0..32 {
                         let descriptor = current.join("training.json");
-                        if let Some(file) = r.files.get_mut(&descriptor) {
+                        if let Some(mut file) = r.files.get_mut(&descriptor) {
                             if !file.owners.contains(&resource.id) {
                                 file.owners.push(resource.id.clone());
                             }
@@ -257,7 +261,7 @@ fn unresolved_metadata(r: &mut Registry<'_>, context: &TaskContext) -> Result<()
     // Only metadata/configuration is read: raw replies, factor arrays and large datasets are excluded.
     let unknown: Vec<_> = r
         .files
-        .values()
+        .json_values()
         .filter(|f| {
             f.owners.is_empty()
                 && !r.metadata.contains_key(&f.path)
@@ -284,7 +288,9 @@ fn unresolved_metadata(r: &mut Registry<'_>, context: &TaskContext) -> Result<()
             if value.contains('/') {
                 let p = Path::new(&value);
                 let p = p.strip_prefix(r.w.root()).unwrap_or(p);
-                if let Some(target) = r.target(p) {
+                if let Some(owners) = r.logical_owners.get(p) {
+                    targets.extend(owners.clone());
+                } else if let Some(target) = r.target(p) {
                     targets.push(target);
                 } else if p.is_absolute() {
                     r.external.insert(p.to_owned());
@@ -382,8 +388,18 @@ pub(crate) fn build_plan(
         }
     }
     // Shared ownership is a retained-file rule, not an implicit cascading deletion.
-    let files: Vec<_> = inventory
-        .files
+    let index = analytics_storage::index::Index::open(&owned_path(
+        w,
+        Path::new(".jfquant/storage/index.sqlite"),
+    )?)?;
+    let candidate_files: Vec<StorageFile> =
+        if index.generation_exists(&inventory.scan_id.to_string())? {
+            index.selected(&inventory.scan_id.to_string(), ids)?
+        } else {
+            blockers.push("扫描索引已过期，请重新预览".into());
+            vec![]
+        };
+    let files: Vec<_> = candidate_files
         .iter()
         .filter(|f| !f.owners.is_empty() && f.owners.iter().all(|o| selected.contains(o)))
         .cloned()
@@ -391,7 +407,7 @@ pub(crate) fn build_plan(
     if files.is_empty() {
         blockers.push("选择中没有可独立释放的文件；共享材料仍有保留的所有者".into());
     }
-    let estimated_release = release_usage(&inventory.files, &selected);
+    let estimated_release = release_usage(&candidate_files, &selected);
     blockers.sort();
     blockers.dedup();
     impacts.sort();

@@ -26,6 +26,13 @@ pub(super) fn execute(
             fs::rename(staging, &output)?;
             details["artifact"] = json!(output.join("announcements.json"));
             details["candidate_only"] = json!(true);
+            crate::storage_management::publish_evidence(
+                w,
+                &output.join("announcements.json"),
+                None,
+                run,
+                context,
+            )?;
         }
         WorkflowRequest::CollectReference {
             request,
@@ -232,6 +239,15 @@ pub(super) fn execute(
             data = Some(w.register(&path.join("actions.json"))?);
         }
         _ => unreachable!("domain dispatcher mismatch"),
+    }
+    if let Some(data) = data.as_ref().filter(|d| d.kind == "actions") {
+        crate::storage_management::publish_evidence(
+            w,
+            &w.resolve(&data.path),
+            Some(data),
+            run,
+            context,
+        )?;
     }
     Ok(WorkflowOutcome { data, details })
 }

@@ -97,12 +97,13 @@ fn storage_inventory_counts_categories_and_hardlinks_once_without_reading_data()
             .map(|u| u.allocated_bytes)
             .sum::<u64>()
     );
-    let original = &s
-        .files
-        .iter()
-        .find(|f| f.path == root.join("features.parquet"))
-        .unwrap()
-        .stamp;
+    let original =
+        analytics_storage::index::Index::open_read(&w.resolve(".jfquant/storage/index.sqlite"))
+            .unwrap()
+            .table::<StorageFile>(&s.scan_id.to_string(), "files")
+            .get(&root.join("features.parquet"))
+            .unwrap()
+            .stamp;
     let id = resource(&w, &root).id;
     let p = saved_plan(&w, &[id]);
     assert!(p.blockers.is_empty(), "{:?}", p.blockers);
@@ -166,7 +167,7 @@ fn storage_unknown_formats_are_rejected_before_deletion_or_recovery() {
     let w = Workspace::open(temp.path()).unwrap();
     let root = cache(&w, "strict-format");
     let mut inventory = scan(&w, &context()).unwrap();
-    for version in [0, 1, 3] {
+    for version in [0, 1, 2, 4] {
         inventory.schema_version = version;
         atomic_json(&w.resolve(".jfquant/storage/inventory.json"), &inventory).unwrap();
         assert!(
@@ -176,7 +177,7 @@ fn storage_unknown_formats_are_rejected_before_deletion_or_recovery() {
                 .contains("format_or_workspace_mismatch")
         );
     }
-    inventory.schema_version = 2;
+    inventory.schema_version = 3;
     inventory.workspace = "/stale-workspace".into();
     atomic_json(&w.resolve(".jfquant/storage/inventory.json"), &inventory).unwrap();
     assert!(latest(&w).is_err());
@@ -605,8 +606,19 @@ fn storage_accounting_excludes_retained_shared_owners_from_release_estimate() {
     let w = Workspace::open(temp.path()).unwrap();
     let root = cache(&w, "one");
     let inventory = scan(&w, &context()).unwrap();
-    let id = resource(&w, &root).id;
-    let mut files = inventory.files.clone();
+    let id = inventory
+        .resources
+        .iter()
+        .find(|r| r.path == root)
+        .unwrap()
+        .id
+        .clone();
+    let index =
+        analytics_storage::index::Index::open_read(&w.resolve(".jfquant/storage/index.sqlite"))
+            .unwrap();
+    let mut files: Vec<StorageFile> = index
+        .selected(&inventory.scan_id.to_string(), std::slice::from_ref(&id))
+        .unwrap();
     let f = files
         .iter_mut()
         .find(|f| f.path == root.join("features.parquet"))

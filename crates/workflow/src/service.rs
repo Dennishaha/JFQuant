@@ -26,7 +26,7 @@ use std::{
 };
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 45;
+pub const PROTOCOL_VERSION: u32 = 46;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TaskRequest {
@@ -204,7 +204,12 @@ fn result_error(e: Box<dyn std::error::Error>, task_id: Option<Uuid>) -> Service
 pub enum Rpc {
     StorageInventory,
     StorageSnapshot,
+    StorageResources {
+        scan_id: Uuid,
+        query: crate::storage_management::ResourceQuery,
+    },
     StorageHistory,
+    StorageMigrations,
     Operators {
         query: String,
     },
@@ -369,8 +374,10 @@ impl Server {
                 | Rpc::Logs { .. }
                 | Rpc::Cancel { .. }
                 | Rpc::StorageHistory
+                | Rpc::StorageMigrations
                 | Rpc::StorageSnapshot
                 | Rpc::StorageInventory
+                | Rpc::StorageResources { .. }
         );
         // Admission and control writes share a gate: a writer cannot slip between cleanup
         // reservation and worker-side plan revalidation.
@@ -384,6 +391,12 @@ impl Server {
                 ));
             }
             state.last_client = Instant::now();
+            if !safe_during_cleanup
+                && !matches!(rpc, Rpc::Stop | Rpc::Restart | Rpc::Results { .. })
+                && let Some(error) = &state.unavailable
+            {
+                return Err(ServiceError::new("unavailable", error));
+            }
             if !safe_during_cleanup && state.active.as_ref().is_some_and(|a| a.cleanup) {
                 return Err(ServiceError::new(
                     "storage_cleanup_busy",
@@ -396,6 +409,15 @@ impl Server {
     fn handle(&self, rpc: Rpc) -> Result<Value> {
         let _control = self.cleanup_control(&rpc)?;
         match rpc {
+            Rpc::StorageMigrations => serde_json::to_value(
+                crate::storage_management::migration_history(&self.workspace).map_err(failure)?,
+            )
+            .map_err(failure),
+            Rpc::StorageResources { scan_id, query } => serde_json::to_value(
+                crate::storage_management::query_resources(&self.workspace, scan_id, &query)
+                    .map_err(failure)?,
+            )
+            .map_err(failure),
             Rpc::StorageSnapshot => serde_json::to_value(
                 crate::storage_management::snapshot(&self.workspace).map_err(failure)?,
             )
@@ -475,7 +497,7 @@ impl Server {
                     _ => None,
                 };
                 let cancel = Arc::new(AtomicBool::new(false));
-                let cleanup = matches!(&request, TaskRequest::Workflow { request } if matches!(&**request, WorkflowRequest::Storage { request: crate::storage_management::StorageRequest::Apply { .. } }));
+                let cleanup = matches!(&request, TaskRequest::Workflow { request } if matches!(&**request, WorkflowRequest::Storage { request } if request.exclusive()));
                 s.active = Some(Active {
                     cleanup,
                     info: ActiveTask {
@@ -832,6 +854,8 @@ pub fn serve(root: &Path) -> Result<()> {
                                 });
                             }
                             if s.unavailable.is_some() {
+                                crate::storage_management::recover(&server.workspace)
+                                    .map_err(failure)?;
                                 let (worker, events) = backend::spawn_in_workspace(
                                     Wake::default(),
                                     Some(server.workspace.root().into()),
@@ -1455,7 +1479,7 @@ mod protocol_tests {
     use super::*;
     #[test]
     fn only_current_protocol_is_decoded_without_downgrading_old_requests() {
-        for version in [1, 43, 44, PROTOCOL_VERSION + 1] {
+        for version in [1, 43, 44, 45, PROTOCOL_VERSION + 1] {
             let raw = json!({"version":version,"request":{"method":"retired_rpc"}});
             assert_eq!(
                 decode_message(&raw.to_string()).err().unwrap().code,

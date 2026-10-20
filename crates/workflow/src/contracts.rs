@@ -563,6 +563,13 @@ impl WorkflowRequest {
     pub fn label(&self) -> String {
         match self {
             Self::Storage { request } => match request {
+                crate::storage_management::StorageRequest::MigrationPlan { .. } => {
+                    "预览证据存储优化".into()
+                }
+                crate::storage_management::StorageRequest::MigrationApply { .. } => {
+                    "优化证据存储".into()
+                }
+                crate::storage_management::StorageRequest::Export { .. } => "导出原始证据包".into(),
                 crate::storage_management::StorageRequest::Scan { .. } => "扫描工作区空间".into(),
                 crate::storage_management::StorageRequest::Plan { .. } => "预览资源清理".into(),
                 crate::storage_management::StorageRequest::Apply { .. } => {

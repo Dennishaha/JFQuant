@@ -137,3 +137,7 @@ Worker拒绝非格式2或缺少必需字段的allocation-input.json；不通过g
 ## Rust执行依赖收据
 
 `rust-execution-dependencies.json` 是workflow拥有的构建依赖收据，绑定Cargo.lock及workflow本地依赖闭包的有效Cargo合同。生成和校验命令见[架构检查](../checks/README.md)。执行签名读取组件内收据；原始任务、模型和结果的冻结签名保持原样。
+
+## 新产物的Parquet编码
+
+训练输入、预测和回测Rust写入及Python预测输出统一采用Zstd level1；训练读取仍使用标准Parquet解码，保持列顺序、类型、浮点精度、null和既有行组策略。历史Parquet与模型不重写。修改内置`training.py`后重新运行`crates/app/packaging/build-collector.sh`，严格运行时签名检查继续生效。

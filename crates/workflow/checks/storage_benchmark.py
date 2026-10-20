@@ -2,7 +2,9 @@
 """Reproducible storage benchmark. Only operates on a newly generated disposable fixture."""
 import argparse
 import concurrent.futures
+import hashlib
 import json
+import os
 import pathlib
 import re
 import shutil
@@ -39,14 +41,17 @@ def run(binary, root, operation, threads, label):
     with log.open('w') as output:
         service = subprocess.Popen(['/usr/bin/time', '-l', str(binary), '--workspace', str(root), 'service', 'serve'], stdout=output, stderr=output)
         try:
+            endpoint = pathlib.Path(f'/tmp/jfquant-{os.getuid()}/{hashlib.sha256(os.fsencode(root.resolve())).hexdigest()[:24]}.sock')
             for _ in range(300):
                 time.sleep(.1)
-                # Status must connect to the explicitly launched service, not start another one.
-                result = subprocess.run([str(binary), '--workspace', str(root), 'service', 'status'], capture_output=True, text=True)
-                if result.returncode == 0:
+                # `service status` can auto-start a daemon; wait for our own listener first.
+                if endpoint.is_socket():
+                    call(binary, root, 'service', 'status')
                     break
                 if service.poll() is not None:
                     raise RuntimeError(log.read_text())
+            else:
+                raise TimeoutError('benchmark service did not publish its listener')
             started = time.monotonic()
             if operation == 'baseline':
                 command = ('storage', 'scan')
@@ -58,12 +63,15 @@ def run(binary, root, operation, threads, label):
             result = call(binary, root, 'jobs', 'wait', task)
             elapsed = time.monotonic() - started
             status = call(binary, root, 'jobs', 'status', task)['status']
+            query_started = time.monotonic()
             if operation != 'baseline':
                 snapshot = call(binary, root, 'storage', 'list').get('snapshot')
                 complete = snapshot.get('complete') if snapshot else None
             else:
                 complete = result.get('results', {}).get('complete')
-            print(json.dumps({'label': label, 'operation': operation, 'threads': threads, 'elapsed_seconds': elapsed, 'status': status, 'complete': complete}), flush=True)
+            query_seconds = time.monotonic() - query_started
+            cache_files = [root / '.jfquant/storage/files.json', root / '.jfquant/storage/index.sqlite']
+            print(json.dumps({'label': label, 'operation': operation, 'threads': threads, 'elapsed_seconds': elapsed, 'cached_query_seconds': query_seconds, 'index_bytes': sum(p.stat().st_size for p in cache_files if p.is_file()), 'status': status, 'complete': complete}), flush=True)
         finally:
             subprocess.run([str(binary), '--workspace', str(root), 'service', 'stop'], capture_output=True)
             service.wait(timeout=30)
@@ -77,10 +85,15 @@ def main():
     parser.add_argument('--files', type=int, default=1_000_000)
     parser.add_argument('--baseline', type=pathlib.Path, required=True, help='Previous release CLI')
     parser.add_argument('--current', type=pathlib.Path, required=True, help='Current release CLI')
+    parser.add_argument('--reuse-fixture', action='store_true', help='Reuse only an existing fixture with the exact disposable marker')
+    parser.add_argument('--tiered-baseline', action='store_true', help='Compare protocol45 resource scan and verification against the SQLite implementation')
     args = parser.parse_args()
     root = args.root.resolve()
-    create_fixture(root, args.files)
-    for label, binary, operation, threads in [
+    if args.reuse_fixture:
+        assert (root / '.storage-benchmark-fixture').read_text() == 'disposable fixture\n'
+    else:
+        create_fixture(root, args.files)
+    cases = [
         ('baseline-first', args.baseline, 'baseline', 1),
         ('baseline-warm', args.baseline, 'baseline', 1),
         ('overview-one', args.current, 'overview', 1),
@@ -88,7 +101,21 @@ def main():
         ('overview-four-warm', args.current, 'overview', 4),
         ('verify-first', args.current, 'verify', 4),
         ('verify-warm', args.current, 'verify', 4),
-    ]:
+    ]
+    if args.tiered_baseline:
+        cases = [
+            ('baseline-resources-first', args.baseline, 'resources', 4),
+            ('baseline-resources-warm', args.baseline, 'resources', 4),
+            ('baseline-verify-first', args.baseline, 'verify', 4),
+            ('baseline-verify-warm', args.baseline, 'verify', 4),
+            ('sqlite-resources-first', args.current, 'resources', 4),
+            ('sqlite-resources-warm', args.current, 'resources', 4),
+            ('sqlite-overview-one', args.current, 'overview', 1),
+            ('sqlite-overview-four', args.current, 'overview', 4),
+            ('sqlite-verify-first', args.current, 'verify', 4),
+            ('sqlite-verify-warm', args.current, 'verify', 4),
+        ]
+    for label, binary, operation, threads in cases:
         run(binary.resolve(), root, operation, threads, label)
     print('First passes are NOT guaranteed cold: this script does not purge OS filesystem caches.', flush=True)
 

@@ -41,6 +41,33 @@ pub enum StorageCommand {
     },
     /// Read durable cleanup receipts, including partial failures.
     History,
+    /// Preview or explicitly migrate immutable evidence into shared objects.
+    Migrate {
+        #[command(subcommand)]
+        command: MigrationCommand,
+    },
+    /// Materialize an independently readable evidence package, without overwriting output.
+    Export {
+        #[arg(long)]
+        resource: String,
+        #[arg(long)]
+        output: PathBuf,
+    },
+}
+#[derive(Debug, Subcommand)]
+pub enum MigrationCommand {
+    /// Read durable migration results and retry identifiers.
+    History,
+    Plan {
+        #[arg(long = "resource")]
+        resources: Vec<String>,
+    },
+    Apply {
+        #[arg(long)]
+        plan: Uuid,
+        #[arg(long, required = true)]
+        confirm_rewrite: bool,
+    },
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum ScanLevelArg {
@@ -67,6 +94,22 @@ pub(super) enum Action {
 }
 pub(super) fn prepare(client: &Client, command: StorageCommand) -> Result<Action, ServiceError> {
     let task = match command {
+        StorageCommand::Migrate { command } => match command {
+            MigrationCommand::History => {
+                return Ok(Action::Read(client.call(Rpc::StorageMigrations)?));
+            }
+            MigrationCommand::Plan { resources } => StorageRequest::MigrationPlan { resources },
+            MigrationCommand::Apply {
+                plan,
+                confirm_rewrite,
+            } => {
+                if !confirm_rewrite {
+                    return Err(invalid("迁移必须提供 --confirm-rewrite"));
+                }
+                StorageRequest::MigrationApply { plan }
+            }
+        },
+        StorageCommand::Export { resource, output } => StorageRequest::Export { resource, output },
         StorageCommand::Scan { level, threads } => StorageRequest::Scan {
             level: match level {
                 ScanLevelArg::Overview => {
@@ -127,34 +170,19 @@ pub(super) fn prepare(client: &Client, command: StorageCommand) -> Result<Action
                         .map_err(invalid)
                 })
                 .transpose()?;
-            inventory.resources.retain(|r| {
-                category.is_none_or(|c| r.category == c)
-                    && task.is_none_or(|t| r.task == Some(t))
-                    && match status {
-                        ResourceStatus::All => true,
-                        ResourceStatus::Archived => r.archived,
-                        ResourceStatus::Temporary => r.temporary,
-                        ResourceStatus::Released => r.released,
-                        ResourceStatus::Deletable => r.deletable,
-                        ResourceStatus::Protected => !r.deletable && !r.released,
-                    }
-                    && search
-                        .as_ref()
-                        .is_none_or(|s| format!("{} {}", r.name, r.path.display()).contains(s))
-                    && before.as_ref().is_none_or(|d| {
-                        r.modified_at
-                            .get(..10)
-                            .is_some_and(|date| date < d.as_str())
-                    })
-            });
-            match sort {
-                ResourceSort::Size => inventory
-                    .resources
-                    .sort_by_key(|r| std::cmp::Reverse(r.usage.allocated_bytes)),
-                ResourceSort::Date => inventory
-                    .resources
-                    .sort_by(|a, b| b.modified_at.cmp(&a.modified_at)),
-            }
+            let query = analytics_workflow::storage_management::ResourceQuery {
+                category,
+                task,
+                status: Some(format!("{status:?}").to_lowercase()),
+                search,
+                modified_before: before,
+                newest: matches!(sort, ResourceSort::Date),
+            };
+            inventory.resources = serde_json::from_value(client.call(Rpc::StorageResources {
+                scan_id: inventory.scan_id,
+                query,
+            })?)
+            .map_err(invalid)?;
             let mut value = serde_json::to_value(inventory).map_err(invalid)?;
             value["snapshot"] = snapshot;
             return Ok(Action::Read(value));
@@ -189,6 +217,37 @@ mod tests {
                 "--plan",
                 "../../data",
                 "--confirm-permanent"
+            ])
+            .is_err()
+        );
+    }
+    #[test]
+    fn storage_migration_requires_confirmation_and_accepts_only_plan_ids() {
+        let id = Uuid::new_v4().to_string();
+        assert!(
+            Cli::try_parse_from(["jfquant", "storage", "migrate", "apply", "--plan", &id]).is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "jfquant",
+                "storage",
+                "migrate",
+                "apply",
+                "--plan",
+                &id,
+                "--confirm-rewrite"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "jfquant",
+                "storage",
+                "migrate",
+                "apply",
+                "--plan",
+                "../../raw",
+                "--confirm-rewrite"
             ])
             .is_err()
         );

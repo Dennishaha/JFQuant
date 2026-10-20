@@ -162,3 +162,7 @@ Alpha030的真实输入接口见[storage README](../storage/README.md#alpha030�
 三因子文件也可由[本地六月2×3构造器](../storage/src/three_factor/README.md)生成；该构造
 有独立版本和来源记录，不改变GTJA191公式版本，也不自动补全缺失的历史财务事实。
 公式v4及旧有自定义算子版本不会自动转换；需要重建选择并重算缓存/模型。
+
+## Parquet存放编码
+
+新生成因子矩阵采用标准Zstd level1，与工作区生产写入配置一致；factor独立保持仅依赖core的组件边界。列序、浮点精度、null、schema哈希和默认行组不变；已有文件不重写。`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-factor`验证原有矩阵读写/因子fixture。

@@ -266,7 +266,7 @@ def prepare(cli, manifest_path, output):
             dest = stage / kind / f"part-{i:04}.parquet"
             dest.parent.mkdir(exist_ok=True)
             schema = pa.schema(fields)
-            pq.write_table(pa.Table.from_pylist(normalized, schema=schema), dest, compression="zstd")
+            pq.write_table(pa.Table.from_pylist(normalized, schema=schema), dest, compression="zstd", compression_level=1)
             schema_fields = [{"name": f.name, "type": str(f.type), "nullable": f.nullable} for f in schema]
             outputs.append({
                 "path": dest.relative_to(stage).as_posix(), "rows": len(rows), "source_index": i,

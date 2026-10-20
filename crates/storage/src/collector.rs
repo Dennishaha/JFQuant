@@ -3,13 +3,13 @@ use crate::adjustment::{
     AdjustmentBasis, AdjustmentRecord, AdjustmentSource, FactorSource, NORMALIZATION,
 };
 use crate::daily::{DailyBar, DailyManifest, read_bars, write_bars};
+use crate::evidence_store::io_fs as fs;
 use analytics_core::{Date, pool::validate_instrument, task::TaskContext};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     io::{self, BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -260,10 +260,7 @@ fn invalid(s: impl std::fmt::Display) -> io::Error {
     io::Error::other(s.to_string())
 }
 fn hash(path: &Path) -> io::Result<String> {
-    Ok(format!(
-        "sha256:{:x}",
-        analytics_core::hash::Hex(Sha256::digest(fs::read(path)?))
-    ))
+    crate::market_view::file_hash(path)
 }
 pub(crate) fn verify_http_receipts(
     staging: &Path,
@@ -1435,6 +1432,66 @@ impl CoefficientBundle {
 #[cfg(test)]
 mod tdx_evidence_tests {
     use super::*;
+    #[test]
+    fn storage_object_receipts_verify_http_and_native_original_bytes_without_fallback() {
+        use crate::evidence_store as store;
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path();
+        fs::create_dir_all(workspace.join(".jfquant")).unwrap();
+        fs::write(workspace.join(".jfquant/workspace.json"), b"{}").unwrap();
+        let root = workspace.join("data/evidence");
+        fs::create_dir_all(root.join("raw")).unwrap();
+        fs::write(root.join("actions.json"), b"{}").unwrap();
+        let mut members = BTreeMap::new();
+        for name in ["http-fixture.body", "sdk-fixture.body"] {
+            let source = root.join("raw").join(name);
+            fs::write(&source, b"{ \"ErrorId\": 0, \"original\": true }\n").unwrap();
+            let object = store::estimate(&source).unwrap();
+            store::create_object(workspace, &source, &object, &workspace.join("object.tmp"))
+                .unwrap();
+            members.insert(PathBuf::from("raw").join(name), object);
+        }
+        let hash = members[Path::new("raw/http-fixture.body")].sha256.clone();
+        let evidence = json!({"provider":"tdxaidata",
+            "http_receipts":[{"filename":"http-fixture.body","sha256":hash}],
+            "sdk_receipts":[{"filename":"sdk-fixture.body","sha256":hash,"kind":"sdk_native_response","sdk":"tdxaidata","version":"1.2.2","function":"GetHISDATsInStr"}]});
+        let relative = PathBuf::from("data/evidence");
+        let id = store::package_id(&relative).unwrap();
+        let map = store::PackageMap {
+            schema_version: 1,
+            id: id.clone(),
+            root: relative.clone(),
+            identity_root: relative.clone(),
+            manifest: "actions.json".into(),
+            manifest_sha256: store::digest(b"{}"),
+            resources: vec!["fixture".into()],
+            members,
+        };
+        let bytes = serde_json::to_vec_pretty(&map).unwrap();
+        let path = store::map_path(workspace, &id).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, &bytes).unwrap();
+        let mut registry = store::Registry::default();
+        registry.packages.insert(
+            id,
+            store::PackageLocator {
+                root: relative,
+                map_sha256: store::digest(&bytes),
+                released: false,
+            },
+        );
+        fs::write(
+            workspace.join(store::REGISTRY),
+            serde_json::to_vec_pretty(&registry).unwrap(),
+        )
+        .unwrap();
+        fs::remove_dir_all(root.join("raw")).unwrap();
+        assert_eq!(verify_http_receipts(&root, &evidence).unwrap().len(), 2);
+        fs::create_dir_all(root.join("raw")).unwrap();
+        fs::write(root.join("raw/http-fixture.body"), b"old copy").unwrap();
+        fs::remove_file(store::object_path(workspace, &hash).unwrap()).unwrap();
+        assert!(verify_http_receipts(&root, &evidence).is_err());
+    }
     #[test]
     fn native_evidence_hashes_and_private_recovery_are_checked_without_using_a_keychain() {
         let temp = tempfile::tempdir().unwrap();

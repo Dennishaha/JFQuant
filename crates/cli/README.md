@@ -14,7 +14,7 @@
 新行情。`--plan` 显式冻结可得年报政策和日频股本修订风险；输出拒绝覆盖。
 [格式4/5、计划格式及复现命令](../storage/src/bigquant/README.md#pit-年度分组与-smbhml)。
 
-当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议45、采集协议16、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
+当前采集体系：HiThink（Rust REST主源）、通达信（Python SDK备用）、独立巨潮公告。服务协议46、采集协议16、来源策略2；接口、价格口径、构建和验收见[采集组件](../storage/collectors/README.md)。
 
 # analytics-cli / jfquant
 
@@ -126,7 +126,7 @@ jfquant data refresh --template workflow.json --market MARKET_ID --workers 3 --r
 DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli
 ```
 
-服务协议45；升级时先等待或取消旧版本任务，再停止旧服务。旧协议客户端不能连接新协议服务。采集协议16，当前公司行动发布格式10／修订5；特征顺序和公式版本未改变。
+服务协议46；升级时先等待或取消旧版本任务，再停止旧服务。旧协议客户端不能连接新协议服务。采集协议16，当前公司行动发布格式10／修订5；特征顺序和公式版本未改变。
 
 分区位于不同本地工作区时，可用`--sources-manifest sources.json`汇总覆盖，或`--reuse-shards-manifest sources.json`复用；JSON数组元素为当前工作区任务UUID字符串，或`{"workspace":"/absolute/workspace","task_id":"UUID"}`。只读验证原生任务、同一不可变基础数据/窗口/基准及证券子集；不修改来源工作区。尚有分区待检查的证券不被误列为缺失。复用仍由采集器重新验证全部身份及哈希。
 
@@ -145,7 +145,7 @@ DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli
 
 ## 单因子有效性批量测试
 
-`jfquant --workspace /path/to/workspace factors evaluate --request evaluation.json` 提交服务协议45
+`jfquant --workspace /path/to/workspace factors evaluate --request evaluation.json` 提交服务协议46
 的独立测试任务，后续沿用jobs查询、取消和结果读取。请求示例（路径相对工作区）：
 
 ```json
@@ -207,7 +207,7 @@ Preview返回异步任务ID，沿用jobs wait/results/cancel，结果明确为�
 
 ## 独立模型训练与 B 股票池回测
 
-新命令使用服务协议45；保留原 `research train/backtest/run` 的配置与执行方式。
+新命令使用服务协议46；保留原 `research train/backtest/run` 的配置与执行方式。
 新训练计划格式1没有测试日期；回测计划独立指定 B、日期和行情。
 App研究页“独立训练与跨池回测”可导入、编辑和导出相同 JSON。
 
@@ -284,7 +284,7 @@ Use `evidence_only` to avoid research transition assumptions. Old plans are reje
 
 ## 停牌证据与行情补录
 
-服务协议45，行动修订5／格式10；旧协议客户端不可连接。`data evidence import-status --actions VERSION --task CAPTURE` 只导入认证GP29状态，不重新协调公司行动。公告区间通过原有 `data evidence draft --actions VERSION --request review.json [--task TASK]` 和 `data revise-actions` 发布，review.suspensions包含 instrument/start/resume/reason/start_evidence/resume_evidence，证据字段为 document_id/quote/unit。
+服务协议46，行动修订5／格式10；旧协议客户端不可连接。`data evidence import-status --actions VERSION --task CAPTURE` 只导入认证GP29状态，不重新协调公司行动。公告区间通过原有 `data evidence draft --actions VERSION --request review.json [--task TASK]` 和 `data revise-actions` 发布，review.suspensions包含 instrument/start/resume/reason/start_evidence/resume_evidence，证据字段为 document_id/quote/unit。
 
 `data evidence draft --market VERSION --request repair.json [--task TASK]` 预览同一行情修订；`data revise-market --market VERSION --request repair.json` 重核验并原子发布。repair 格式1：base_path（工作区相对行情目录）、base_sha256（原目录哈希）、selections，每项含 source_path、source_sha256（补采行情父目录含原文收据的完整树哈希）、instrument、dates、fields。字段为 open/high/low/close/volume/amount；研究和执行都必须可用。候选来源须为登记的原生行情版本，无隐式切源。新版本重新计算完整研究上下文，模型复用仍按原合同。
 
@@ -420,6 +420,18 @@ For `research replay-predictions --allocation allocation.json`, use the same com
 
 `storage scan / plan / apply` 返回后台任务ID，沿用 `jobs wait/results`；`storage list / history` 读取持久化快照和清理收据。
 `storage list --category models --status archived --sort size` 可按类别、任务、搜索、修改日期和状态过滤。`storage plan --resource ID` 可重复传入资源ID；预览中的 `id` 用于 `storage apply --plan ID --confirm-permanent`。
-删除不可恢复；缺少显式确认参数时拒绝执行。计划过期需重新预览；已提交但部分失败时重试相同计划，已完成计划重复调用返回原收据。服务协议45；[完整命令、格式和统计说明](../workflow/src/storage_management/README.md)。验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli storage_`。
+删除不可恢复；缺少显式确认参数时拒绝执行。计划过期需重新预览；已提交但部分失败时重试相同计划，已完成计划重复调用返回原收据。服务协议46；[完整命令、格式和统计说明](../workflow/src/storage_management/README.md)。验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli storage_`。
 
-协议44→45：同步更新App、CLI和服务；旧扫描缓存失效后重新生成格式2摘要，旧未执行计划必须重新预览，已提交事务继续恢复。行情、模型和研究结果无需转换。`storage scan`默认overview；`storage scan --level resources --threads 4`识别资源；线程范围1—8，默认CPU数与4的较小值。`storage list`返回上次摘要及当前`snapshot`，没有有效缓存时`inventory`为null；`dependencies_checked=false`时可释放空间尚未核验，应显示“预览后评估”。
+协议45→46：同步更新App、CLI和服务；旧扫描缓存失效后重新生成格式3摘要和SQLite索引，旧未执行计划必须重新预览，已提交事务继续恢复。行情、模型和研究结果无需转换。`storage scan`默认overview；`storage scan --level resources --threads 4`识别资源；线程范围1—8，默认CPU数与4的较小值。`storage list`返回上次摘要及当前`snapshot`，没有有效缓存时`inventory`为null；`dependencies_checked=false`时可释放空间尚未核验，应显示“预览后评估”。
+
+## 证据存储优化（服务协议46）
+
+`storage list`从轻量摘要与SQLite资源查询读取缓存，筛选条件传至服务端。`storage migrate plan [--resource ID]`提交仅读取原文的迁移预览；省略资源选择全部可识别不可变行动/公告证据。用`jobs wait TASK_ID`和`jobs results TASK_ID`查看精确成员、阻断、预计对象占用和额外预算。`storage migrate apply --plan PLAN_ID --confirm-rewrite`显式确认改写存放形式并释放原文件；不接受任意删除路径。`storage migrate history`查询迁移结果；失败后重试同一计划或重启服务恢复。
+
+`storage export --resource ID --output NEW_DIRECTORY`提交生成原始文件独立包的任务，拒绝覆盖已有目录。协议45缓存重建、旧未执行计划重预览；现有事务继续恢复。真实工作区先预览，未经显式确认不执行迁移。实现及恢复细节见[存储管理](../workflow/src/storage_management/README.md)。验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-cli storage_`。
+
+迁移预览返回轻量`MigrationPreview`，`packages[].members`为精确成员数，`members_manifest`指向工作区相对完整计划JSON；可用`jq '.packages[].members' "$JFQUANT_WORKSPACE/.jfquant/storage/migration-plans/PLAN_ID.json"`查看精确文件，不通过RPC传输巨型清单。回执区分新增对象、移除原文、正文逻辑变化及磁盘差；业务恢复失败时先修复磁盘/权限，再`jfquant service restart`完成权威恢复。
+
+迁移预览返回文件条目数和`unique_objects`（按原文字节SHA256去重）；前者包括历史副本，均不含目录。完整成员路径在`members_manifest`指向的计划JSON中。新证据由生产者明确登记manifest与归属。
+
+发布构建的容量、耗时、峰值内存及压缩计算验收见[SQLite首版实测](../workflow/src/storage_management/README.md#2026-10-20-sqlite-首版验收)；全量索引重建存在额外耗时，不保证压缩能减少所有小文件的分配空间。

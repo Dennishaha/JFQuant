@@ -1569,7 +1569,12 @@ pub fn write_bars(path: &Path, bars: &[DailyBar]) -> io::Result<()> {
     arrays.push(Arc::new(Date32Array::from(vec![None; bars.len()])));
     let batch = RecordBatch::try_new(schema.clone(), arrays).map_err(invalid)?;
     fs::create_dir_all(path.parent().ok_or_else(|| invalid("missing parent"))?)?;
-    let mut w = ArrowWriter::try_new(fs::File::create(path)?, schema, None).map_err(invalid)?;
+    let mut w = ArrowWriter::try_new(
+        fs::File::create(path)?,
+        schema,
+        Some(crate::parquet_options::writer_properties()),
+    )
+    .map_err(invalid)?;
     w.write(&batch).map_err(invalid)?;
     w.close().map_err(invalid)?;
     fs::File::open(path)?.sync_all()?;

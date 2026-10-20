@@ -2,10 +2,10 @@
 use crate::Result;
 use analytics_core::task::TaskContext;
 use analytics_storage::corporate_actions::ActionBundle;
+use analytics_storage::evidence_store::io_fs as fs;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
-    fs,
     io::{self, Write},
     path::Path,
 };

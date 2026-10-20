@@ -8,13 +8,14 @@ pub mod facts;
 pub mod reconcile;
 pub mod review;
 
+use crate::evidence_store::io_fs as fs;
 use analytics_core::{Date, execution::CorporateAction};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs, io,
+    io,
     path::Path,
 };
 fn task_context_check() -> io::Result<()> {

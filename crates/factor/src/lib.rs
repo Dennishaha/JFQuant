@@ -393,7 +393,13 @@ impl FactorRunArtifact {
         }
         let file = File::create(destination)
             .map_err(|error| FactorError::InvalidRequest(error.to_string()))?;
-        let mut writer = ArrowWriter::try_new(file, schema, None)
+        // Match the workspace production codec without coupling factor to storage.
+        let properties = parquet::file::properties::WriterProperties::builder()
+            .set_compression(parquet::basic::Compression::ZSTD(
+                parquet::basic::ZstdLevel::try_new(1).expect("valid Zstd level"),
+            ))
+            .build();
+        let mut writer = ArrowWriter::try_new(file, schema, Some(properties))
             .map_err(|error| FactorError::InvalidRequest(error.to_string()))?;
         writer
             .write(&batch)

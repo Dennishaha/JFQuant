@@ -135,3 +135,59 @@ impl Drop for Reporter {
         }
     }
 }
+
+/// Task-only heartbeat for long evidence verification, object I/O and export phases.
+/// It reports elapsed time without inventing scan counts or completion percentages.
+pub(crate) struct Activity {
+    phase: Arc<Mutex<String>>,
+    stop: Arc<AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+impl Activity {
+    pub fn new(context: &TaskContext, phase: &str) -> Self {
+        let phase = Arc::new(Mutex::new(phase.to_owned()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker = {
+            let phase = phase.clone();
+            let stop = stop.clone();
+            let context = context.clone();
+            std::thread::spawn(move || {
+                let started = Instant::now();
+                let mut last = Instant::now();
+                while !stop.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(50));
+                    if last.elapsed() < Duration::from_secs(1) {
+                        continue;
+                    }
+                    if context
+                        .report(format!(
+                            "{} · {:.1} 秒",
+                            phase.lock().unwrap(),
+                            started.elapsed().as_secs_f64()
+                        ))
+                        .is_err()
+                    {
+                        break;
+                    }
+                    last = Instant::now();
+                }
+            })
+        };
+        Self {
+            phase,
+            stop,
+            worker: Some(worker),
+        }
+    }
+    pub fn phase(&self, phase: &str) {
+        *self.phase.lock().unwrap() = phase.to_owned();
+    }
+}
+impl Drop for Activity {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}

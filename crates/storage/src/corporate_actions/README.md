@@ -194,3 +194,7 @@ DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow
 ## 跨证券补证当前流程
 
 `status --task` 区分覆盖、条款、身份及执行问题；覆盖缺口中的 required_event_facts 是待核验要求，不表示所有字段都缺失。`draft --task` 输出逐项问题和绑定任务、源版本、请求、证据树哈希的校验收据；正式 revise-actions 始终重验。`combine` 可将一个完整查询与同证券选定文档合并，保持原查询区间及原始 HTTP 收据；两个不同完整查询不得合并。后继公告仅补其实际证明的字段，不扩展原证券历史覆盖。
+
+## 原文共享存放
+
+已发布的不可变行动及公告包可由workflow迁移为原文SHA256寻址的压缩对象；原manifest、来源及树哈希保持。读取、复制及枚举统一通过`evidence_store`，HTTP/SDK收据也核验解压后的原文。映射声明的成员缺失时直接报告损坏，不使用旧副本。采集中的可变文件仍写staging；历史包必须显式预览确认迁移。独立导出及故障恢复见[存储管理](../../../workflow/src/storage_management/README.md)。

@@ -730,7 +730,11 @@ fn write_features(path: &Path, ids: &[String], features: &[f32]) -> Result<()> {
         })
         .collect();
     let batch = RecordBatch::try_new(schema.clone(), columns)?;
-    let mut writer = parquet::arrow::ArrowWriter::try_new(fs::File::create(path)?, schema, None)?;
+    let mut writer = parquet::arrow::ArrowWriter::try_new(
+        fs::File::create(path)?,
+        schema,
+        Some(analytics_storage::parquet_options::writer_properties()),
+    )?;
     writer.write(&batch)?;
     writer.close()?;
     Ok(())

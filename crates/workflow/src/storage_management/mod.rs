@@ -5,13 +5,14 @@ mod dependencies;
 mod history;
 mod inventory;
 mod members;
+mod migration;
 mod progress;
 mod types;
 
 use crate::{Result, RunRecord, WorkflowOutcome, Workspace, atomic_json};
 use analytics_core::task::TaskContext;
-pub(crate) use cleanup::committed_task;
-pub use cleanup::{apply, recover};
+
+pub use cleanup::apply;
 pub use history::{availability, historical_view, require_available};
 pub(crate) use history::{dataset_released, released_dataset_ids, require_path_available};
 pub use inventory::scan;
@@ -50,7 +51,7 @@ pub fn latest(w: &Workspace) -> Result<StorageInventory> {
         w,
         Path::new(".jfquant/storage/inventory.json"),
     )?)?;
-    if value["schema_version"] != 2 {
+    if value["schema_version"] != 3 {
         return Err("storage_inventory_format_or_workspace_mismatch: 请重新扫描".into());
     }
     let inventory: StorageInventory = serde_json::from_value(value)?;
@@ -94,17 +95,21 @@ pub(crate) fn recover_snapshot(w: &Workspace) -> Result<()> {
     Ok(())
 }
 fn save_inventory(w: &Workspace, mut inventory: StorageInventory) -> Result<StorageInventory> {
-    if !inventory.files.is_empty() {
-        atomic_json(
-            &owned_path(w, Path::new(".jfquant/storage/files.json"))?,
-            &inventory.files,
-        )?;
+    let index = analytics_storage::index::Index::open(&owned_path(
+        w,
+        Path::new(".jfquant/storage/index.sqlite"),
+    )?)?;
+    index.complete(&inventory.scan_id.to_string())?;
+    let obsolete = owned_path(w, Path::new(".jfquant/storage/files.json"))?;
+    if obsolete.try_exists()? {
+        fs::remove_file(obsolete)?;
     }
     inventory.files.clear();
     atomic_json(
         &owned_path(w, Path::new(".jfquant/storage/inventory.json"))?,
         &inventory,
     )?;
+    index.prune(&inventory.scan_id.to_string())?;
     Ok(inventory)
 }
 pub fn cleanup_history(w: &Workspace) -> Result<Vec<CleanupResult>> {
@@ -125,6 +130,10 @@ pub fn cleanup_history(w: &Workspace) -> Result<Vec<CleanupResult>> {
     out.sort_by(|a, b| b.started_at.cmp(&a.started_at));
     Ok(out)
 }
+/// Durable migration results, including pending deletion and recovery failures.
+pub fn migration_history(w: &Workspace) -> Result<Vec<MigrationResult>> {
+    migration::history(w)
+}
 pub fn execute(
     w: &Workspace,
     request: &StorageRequest,
@@ -132,6 +141,20 @@ pub fn execute(
     context: &TaskContext,
 ) -> Result<WorkflowOutcome> {
     let details = match request {
+        StorageRequest::MigrationPlan { resources } => {
+            let plan = migration::plan(w, resources, context)?;
+            serde_json::to_value(MigrationPreview::from(&plan))?
+        }
+        StorageRequest::MigrationApply { plan } => {
+            let result = migration::apply(w, *plan, context)?;
+            if !result.errors.is_empty() {
+                return Err("storage_migration_pending: 请重试同一迁移计划".into());
+            }
+            serde_json::to_value(result)?
+        }
+        StorageRequest::Export { resource, output } => {
+            migration::export(w, resource, output, context)?
+        }
         StorageRequest::Scan { level, threads } => {
             if !(1..=8).contains(threads) {
                 return Err("storage_invalid_threads: expected 1..8".into());
@@ -194,3 +217,81 @@ pub fn plan(w: &Workspace, resources: &[String], context: &TaskContext) -> Resul
 
 #[cfg(test)]
 mod tests;
+
+/// Recover authoritative cleanup and migration journals before accepting work.
+pub fn recover(w: &Workspace) -> Result<()> {
+    migration::recover(w)?;
+    cleanup::recover(w)
+}
+pub(crate) fn publish_evidence(
+    w: &Workspace,
+    manifest: &Path,
+    data: Option<&crate::DataVersion>,
+    run: &RunRecord,
+    context: &TaskContext,
+) -> Result<()> {
+    migration::published(w, manifest, data, run, context)
+}
+pub(crate) fn archive_packages(root: &Path, source: &Path, destination: &Path) -> Result<()> {
+    migration::archive_packages(root, source, destination)
+}
+pub(crate) fn committed_task(w: &Workspace, id: Uuid) -> bool {
+    cleanup::committed_task(w, id) || migration::committed_task(w, id)
+}
+pub(super) fn mark_stale(w: &Workspace) -> Result<()> {
+    if let Ok(mut inventory) = latest(w) {
+        inventory.stale = true;
+        atomic_json(
+            &owned_path(w, Path::new(".jfquant/storage/inventory.json"))?,
+            &inventory,
+        )?;
+    }
+    Ok(())
+}
+/// SQL filtering of the last completed resource generation; never scans filesystem contents.
+pub fn query_resources(
+    w: &Workspace,
+    scan: Uuid,
+    query: &ResourceQuery,
+) -> Result<Vec<StorageResource>> {
+    let inventory = latest(w)?;
+    if inventory.scan_id != scan {
+        return Err("storage_scan_stale".into());
+    }
+    let index = analytics_storage::index::Index::open_read(&owned_path(
+        w,
+        Path::new(".jfquant/storage/index.sqlite"),
+    )?)?;
+    if !index.generation_exists(&scan.to_string())? {
+        return Err("storage_index_rebuild_required: 请重新识别资源".into());
+    }
+    let category = query.category.map(|c| {
+        serde_json::to_value(c)
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_owned()
+    });
+    let mut resources: Vec<StorageResource> = index.resources(
+        &scan.to_string(),
+        category.as_deref(),
+        query.task.map(|t| t.to_string()).as_deref(),
+        query.modified_before.as_deref(),
+        query.newest,
+    )?;
+    resources.retain(|r| {
+        query
+            .search
+            .as_ref()
+            .is_none_or(|s| format!("{} {}", r.name, r.path.display()).contains(s))
+            && match query.status.as_deref() {
+                Some("archived") => r.archived,
+                Some("temporary") => r.temporary,
+                Some("released") => r.released,
+                Some("deletable") => r.deletable,
+                Some("protected") => !r.deletable && !r.released,
+                _ => true,
+            }
+    });
+    Ok(resources)
+}

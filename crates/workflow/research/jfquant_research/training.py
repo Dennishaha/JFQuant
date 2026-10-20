@@ -80,5 +80,5 @@ def predict(request, models):
     values = booster.predict(x, pred_contrib=request["contributions"])
     if values.ndim == 1:
         values = values.reshape(-1, 1)
-    pq.write_table(pa.table({f"value_{i}": values[:, i] for i in range(values.shape[1])}), request["output"])
+    pq.write_table(pa.table({f"value_{i}": values[:, i] for i in range(values.shape[1])}), request["output"], compression="zstd", compression_level=1)
     return {"path": request["output"], "rows": len(values), "columns": values.shape[1]}

@@ -69,7 +69,7 @@ pub fn inventory(root: &Path, mut check: impl FnMut() -> io::Result<()>) -> io::
     parallel::walk(root, 1, false, |_, _| check()).map(|v| v.inventory)
 }
 mod parallel;
-pub use parallel::{DirectoryUsage, WalkProgress, WalkResult, walk};
+pub use parallel::{DirectoryUsage, WalkProgress, WalkResult, walk, walk_stream};
 
 /// Available bytes for an unprivileged caller on the containing filesystem.
 pub fn available_bytes(root: &Path) -> io::Result<u64> {

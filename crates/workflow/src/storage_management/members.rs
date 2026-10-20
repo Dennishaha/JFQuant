@@ -36,7 +36,7 @@ pub(super) fn training(r: &Registry<'_>, root: &Path, name: &str) -> Vec<PathBuf
 }
 pub(super) fn market(r: &mut Registry<'_>, root: &Path) -> Result<Vec<PathBuf>> {
     let manifest = root.join("daily_manifest.json");
-    let instruments: BTreeSet<String> = if r.files.contains_key(&manifest) {
+    let instruments: BTreeSet<String> = if r.contains(&manifest) {
         let value = r.metadata(&manifest)?;
         serde_json::from_value(value["instruments"].clone())?
     } else {
@@ -93,7 +93,7 @@ pub(super) fn market(r: &mut Registry<'_>, root: &Path) -> Result<Vec<PathBuf>> 
     ] {
         let package = root.join(name);
         let manifest = package.join("manifest.json");
-        if !r.files.contains_key(&manifest) {
+        if !r.contains(&manifest) {
             continue;
         }
         let value = r.metadata(&manifest)?;
@@ -111,7 +111,7 @@ pub(super) fn market(r: &mut Registry<'_>, root: &Path) -> Result<Vec<PathBuf>> 
         } else if name == "three_factor_build" {
             paths.extend([package.join("inputs.json"), package.join("report.json")]);
             let fundamentals = package.join("fundamentals.json");
-            if r.files.contains_key(&fundamentals) {
+            if r.contains(&fundamentals) {
                 let value = r.metadata(&fundamentals)?;
                 paths.extend(super::inventory::evidence_members(
                     r,

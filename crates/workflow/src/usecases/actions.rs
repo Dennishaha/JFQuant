@@ -115,5 +115,14 @@ pub(super) fn execute(
         }
         _ => unreachable!("domain dispatcher mismatch"),
     }
+    if let Some(data) = &data {
+        crate::storage_management::publish_evidence(
+            w,
+            &w.resolve(&data.path),
+            Some(data),
+            run,
+            context,
+        )?;
+    }
     Ok(WorkflowOutcome { data, details })
 }

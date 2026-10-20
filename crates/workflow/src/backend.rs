@@ -543,8 +543,8 @@ impl Worker {
                     if matches!(
                         &*request,
                         crate::WorkflowRequest::Storage {
-                            request: crate::storage_management::StorageRequest::Apply { .. }
-                        }
+                            request
+                        } if request.exclusive()
                     ) {
                         worker.query_sessions.clear();
                         worker.query = QuerySession::new(worker.root.clone());
@@ -561,10 +561,20 @@ impl Worker {
                     }
                     worker.active_record = Some(record.clone());
                     let context = worker.context(task, cancel);
-                    worker.outcome = Some(
-                        crate::execute(&workspace, &request, &record, &context)
-                            .map_err(|e| e.to_string())?,
-                    );
+                    let outcome = crate::execute(&workspace, &request, &record, &context);
+                    if outcome.is_err()
+                        && let Err(recovery) = crate::storage_management::recover(&workspace)
+                    {
+                        let message = format!(
+                            "storage_recovery_pending: {recovery}；修复后重启服务以完成恢复"
+                        );
+                        worker.stop_reason = Some(message.clone());
+                        worker.emit(WorkerEvent::Unavailable {
+                            message: message.clone(),
+                        });
+                        return Err(message);
+                    }
+                    worker.outcome = Some(outcome.map_err(|e| e.to_string())?);
                     Ok(())
                 });
             }

@@ -16,10 +16,16 @@ pub mod bigquant;
 pub mod collector;
 pub mod corporate_actions;
 pub mod daily;
+/// Shared immutable evidence and original-byte filesystem views.
+pub mod evidence_store;
 pub mod hithink;
+/// Rebuildable SQLite records, owned by the calling worker.
+pub mod index;
 pub mod membership_history;
 pub mod membership_history_material;
 pub mod msci;
+/// Production Parquet encoding without schema changes.
+pub mod parquet_options;
 pub mod qlib;
 pub mod tdx_status;
 pub mod three_factor;

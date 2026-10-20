@@ -328,8 +328,12 @@ pub(super) fn matrix(
     let schema = Arc::new(Schema::new(fields));
     let batch =
         RecordBatch::try_new(schema.clone(), arrays).map_err(|e| MlError::Native(e.to_string()))?;
-    let mut writer = parquet::arrow::ArrowWriter::try_new(fs::File::create(path)?, schema, None)
-        .map_err(|e| MlError::Native(e.to_string()))?;
+    let mut writer = parquet::arrow::ArrowWriter::try_new(
+        fs::File::create(path)?,
+        schema,
+        Some(analytics_storage::parquet_options::writer_properties()),
+    )
+    .map_err(|e| MlError::Native(e.to_string()))?;
     writer
         .write(&batch)
         .map_err(|e| MlError::Native(e.to_string()))?;

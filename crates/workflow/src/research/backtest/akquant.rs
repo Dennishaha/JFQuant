@@ -40,7 +40,11 @@ pub(super) fn table(path: &Path, names: &[&str], columns: Vec<ArrayRef>) -> Resu
             .collect::<Vec<_>>(),
     ));
     let batch = RecordBatch::try_new(schema.clone(), columns)?;
-    let mut w = parquet::arrow::ArrowWriter::try_new(fs::File::create(path)?, schema, None)?;
+    let mut w = parquet::arrow::ArrowWriter::try_new(
+        fs::File::create(path)?,
+        schema,
+        Some(analytics_storage::parquet_options::writer_properties()),
+    )?;
     w.write(&batch)?;
     w.close()?;
     Ok(())

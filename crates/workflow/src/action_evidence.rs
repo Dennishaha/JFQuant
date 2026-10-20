@@ -4,9 +4,10 @@ use crate::{
 };
 use analytics_core::task::TaskContext;
 use analytics_storage::corporate_actions::{ActionBundle, evidence, review};
+use analytics_storage::evidence_store::io_fs as fs;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{fs, path::PathBuf};
+use std::path::PathBuf;
 use uuid::Uuid;
 mod checklist;
 pub(crate) mod status;
@@ -257,7 +258,15 @@ pub(crate) fn execute(
             json!({"schema_version":1,"status_only":true,"corporate_action_terms_unchanged":true,"source_task":task})
         }
         EvidenceRequest::Capture { request } => {
-            evidence::capture(request, &root.join("captured"), context)?
+            let report = evidence::capture(request, &root.join("captured"), context)?;
+            crate::storage_management::publish_evidence(
+                w,
+                &root.join("captured/announcements.json"),
+                None,
+                run,
+                context,
+            )?;
+            report
         }
         EvidenceRequest::Combine { manifests } => {
             let paths = manifests
@@ -265,7 +274,15 @@ pub(crate) fn execute(
                 .cloned()
                 .map(|p| evidence_path(w, p))
                 .collect::<Result<Vec<_>>>()?;
-            evidence::combine(&paths, &root.join("combined"))?
+            let report = evidence::combine(&paths, &root.join("combined"))?;
+            crate::storage_management::publish_evidence(
+                w,
+                &root.join("combined/announcements.json"),
+                None,
+                run,
+                context,
+            )?;
+            report
         }
         EvidenceRequest::Retry { task } => {
             let original = retry_request(w, *task)?;
@@ -296,6 +313,13 @@ pub(crate) fn execute(
                 } else {
                     evidence::recover_announcements(&source, &output)?;
                 }
+                crate::storage_management::publish_evidence(
+                    w,
+                    &output.join("announcements.json"),
+                    None,
+                    run,
+                    context,
+                )?;
                 "announcements"
             };
             let record: Value = serde_json::from_slice(&fs::read(
@@ -400,7 +424,7 @@ pub(crate) fn execute(
                     .unwrap()
                     .join("raw")
                     .join(format!("{id}-actions-structured.json"));
-                if path.is_file() {
+                if analytics_storage::evidence_store::is_file(&path)? {
                     let shard: Value = serde_json::from_slice(&fs::read(path)?)?;
                     if shard["instrument"] == *id
                         && shard["evidence"]["pagination_complete"] == true
@@ -446,7 +470,16 @@ pub(crate) fn execute(
                     &draft,
                     &root.join("validated-preview"),
                 ) {
-                    Ok(_) => json!({"ready":true}),
+                    Ok(_) => {
+                        crate::storage_management::publish_evidence(
+                            w,
+                            &root.join("validated-preview/actions.json"),
+                            None,
+                            run,
+                            context,
+                        )?;
+                        json!({"ready":true})
+                    }
                     Err(e) => json!({"ready":false,"error":e.to_string()}),
                 }
             } else {
@@ -460,6 +493,15 @@ pub(crate) fn execute(
         }
     };
     atomic_json(&root.join("evidence-report.json"), &details)?;
+    if let Some(data) = &data {
+        crate::storage_management::publish_evidence(
+            w,
+            &w.resolve(&data.path),
+            Some(data),
+            run,
+            context,
+        )?;
+    }
     Ok(WorkflowOutcome { data, details })
 }
 

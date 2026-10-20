@@ -9,28 +9,12 @@ pub use participants::{Participant, Participants};
 use std::path::PathBuf;
 pub use validation::{Diagnostic, validate_proposal};
 fn inherit_acquisition(source: &Path, output: &Path) -> io::Result<()> {
-    fn copy(source: &Path, output: &Path) -> io::Result<()> {
-        fs::create_dir(output)?;
-        for entry in fs::read_dir(source)? {
-            task_context_check()?;
-            let entry = entry?;
-            let ty = entry.file_type()?;
-            if ty.is_dir() {
-                copy(&entry.path(), &output.join(entry.file_name()))?;
-            } else if ty.is_file() {
-                fs::copy(entry.path(), output.join(entry.file_name()))?;
-            } else {
-                return Err(invalid("acquisition evidence cannot contain links"));
-            }
-        }
-        Ok(())
-    }
     let bytes = fs::read(source.join("raw/source-evidence-sha256.json"))?;
     let expected: String = serde_json::from_slice(&bytes).map_err(invalid)?;
     if crate::market_view::tree_hash(&source.join("source-evidence"))? != expected {
         return Err(invalid("source acquisition evidence changed"));
     }
-    copy(
+    crate::evidence_store::copy_tree(
         &source.join("source-evidence"),
         &output.join("source-evidence"),
     )?;

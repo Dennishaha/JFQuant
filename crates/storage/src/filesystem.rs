@@ -46,6 +46,8 @@ impl FileStamp {
         }
     }
 }
+
+impl crate::index::CacheRecord for FileStamp {}
 /// A physical directory entry, relative to the inventory root.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileEntry {

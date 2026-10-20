@@ -21,6 +21,8 @@ pub mod evidence_store;
 pub mod hithink;
 /// Rebuildable SQLite records, owned by the calling worker.
 pub mod index;
+/// Extended manifest metadata for efficient storage queries.
+pub mod manifest_metadata;
 pub mod membership_history;
 pub mod membership_history_material;
 pub mod msci;

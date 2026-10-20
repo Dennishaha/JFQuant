@@ -337,6 +337,56 @@ impl Index {
         }
         Ok(out)
     }
+
+    /// Import resource metadata from a manifest inventory without filesystem scanning.
+    /// This enables fast index updates when producers record metadata at publication time.
+    pub fn import_from_inventory(
+        &self,
+        scan: &str,
+        resource_id: &str,
+        category: &str,
+        inventory: &crate::manifest_metadata::ManifestInventory,
+    ) -> io::Result<()> {
+        inventory.validate()?;
+
+        // Import each file into the records table
+        let files_map = self.table::<crate::filesystem::FileStamp>(scan, "files");
+        for (path, metadata) in &inventory.files {
+            let stamp = crate::filesystem::FileStamp {
+                device: 0, // Placeholder, will be filled during full verification
+                inode: 0,  // Placeholder, will be filled during full verification
+                bytes: metadata.bytes,
+                allocated: metadata.allocated,
+                links: 1,
+                modified: metadata.modified,
+                changed: metadata.modified, // Use same as modified
+            };
+            files_map.insert(path, &stamp)?;
+
+            // Record ownership
+            self.owners(scan, path, &[resource_id.to_string()])?;
+        }
+
+        // Register the resource
+        self.resource(
+            scan,
+            ResourceKey {
+                id: resource_id,
+                category,
+                task: None,
+                modified: &inventory.created_at,
+                size: inventory.total_bytes,
+            },
+            &serde_json::json!({
+                "from_inventory": true,
+                "files_count": inventory.files.len(),
+                "total_bytes": inventory.total_bytes,
+                "total_allocated": inventory.total_allocated,
+            }),
+        )?;
+
+        Ok(())
+    }
 }
 
 pub struct DiskMap<T> {
@@ -717,5 +767,67 @@ mod tests {
         assert!(files.get(Path::new("missing")).is_none());
         assert!(index.check().is_err());
         assert!(index.complete("s").is_err());
+    }
+
+    #[test]
+    fn storage_sqlite_imports_from_manifest_inventory() {
+        use crate::manifest_metadata::{FileMetadata, ManifestInventory};
+        use std::collections::BTreeMap;
+
+        let temp = tempfile::tempdir().unwrap();
+        let index = Index::open(&temp.path().join("index.sqlite")).unwrap();
+
+        // Create a sample inventory
+        let mut files = BTreeMap::new();
+        files.insert(
+            PathBuf::from("data/predictions/fold_1.parquet"),
+            FileMetadata {
+                bytes: 1024,
+                allocated: 4096,
+                modified: (1700000000, 0),
+                sha256: Some("sha256:abc123".into()),
+            },
+        );
+        files.insert(
+            PathBuf::from("data/predictions/fold_2.parquet"),
+            FileMetadata {
+                bytes: 2048,
+                allocated: 4096,
+                modified: (1700000001, 0),
+                sha256: Some("sha256:def456".into()),
+            },
+        );
+
+        let inventory = ManifestInventory::new("predictions", files.clone());
+
+        // Import into index
+        index.begin("scan1").unwrap();
+        index
+            .import_from_inventory("scan1", "resource-123", "predictions", &inventory)
+            .unwrap();
+        index.complete("scan1").unwrap();
+
+        // Verify resource was registered
+        let resources: Vec<serde_json::Value> = index
+            .resources("scan1", Some("predictions"), None, None, false)
+            .unwrap();
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0]["from_inventory"], true);
+        assert_eq!(resources[0]["files_count"], 2);
+        assert_eq!(resources[0]["total_bytes"], 3072);
+
+        // Verify files were imported
+        let files_map = index.table::<crate::filesystem::FileStamp>("scan1", "files");
+        assert_eq!(files_map.keys().count(), 2);
+        let stamp = files_map
+            .get(Path::new("data/predictions/fold_1.parquet"))
+            .unwrap();
+        assert_eq!(stamp.bytes, 1024);
+        assert_eq!(stamp.allocated, 4096);
+
+        // Verify ownership
+        let selected: Vec<crate::filesystem::FileStamp> =
+            index.selected("scan1", &["resource-123".into()]).unwrap();
+        assert_eq!(selected.len(), 2);
     }
 }

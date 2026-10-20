@@ -26,6 +26,14 @@ HiThink 为默认主源，由 Rust 直接调用 REST；通达信备用，维持�
 
 `filesystem::{inventory, FileStamp, available_bytes}` 提供不跟随符号链接的元数据盘点、文件身份、逻辑与分配空间，以及磁盘可用容量。扫描保留权限和跨挂载点诊断，不把未读内容当作零占用；不读取行情内容、不执行删除。分类、依赖和清理事务由 [工作流存储管理](../workflow/src/storage_management/README.md) 负责。验收：`DUCKDB_DOWNLOAD_LIB=1 cargo test -p analytics-workflow storage_ --lib`。
 
+## Manifest Inventory 与索引增量更新
+
+`manifest_metadata::{ManifestInventory, FileMetadata}` 在数据版本 manifest 中保存文件元数据（字节数、分配空间、修改时间、SHA-256），避免在索引构建时重新扫描已发布的数据。发布流程在写入对象时记录 inventory，存储管理扫描时从 manifest 读取而非重复扫描文件系统。
+
+`index::Index::import_from_inventory` 从 manifest inventory 快速导入资源记录，跳过文件系统扫描和重复哈希计算。索引构建使用 `from_inventory=true` 标记快速导入的资源，保持与完整扫描的结果一致性。
+
+验收：`cargo test -p analytics-storage manifest_metadata --lib` 和 `cargo test -p analytics-storage storage_sqlite_imports_from_manifest_inventory --lib`。
+
 ## MSCI 官方收盘适配器
 
 `msci::{validate, calendar, collect, signature}` 是 Rust 原生固定来源接口。映射 `msci` 必须等于六位官方代码，仅支持显式 CNY 价格指数；不接受任意 URL、脚本或自动换源。响应代码、币种、STRD、日期和数值均核验，原始 JSON 与收据哈希进入快照。

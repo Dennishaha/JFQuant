@@ -1,0 +1,26 @@
+#!/bin/sh
+# Pre-commit hook: Check formatting before commit
+set -e
+
+echo "🔍 Running format checks..."
+
+# Check Rust formatting
+if ! cargo fmt --all -- --check; then
+    echo "❌ Rust formatting check failed"
+    echo "💡 Run 'cargo fmt --all' to fix formatting"
+    exit 1
+fi
+
+# Check Python formatting (collectors only, non-blocking)
+if [ -d "crates/storage/collectors" ]; then
+    cd crates/storage/collectors
+    if command -v ruff >/dev/null 2>&1; then
+        if ! python3 -m ruff format --check . 2>/dev/null; then
+            echo "⚠️  Python formatting issues detected (non-blocking)"
+            echo "💡 Run 'ruff format crates/storage/collectors' to fix"
+        fi
+    fi
+    cd ../../..
+fi
+
+echo "✅ Format checks passed"

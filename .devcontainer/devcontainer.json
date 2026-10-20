@@ -1,0 +1,62 @@
+{
+  "name": "JFQuant Development",
+  "build": {
+    "dockerfile": "../Dockerfile.dev",
+    "context": ".."
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "vadimcn.vscode-lldb",
+        "tamasfe.even-better-toml",
+        "serayuzgur.crates",
+        "charliermarsh.ruff",
+        "ms-python.python"
+      ],
+      "settings": {
+        "rust-analyzer.check.command": "clippy",
+        "rust-analyzer.check.extraArgs": [
+          "--workspace",
+          "--all-targets",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "rust-analyzer.cargo.features": "all",
+        "lldb.server": "/usr/bin/lldb-server",
+        "files.exclude": {
+          "**/target": true,
+          "**/.jfquant": true
+        },
+        "python.defaultInterpreterPath": "target/collector-build/python/bin/python3",
+        "[rust]": {
+          "editor.defaultFormatter": "rust-lang.rust-analyzer",
+          "editor.formatOnSave": true
+        },
+        "[python]": {
+          "editor.defaultFormatter": "charliermarsh.ruff",
+          "editor.formatOnSave": true
+        }
+      }
+    }
+  },
+  "mounts": [
+    "source=${localWorkspaceFolder}/.jfquant,target=/workspaces/JFQuant/.jfquant,type=bind,consistency=cached"
+  ],
+  "containerEnv": {
+    "DUCKDB_DOWNLOAD_LIB": "1",
+    "RUST_BACKTRACE": "1"
+  },
+  "postCreateCommand": "cargo fetch && bash scripts/install-hooks.sh",
+  "remoteUser": "vscode",
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:2": {
+      "installZsh": true,
+      "installOhMyZsh": true,
+      "username": "vscode",
+      "userUid": "1000",
+      "userGid": "1000"
+    }
+  }
+}

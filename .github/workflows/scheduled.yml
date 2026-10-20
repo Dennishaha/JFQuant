@@ -1,0 +1,62 @@
+name: Scheduled Build
+
+on:
+  schedule:
+    # Run daily at 00:00 UTC (08:00 Beijing Time)
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+env:
+  RUST_BACKTRACE: 1
+  DUCKDB_DOWNLOAD_LIB: 1
+
+jobs:
+  nightly-build:
+    name: Nightly Full Build
+    runs-on: macos-14
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@cargo-nextest
+
+      - name: Run full acceptance suite
+        run: bash crates/workflow/checks/acceptance.sh
+
+      - name: Test build scripts
+        run: |
+          echo "Testing build-collector.sh..."
+          bash crates/app/packaging/build-collector.sh
+
+          echo "Testing build-native.sh..."
+          bash crates/app/packaging/build-native.sh
+
+      - name: Verify golden tests
+        run: cargo nextest run -p analytics-factor --test-threads 1
+
+      - name: Build summary
+        if: always()
+        run: |
+          echo "## 🌙 Nightly Build Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Date:** $(date '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ ${{ job.status }} == 'success' ]; then
+            echo "✅ All checks passed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Some checks failed - see logs above" >> $GITHUB_STEP_SUMMARY
+          fi

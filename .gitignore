@@ -15,3 +15,11 @@ __pycache__/
 *.pyc
 .ruff_cache/
 .venv/
+
+# Code coverage reports
+lcov.info
+coverage-html/
+
+# Test artifacts
+junit.xml
+

@@ -1,0 +1,44 @@
+FROM rust:1-bookworm
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    python3.12 \
+    python3.12-venv \
+    python3-pip \
+    cmake \
+    ninja-build \
+    lldb \
+    git \
+    curl \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv (Python package manager)
+RUN pip3 install uv --break-system-packages
+
+# Install Rust development tools
+RUN cargo install cargo-nextest cargo-llvm-cov
+
+# Create non-root user
+RUN useradd -ms /bin/bash -u 1000 vscode && \
+    mkdir -p /home/vscode/.cargo && \
+    chown -R vscode:vscode /home/vscode
+
+# Set up workspace directory
+WORKDIR /workspaces/JFQuant
+
+# Switch to non-root user
+USER vscode
+
+# Set up shell environment
+RUN echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc && \
+    echo 'export DUCKDB_DOWNLOAD_LIB=1' >> ~/.bashrc
+
+# Pre-warm Cargo cache (optional, uncomment if needed)
+# COPY --chown=vscode:vscode Cargo.toml Cargo.lock ./
+# RUN mkdir -p crates/core/src && \
+#     echo 'fn main() {}' > crates/core/src/lib.rs && \
+#     cargo fetch && \
+#     rm -rf crates
+
+CMD ["/bin/bash"]

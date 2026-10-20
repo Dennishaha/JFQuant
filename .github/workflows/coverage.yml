@@ -1,0 +1,61 @@
+name: Coverage
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  RUST_BACKTRACE: 1
+  DUCKDB_DOWNLOAD_LIB: 1
+
+jobs:
+  coverage:
+    name: Code Coverage
+    runs-on: macos-14
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate coverage report
+        run: |
+          cargo llvm-cov --workspace --lcov --output-path lcov.info
+          cargo llvm-cov report --html --output-dir coverage-html
+
+      - name: Extract coverage percentage
+        id: coverage
+        run: |
+          COVERAGE=$(cargo llvm-cov report --summary-only | grep "TOTAL" | awk '{print $NF}' | tr -d '%')
+          echo "percentage=$COVERAGE" >> $GITHUB_OUTPUT
+          echo "📊 Total Coverage: $COVERAGE%"
+
+      - name: Upload lcov report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
+
+      - name: Upload HTML report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: coverage-html/
+
+      - name: Add coverage summary
+        run: |
+          echo "## 📊 Code Coverage Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Total Coverage:** ${{ steps.coverage.outputs.percentage }}%" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Download the full HTML report from the artifacts to see detailed line-by-line coverage." >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,32 @@
+#!/bin/sh
+# Pre-push hook: Run clippy and architecture checks before push
+set -e
+
+echo "🔍 Running pre-push checks..."
+
+# Set required environment variable
+export DUCKDB_DOWNLOAD_LIB=1
+
+# Run clippy
+echo "📎 Running clippy..."
+if ! cargo clippy --workspace --all-targets -- -D warnings; then
+    echo "❌ Clippy check failed"
+    exit 1
+fi
+
+# Run architecture validation
+echo "🏗️  Running architecture validation..."
+if ! python3 crates/workflow/checks/architecture.py; then
+    echo "❌ Architecture validation failed"
+    exit 1
+fi
+
+# Run quick tests (optional, can be commented out if too slow)
+# echo "🧪 Running quick tests..."
+# if ! cargo nextest run --workspace --no-fail-fast; then
+#     echo "❌ Tests failed"
+#     exit 1
+# fi
+
+echo "✅ Pre-push checks passed"
+echo "💡 Full CI will run on GitHub after push"

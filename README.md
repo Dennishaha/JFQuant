@@ -2,6 +2,10 @@
 
 # JFQuant Analytics
 
+[![CI Status](https://github.com/Dennishaha/JFQuant/actions/workflows/ci.yml/badge.svg)](https://github.com/Dennishaha/JFQuant/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+![Rust Edition](https://img.shields.io/badge/rust-2024-blue)
+
 macOS 优先的本地量化研究平台。Rust App 和独立 `jfquant` CLI 共用工作区服务：
 数据采集、DuckDB 查询和 GTJA191／Alpha158 因子保留 Rust 实现；Python LightGBM
 负责模型训练与预测，AKQuant 0.3.66 负责连续账户回测。用户无需外部 Python。
@@ -51,13 +55,22 @@ BigQuant 的日频股本保留历史修订风险；PIT财务与XPS试用权限�
 
 ## 使用与构建
 
+**快速开始（推荐使用 DevContainer）：**
 ```bash
-# 开发环境；运行安装包不需要这些工具。
+# 使用 VSCode Dev Container（零配置）
+# 1. 安装 VSCode "Dev Containers" 扩展
+# 2. 打开项目，点击 "Reopen in Container"
+# 3. 所有工具已预装，直接开发
+
+# 或手动配置本地环境：
 crates/app/packaging/build-collector.sh
 export DUCKDB_DOWNLOAD_LIB=1
 cargo build -p analytics-desktop -p analytics-cli
 cargo run -p analytics-desktop
+```
 
+**工作区使用：**
+```bash
 jfquant workspace create "$HOME/JFQuantWorkspace"
 export JFQUANT_WORKSPACE="$HOME/JFQuantWorkspace"
 jfquant research demo
@@ -71,6 +84,17 @@ jfquant jobs results TASK_UUID
 因子、标的和工作流独立保存，研究输入在提交时冻结。协议与产物的权威定义见
 [工作流组件边界](crates/workflow/src/README.md)。旧研究产物归档后重建，保留原始数据、
 证据和用户配置；离线操作见[维护说明](crates/workflow/README.md#架构边界与离线维护)。
+
+## 开发者工具
+
+项目集成了自动化 CI/CD、Git hooks 和开发容器：
+
+- **CI/CD**：自动格式检查、测试、覆盖率报告（每次 PR 和推送）
+- **Git Hooks**：提交前格式检查，推送前 Clippy 验证
+- **DevContainer**：零配置开发环境（Rust + Python + 所有工具）
+- **覆盖率报告**：使用 `cargo llvm-cov --html --open` 查看本地覆盖率
+
+详见 [工程化工具使用指南](docs/ENGINEERING.md)。
 
 ## 回测口径与兼容
 

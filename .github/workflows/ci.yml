@@ -1,0 +1,157 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  RUST_BACKTRACE: 1
+  DUCKDB_DOWNLOAD_LIB: 1
+
+jobs:
+  format-and-lint:
+    name: Format and Lint
+    runs-on: macos-14
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "ci"
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Check Python formatting (collectors)
+        working-directory: crates/storage/collectors
+        run: |
+          uv pip install --system ruff
+          ruff format --check .
+          ruff check .
+
+  test:
+    name: Test Suite
+    runs-on: macos-14
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "ci"
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@cargo-nextest
+
+      - name: Run tests
+        run: cargo nextest run --workspace --profile ci
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: junit.xml
+          if-no-files-found: ignore
+
+  python-tests:
+    name: Python Tests
+    runs-on: macos-14
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache Python environment
+        uses: actions/cache@v4
+        with:
+          path: target/collector-build
+          key: ${{ runner.os }}-python-${{ hashFiles('crates/storage/collectors/requirements.lock', 'crates/app/packaging/build-collector.sh') }}
+          restore-keys: |
+            ${{ runner.os }}-python-
+
+      - name: Build collector Python environment
+        run: bash crates/app/packaging/build-collector.sh
+
+      - name: Run research tests
+        env:
+          PYTHONPATH: crates/workflow/research
+        run: target/collector-build/python/bin/python3 -B -m unittest discover -s crates/workflow/research/tests
+
+      - name: Run collectors tests
+        env:
+          PYTHONPATH: crates/storage/collectors
+        run: target/collector-build/python/bin/python3 -B -m unittest discover -s crates/storage/collectors/tests
+
+  docs:
+    name: Documentation
+    runs-on: macos-14
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "ci"
+
+      - name: Build documentation
+        env:
+          RUSTDOCFLAGS: '-D warnings'
+        run: cargo doc --workspace --no-deps
+
+      - name: Upload documentation
+        uses: actions/upload-artifact@v4
+        with:
+          name: documentation
+          path: target/doc/
+
+  architecture:
+    name: Architecture Validation
+    runs-on: macos-14
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run architecture validation
+        run: python3 crates/workflow/checks/architecture.py
+
+      - name: Run execution dependencies tests
+        run: python3 -B -m unittest discover -s crates/workflow/checks -p 'test_execution_dependencies.py'

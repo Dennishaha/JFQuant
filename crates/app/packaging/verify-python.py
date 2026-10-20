@@ -42,7 +42,9 @@ def verify_load_commands(file, root, load, dependencies):
             return inside(root / "bin" / name.removeprefix("@executable_path/"), root)
         raise RuntimeError(f"unsupported Python runtime path: {file}: {name}")
 
-    search_paths = [relative(path if path.endswith("/") else path + "/") for path in rpaths]
+    search_paths = [
+        relative(path if path.endswith("/") else path + "/") for path in rpaths
+    ]
     for index, name in enumerate(dependencies):
         # otool lists LC_ID_DYLIB first; its spelling is not a dependency target.
         if index == 0 and "cmd LC_ID_DYLIB" in load:
@@ -57,6 +59,35 @@ def verify_load_commands(file, root, load, dependencies):
             candidates = [relative(name)]
         if not any(path.is_file() for path in candidates):
             raise RuntimeError(f"missing package dependency: {file}: {name}")
+
+
+def _otool_args(architecture):
+    return [] if architecture == "thin" else ["-arch", "arm64"]
+
+
+def _verify_architecture(file):
+    """Return the otool mode after checking that *file* contains arm64 code.
+
+    Some macOS runner images ship a ``lipo`` that rejects thin Mach-O files
+    extracted from the standalone CPython archive. ``file`` still reports
+    the architecture reliably, and plain ``otool`` can inspect that thin
+    slice, so use it as a strict fallback instead of dropping every native
+    object from the audit.
+    """
+    try:
+        subprocess.run(
+            ["/usr/bin/lipo", "-verify_arch", "arm64", str(file)],
+            check=True,
+            capture_output=True,
+        )
+        return "arm64"
+    except subprocess.CalledProcessError:
+        description = subprocess.check_output(
+            ["/usr/bin/file", "-b", str(file)], text=True
+        ).lower()
+        if re.search(r"\barm64(?:e)?\b", description):
+            return "thin"
+        raise
 
 
 def audit(root):
@@ -75,31 +106,29 @@ def audit(root):
             magic = stream.read(4)
         if magic not in MACHO_MAGIC:
             continue
-        # Skip files that lipo cannot process (e.g., non-standard Mach-O formats)
         try:
-            subprocess.run(
-                ["/usr/bin/lipo", "-verify_arch", "arm64", str(file)],
-                check=True,
-                capture_output=True,
-            )
-        except subprocess.CalledProcessError:
-            # File has Mach-O magic but lipo can't verify it; skip verification
+            architecture = _verify_architecture(file)
+        except (subprocess.CalledProcessError, subprocess.SubprocessError):
             skipped.append(str(file.relative_to(root)))
             continue
         load = subprocess.check_output(
-            ["/usr/bin/otool", "-arch", "arm64", "-l", str(file)], text=True
+            ["/usr/bin/otool", *_otool_args(architecture), "-l", str(file)],
+            text=True,
         )
         dependencies = [
             line.strip().split(" (", 1)[0]
             for line in subprocess.check_output(
-                ["/usr/bin/otool", "-arch", "arm64", "-L", str(file)], text=True
+                ["/usr/bin/otool", *_otool_args(architecture), "-L", str(file)],
+                text=True,
             ).splitlines()[1:]
         ]
         verify_load_commands(file, root, load, dependencies)
         machos.append(str(file.relative_to(root)))
     if not machos:
         if skipped:
-            raise RuntimeError(f"no valid Python Mach-O objects found (skipped {len(skipped)} unverifiable files: {', '.join(skipped[:5])})")
+            raise RuntimeError(
+                f"no valid Python Mach-O objects found (skipped {len(skipped)} unverifiable files: {', '.join(skipped[:5])})"
+            )
         raise RuntimeError("no Python Mach-O objects found")
     return machos
 

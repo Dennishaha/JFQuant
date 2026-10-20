@@ -190,9 +190,9 @@ jobs:
           path: |
             ~/.cache/pip
             target/collector-build
-          key: ${{ runner.os }}-python-${{ hashFiles('**/requirements*.txt', '**/requirements*.lock') }}
+          key: ${{ runner.os }}-collector-${{ hashFiles('crates/storage/collectors/requirements.lock', 'crates/workflow/research/requirements.lock', 'crates/storage/collectors/python-runtime.lock.json', 'crates/app/packaging/build-collector.sh', 'crates/app/packaging/build-akquant.sh', 'crates/app/packaging/build-native.sh', 'crates/app/packaging/rewrite-python.py', 'crates/app/packaging/verify-python.py') }}
           restore-keys: |
-            ${{ runner.os }}-python-
+            ${{ runner.os }}-collector-
 
       - name: Install uv
         run: curl -LsSf https://astral.sh/uv/install.sh | sh

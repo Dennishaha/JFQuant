@@ -28,8 +28,19 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: Add uv to PATH
+        run: echo "$HOME/.local/bin" >> $GITHUB_PATH
+
       - name: Build collector Python environment
-        run: ./crates/storage/collectors/build-collector.sh
+        run: bash crates/app/packaging/build-collector.sh
 
       - name: Generate coverage report
         run: |

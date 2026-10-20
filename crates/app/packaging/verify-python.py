@@ -62,6 +62,7 @@ def verify_load_commands(file, root, load, dependencies):
 def audit(root):
     root = root.resolve()
     machos = []
+    skipped = []
     for file in root.rglob("*"):
         if file.is_symlink():
             inside(file, root)
@@ -83,6 +84,7 @@ def audit(root):
             )
         except subprocess.CalledProcessError:
             # File has Mach-O magic but lipo can't verify it; skip verification
+            skipped.append(str(file.relative_to(root)))
             continue
         load = subprocess.check_output(
             ["/usr/bin/otool", "-arch", "arm64", "-l", str(file)], text=True
@@ -96,6 +98,8 @@ def audit(root):
         verify_load_commands(file, root, load, dependencies)
         machos.append(str(file.relative_to(root)))
     if not machos:
+        if skipped:
+            raise RuntimeError(f"no valid Python Mach-O objects found (skipped {len(skipped)} unverifiable files: {', '.join(skipped[:5])})")
         raise RuntimeError("no Python Mach-O objects found")
     return machos
 

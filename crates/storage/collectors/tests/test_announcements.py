@@ -60,10 +60,13 @@ class AnnouncementTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     security_identity(symbol)
         for org in ("GD14107", "GD014107-extra", "GD/014107", "gd014107"):
-            with patch(
-                "jfquant_collectors.announcements.security_directory",
-                return_value=[{**row, "orgId": org}],
-            ), self.assertRaises(ValueError):
+            with (
+                patch(
+                    "jfquant_collectors.announcements.security_directory",
+                    return_value=[{**row, "orgId": org}],
+                ),
+                self.assertRaises(ValueError),
+            ):
                 security_identity("SZ001979")
 
     def test_page_drift_requires_all_unique_ids_and_conflicts_remain_errors(self):

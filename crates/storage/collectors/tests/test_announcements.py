@@ -63,9 +63,8 @@ class AnnouncementTests(unittest.TestCase):
             with patch(
                 "jfquant_collectors.announcements.security_directory",
                 return_value=[{**row, "orgId": org}],
-            ):
-                with self.assertRaises(ValueError):
-                    security_identity("SZ001979")
+            ), self.assertRaises(ValueError):
+                security_identity("SZ001979")
 
     def test_page_drift_requires_all_unique_ids_and_conflicts_remain_errors(self):
         def row(i):

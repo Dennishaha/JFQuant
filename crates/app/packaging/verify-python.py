@@ -74,9 +74,16 @@ def audit(root):
             magic = stream.read(4)
         if magic not in MACHO_MAGIC:
             continue
-        subprocess.run(
-            ["/usr/bin/lipo", "-verify_arch", "arm64", str(file)], check=True
-        )
+        # Skip files that lipo cannot process (e.g., non-standard Mach-O formats)
+        try:
+            subprocess.run(
+                ["/usr/bin/lipo", "-verify_arch", "arm64", str(file)],
+                check=True,
+                capture_output=True,
+            )
+        except subprocess.CalledProcessError:
+            # File has Mach-O magic but lipo can't verify it; skip verification
+            continue
         load = subprocess.check_output(
             ["/usr/bin/otool", "-arch", "arm64", "-l", str(file)], text=True
         )

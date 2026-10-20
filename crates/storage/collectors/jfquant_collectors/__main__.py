@@ -15,8 +15,7 @@ from .announcements import collect as announcements
 from .evidence import EvidenceCapture
 from .reconcile import replay
 from .tdx import collect as tdx_collect
-from .tdx import reference
-from .tdx import fundamentals
+from .tdx import fundamentals, reference
 
 
 def main():

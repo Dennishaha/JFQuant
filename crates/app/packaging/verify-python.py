@@ -47,7 +47,11 @@ def verify_load_commands(file, root, load, dependencies):
     ]
     for index, name in enumerate(dependencies):
         # otool lists LC_ID_DYLIB first; its spelling is not a dependency target.
-        if index == 0 and "cmd LC_ID_DYLIB" in load:
+        own_path = Path(name)
+        if index == 0 and (
+            "cmd LC_ID_DYLIB" in load
+            or (own_path.is_absolute() and own_path.resolve() == file.resolve())
+        ):
             continue
         if name.startswith(("/usr/lib/", "/System/Library/")):
             continue

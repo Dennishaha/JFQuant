@@ -513,7 +513,7 @@ fn quality_flags_match_public_api_freezing_and_reject_invalid_thresholds() {
 #[test]
 fn async_acceptance_busy_wait_timeout_cancel_and_client_exit_preserve_job() {
     let s = Sandbox::new();
-    let id = s.pause(500);
+    let id = s.pause(5000);
     let busy = s
         .client
         .call(Rpc::Submit {

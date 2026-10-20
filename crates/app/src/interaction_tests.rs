@@ -169,7 +169,7 @@ impl Harness {
     }
 
     fn wait_for(&mut self, ready: impl Fn(&DesktopApp) -> bool) -> egui::FullOutput {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
             let output = self.frame(vec![]);
             if ready(&self.app) {

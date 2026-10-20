@@ -296,7 +296,9 @@ class CombinedTests(unittest.TestCase):
                     "weights": {symbol: 0.98},
                 }
             ]
-            sources.append({"id": str(i), "reference": {"rows": rows}, "targets": targets})
+            sources.append(
+                {"id": str(i), "reference": {"rows": rows}, "targets": targets}
+            )
         plan = {"execution": {"rebalance_days": 5, "allocation": config()}}
         return CombinedAllocator(
             plan, sources, calendar, threading.Event(), 0.98

@@ -478,7 +478,8 @@ class StockHistory:
                         f"allocation_calibration_label_gap: {self.calendar[i]}:{s}"
                     )
                 excluded[s] = {
-                    "reason": "verified_suspension", "endpoints": list(endpoints)
+                    "reason": "verified_suspension",
+                    "endpoints": list(endpoints),
                 }
             if len(pairs) < self.config["calibration_min_pairs"]:
                 records.append(

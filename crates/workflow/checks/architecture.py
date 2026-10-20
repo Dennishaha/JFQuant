@@ -54,7 +54,9 @@ if "Box<Worker>" in (ROOT / "crates/workflow/src/backend.rs").read_text():
 def long_functions(text):
     text = re.split(r"#\[cfg\(test\)\]\s*mod\s", text)[0]
     starts = list(
-        re.finditer(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)", text, re.MULTILINE)
+        re.finditer(
+            r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)", text, re.MULTILINE
+        )
     )
     return {
         m[1]: text[

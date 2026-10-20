@@ -59,7 +59,9 @@ def _backtest(request, cancelled, emit):
                 decisions[journal_count:], targets[journal_count:]
             ):
                 journal.write(
-                    json.dumps({"decision": decision, "target": target}, allow_nan=False)
+                    json.dumps(
+                        {"decision": decision, "target": target}, allow_nan=False
+                    )
                     + "\n"
                 )
                 journal_count += 1
@@ -195,7 +197,11 @@ def _backtest(request, cancelled, emit):
                 else:
                     weights = {}
                 warmup_targets.append(
-                    {"date": date, "effective_date": next_date.get(date), "weights": weights}
+                    {
+                        "date": date,
+                        "effective_date": next_date.get(date),
+                        "weights": weights,
+                    }
                 )
                 warmup_decisions.append(
                     {
@@ -218,7 +224,9 @@ def _backtest(request, cancelled, emit):
                 if kept != last_warmup_target:
                     warmup_targets.append(
                         {
-                            "date": date, "effective_date": next_date.get(date), "weights": kept
+                            "date": date,
+                            "effective_date": next_date.get(date),
+                            "weights": kept,
                         }
                     )
                     warmup_decisions.append(

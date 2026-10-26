@@ -1,4 +1,4 @@
 requests==2.34.2
 pandas==3.0.6
-pypdf[image]==6.20.1
+pypdf[image]==6.21.2
 tdxaidata==1.2.2
